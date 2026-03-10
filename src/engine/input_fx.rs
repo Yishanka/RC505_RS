@@ -1,0 +1,413 @@
+use std::time::Instant;
+
+use crate::config::envelope_configs::{
+    ENVELOPE_ATTACK_MAX_MS, ENVELOPE_DECAY_MAX_MS, ENVELOPE_HOLD_MAX_MS, ENVELOPE_RELEASE_MAX_MS,
+    ENVELOPE_RELEASE_MIN_MS, ENVELOPE_START_MAX_PCT, ENVELOPE_SUSTAIN_MAX_PCT, ENVELOPE_TENSION_MAX,
+};
+use crate::config::filter_configs::{
+    FILTER_CUTOFF_MAX_HZ, FILTER_CUTOFF_MIN_HZ, FILTER_DRIVE_MAX, FILTER_MIX_MAX, FILTER_Q_MAX_X10,
+    FILTER_Q_MIN_X10, FilterType,
+};
+use crate::config::note_configs::NoteOct;
+use crate::config::osc_configs::Waveform;
+use crate::config::{input_fx_configs::FX_BANK_COUNT, input_fx_configs::FX_SLOT_COUNT, InputFx, InputFxConfig};
+use crate::dsp::envelope::AhdsrParams;
+use crate::dsp::filter::{process_sample as process_filter_sample, FilterDspState, FilterParams};
+use crate::dsp::oscillator::{
+    default_note, note_at_time, process_sample as process_osc_sample, seq_bool_at_time, OscillatorDspState,
+};
+
+const DEFAULT_BPM: usize = 120;
+
+#[derive(Clone)]
+pub struct OscillatorRuntime {
+    pub waveform: Waveform,
+    pub level: f32,
+    pub note_seq: Vec<Option<NoteOct>>,
+    pub note_on_seq: Vec<bool>,
+    pub note_trigger_seq: Vec<bool>,
+    pub threshold: f32,
+    pub envelope: AhdsrParams,
+    pub osc_filter: FilterRuntime,
+    pub osc_filter_envelope: AhdsrParams,
+}
+
+#[derive(Clone, Copy)]
+pub struct FilterRuntime {
+    pub filter_type: FilterType,
+    pub cutoff_hz: f32,
+    pub q: f32,
+    pub drive: f32,
+    pub mix: f32,
+}
+
+#[derive(Clone)]
+pub struct FxSlotRuntime {
+    pub enabled: bool,
+    pub osc: Option<OscillatorRuntime>,
+    pub filter: Option<FilterRuntime>,
+}
+
+#[derive(Clone)]
+pub struct FxSlotState {
+    pub osc: OscillatorDspState,
+    pub osc_filter_env: crate::dsp::envelope::AhdsrState,
+    pub osc_filter: FilterDspState,
+    pub filter: FilterDspState,
+}
+
+#[derive(Clone)]
+pub struct FxBankRuntime {
+    pub slots: [FxSlotRuntime; FX_SLOT_COUNT],
+}
+
+#[derive(Clone)]
+pub struct FxBankState {
+    pub slots: [FxSlotState; FX_SLOT_COUNT],
+}
+
+#[derive(Clone)]
+pub struct InputFxRuntime {
+    pub banks: [FxBankRuntime; FX_BANK_COUNT],
+    pub selected_bank_idx: usize,
+}
+
+#[derive(Clone)]
+pub struct InputFxState {
+    pub banks: [FxBankState; FX_BANK_COUNT],
+}
+
+pub struct InputFxEngine {
+    runtime: InputFxRuntime,
+    state: InputFxState,
+    metronome_start: Option<Instant>,
+    bpm: usize,
+    sample_rate: f32,
+}
+
+impl InputFxEngine {
+    pub fn new(sample_rate: f32) -> Self {
+        Self {
+            runtime: InputFxRuntime::empty(),
+            state: InputFxState::new(),
+            metronome_start: None,
+            bpm: DEFAULT_BPM,
+            sample_rate,
+        }
+    }
+
+    pub fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.sample_rate = sample_rate;
+    }
+
+    pub fn update_metronome(&mut self, start: Option<Instant>, bpm: usize) {
+        self.metronome_start = start;
+        self.bpm = bpm.max(1);
+    }
+
+    pub fn update_from_config(&mut self, config: &InputFxConfig) {
+        self.runtime = InputFxRuntime::from_config(config);
+    }
+
+    pub fn process_sample(&mut self, elapsed_secs: f64, input: f32) -> f32 {
+        let bank_idx = self.runtime.selected_bank_idx;
+        if bank_idx >= FX_BANK_COUNT {
+            return input;
+        }
+
+        let bank = &self.runtime.banks[bank_idx];
+        let state_bank = &mut self.state.banks[bank_idx];
+        let input_level = input.abs();
+
+        let mut osc_mix = 0.0f32;
+        let mut active_osc_count = 0usize;      
+
+        for idx in 0..FX_SLOT_COUNT {
+            let slot = &bank.slots[idx];
+            if !slot.enabled {
+                continue;
+            }
+            let Some(osc) = slot.osc.as_ref() else {
+                continue;
+            };
+            let note = if self.metronome_start.is_none() {
+                Some(default_note())
+            } else {
+                note_at_time(&osc.note_seq, self.bpm, elapsed_secs)
+            };
+            let note_on = if self.metronome_start.is_none() || osc.note_on_seq.is_empty() {
+                true
+            } else {
+                seq_bool_at_time(&osc.note_on_seq, self.bpm, elapsed_secs)
+            };
+            let note_retrigger = if self.metronome_start.is_none() || osc.note_trigger_seq.is_empty() {
+                false
+            } else {
+                seq_bool_at_time(&osc.note_trigger_seq, self.bpm, elapsed_secs)
+            };
+            let osc_sample = process_osc_sample(
+                &mut state_bank.slots[idx].osc,
+                osc.waveform,
+                osc.level,
+                osc.threshold,
+                input_level,
+                self.sample_rate,
+                note,
+                note_on,
+                note_retrigger,
+                osc.envelope,
+            );
+            let gate_on = note_on && input_level >= osc.threshold;
+            let retrigger = note_retrigger && input_level >= osc.threshold;
+            let dt = 1.0 / self.sample_rate.max(1.0);
+            let cutoff_env = state_bank.slots[idx]
+                .osc_filter_env
+                .next(gate_on, retrigger, osc.osc_filter_envelope, dt)
+                .clamp(0.0, 1.0);
+            let cutoff_min = FILTER_CUTOFF_MIN_HZ as f32;
+            let cutoff_max = osc.osc_filter.cutoff_hz.max(cutoff_min);
+            let cutoff_hz = cutoff_min + (cutoff_max - cutoff_min) * cutoff_env;
+            let osc_filtered = process_filter_sample(
+                &mut state_bank.slots[idx].osc_filter,
+                FilterParams {
+                    filter_type: osc.osc_filter.filter_type,
+                    cutoff_hz,
+                    q: osc.osc_filter.q,
+                    drive: osc.osc_filter.drive,
+                    mix: osc.osc_filter.mix,
+                },
+                self.sample_rate,
+                osc_sample,
+            );
+            osc_mix += osc_filtered;
+            active_osc_count += 1;
+        }
+
+        if active_osc_count > 1 {
+            // Use conservative bus normalization so stacked oscillators do not hit hard clipping.
+            osc_mix /= active_osc_count as f32;
+        }
+
+        let mut out = (input + osc_mix).clamp(-1.0, 1.0);
+        for idx in 0..FX_SLOT_COUNT {
+            let slot = &bank.slots[idx];
+            if !slot.enabled {
+                continue;
+            }
+            let Some(filter) = slot.filter else {
+                continue;
+            };
+            out = process_filter_sample(
+                &mut state_bank.slots[idx].filter,
+                FilterParams {
+                    filter_type: filter.filter_type,
+                    cutoff_hz: filter.cutoff_hz,
+                    q: filter.q,
+                    drive: filter.drive,
+                    mix: filter.mix,
+                },
+                self.sample_rate,
+                out,
+            );
+        }
+
+        out.clamp(-1.0, 1.0)
+    }
+
+    pub fn metronome_start(&self) -> Option<Instant> {
+        self.metronome_start
+    }
+
+    pub fn sample_rate(&self) -> f32 {
+        self.sample_rate
+    }
+}
+
+impl InputFxRuntime {
+    pub fn empty() -> Self {
+        Self {
+            banks: std::array::from_fn(|_| FxBankRuntime::empty()),
+            selected_bank_idx: 0,
+        }
+    }
+
+    pub fn from_config(config: &InputFxConfig) -> Self {
+        let banks = std::array::from_fn(|bank_idx| {
+            let bank = &config.banks[bank_idx];
+            let slots = std::array::from_fn(|slot_idx| {
+                let slot = &bank.slots[slot_idx];
+                let (osc, filter) = match slot.fx.as_ref() {
+                    Some(InputFx::Oscillator(osc)) => (
+                        Some(OscillatorRuntime {
+                            waveform: osc.waveform.value,
+                            level: (osc.level.value as f32 / 100.0).clamp(0.0, 1.0),
+                            note_seq: osc.note.seq().to_vec(),
+                            note_on_seq: osc.note.seq().iter().map(|n| n.is_some()).collect(),
+                            note_trigger_seq: osc
+                                .note
+                                .step_len_seq()
+                                .iter()
+                                .enumerate()
+                                .map(|(idx, step_len)| *step_len > 0 && osc.note.seq()[idx].is_some())
+                                .collect(),
+                            threshold: (osc.threshold.value as f32 / 100.0).clamp(0.0, 1.0),
+                            envelope: AhdsrParams {
+                                attack_ms: osc.envelope.attack_ms.value.min(ENVELOPE_ATTACK_MAX_MS) as f32,
+                                hold_ms: osc.envelope.hold_ms.value.min(ENVELOPE_HOLD_MAX_MS) as f32,
+                                decay_ms: osc.envelope.decay_ms.value.min(ENVELOPE_DECAY_MAX_MS) as f32,
+                                sustain_level: (osc
+                                    .envelope
+                                    .sustain_pct
+                                    .value
+                                    .min(ENVELOPE_SUSTAIN_MAX_PCT) as f32
+                                    / 100.0)
+                                    .clamp(0.0, 1.0),
+                                release_ms: osc
+                                    .envelope
+                                    .release_ms
+                                    .value
+                                    .clamp(ENVELOPE_RELEASE_MIN_MS, ENVELOPE_RELEASE_MAX_MS)
+                                    as f32,
+                                start_level: (osc
+                                    .envelope
+                                    .start_pct
+                                    .value
+                                    .min(ENVELOPE_START_MAX_PCT) as f32
+                                    / 100.0)
+                                    .clamp(0.0, 1.0),
+                                tension_attack: tension_to_exponent(
+                                    osc.envelope.tension_a.value.min(ENVELOPE_TENSION_MAX),
+                                ),
+                                tension_decay: tension_to_exponent(
+                                    osc.envelope.tension_d.value.min(ENVELOPE_TENSION_MAX),
+                                ),
+                                tension_release: tension_to_exponent(
+                                    osc.envelope.tension_r.value.min(ENVELOPE_TENSION_MAX),
+                                ),
+                            },
+                            osc_filter: FilterRuntime {
+                                filter_type: osc.osc_filter.filter_type.value,
+                                cutoff_hz: osc
+                                    .osc_filter
+                                    .cutoff_hz
+                                    .value
+                                    .clamp(FILTER_CUTOFF_MIN_HZ, FILTER_CUTOFF_MAX_HZ)
+                                    as f32,
+                                q: (osc
+                                    .osc_filter
+                                    .resonance_x10
+                                    .value
+                                    .clamp(FILTER_Q_MIN_X10, FILTER_Q_MAX_X10) as f32)
+                                    / 10.0,
+                                drive: (osc.osc_filter.drive.value.min(FILTER_DRIVE_MAX) as f32 / 100.0)
+                                    .clamp(0.0, 1.0),
+                                mix: (osc.osc_filter.mix.value.min(FILTER_MIX_MAX) as f32 / 100.0)
+                                    .clamp(0.0, 1.0),
+                            },
+                            osc_filter_envelope: AhdsrParams {
+                                attack_ms: osc.osc_filter_env.attack_ms.value.min(ENVELOPE_ATTACK_MAX_MS)
+                                    as f32,
+                                hold_ms: osc.osc_filter_env.hold_ms.value.min(ENVELOPE_HOLD_MAX_MS) as f32,
+                                decay_ms: osc.osc_filter_env.decay_ms.value.min(ENVELOPE_DECAY_MAX_MS) as f32,
+                                sustain_level: (osc
+                                    .osc_filter_env
+                                    .sustain_pct
+                                    .value
+                                    .min(ENVELOPE_SUSTAIN_MAX_PCT) as f32
+                                    / 100.0)
+                                    .clamp(0.0, 1.0),
+                                release_ms: osc
+                                    .osc_filter_env
+                                    .release_ms
+                                    .value
+                                    .clamp(ENVELOPE_RELEASE_MIN_MS, ENVELOPE_RELEASE_MAX_MS)
+                                    as f32,
+                                start_level: (osc
+                                    .osc_filter_env
+                                    .start_pct
+                                    .value
+                                    .min(ENVELOPE_START_MAX_PCT) as f32
+                                    / 100.0)
+                                    .clamp(0.0, 1.0),
+                                tension_attack: tension_to_exponent(
+                                    osc.osc_filter_env.tension_a.value.min(ENVELOPE_TENSION_MAX),
+                                ),
+                                tension_decay: tension_to_exponent(
+                                    osc.osc_filter_env.tension_d.value.min(ENVELOPE_TENSION_MAX),
+                                ),
+                                tension_release: tension_to_exponent(
+                                    osc.osc_filter_env.tension_r.value.min(ENVELOPE_TENSION_MAX),
+                                ),
+                            },
+                        }),
+                        None,
+                    ),
+                    Some(InputFx::Filter(filter)) => (
+                        None,
+                        Some(FilterRuntime {
+                            filter_type: filter.filter_type.value,
+                            cutoff_hz: filter
+                                .cutoff_hz
+                                .value
+                                .clamp(FILTER_CUTOFF_MIN_HZ, FILTER_CUTOFF_MAX_HZ)
+                                as f32,
+                            q: (filter.resonance_x10.value.clamp(FILTER_Q_MIN_X10, FILTER_Q_MAX_X10) as f32)
+                                / 10.0,
+                            drive: (filter.drive.value.min(FILTER_DRIVE_MAX) as f32 / 100.0).clamp(0.0, 1.0),
+                            mix: (filter.mix.value.min(FILTER_MIX_MAX) as f32 / 100.0).clamp(0.0, 1.0),
+                        }),
+                    ),
+                    _ => (None, None),
+                };
+                FxSlotRuntime {
+                    enabled: slot.is_enabled,
+                    osc,
+                    filter,
+                }
+            });
+            FxBankRuntime { slots }
+        });
+        Self {
+            banks,
+            selected_bank_idx: config.sel_bank_idx,
+        }
+    }
+}
+
+impl FxBankRuntime {
+    pub fn empty() -> Self {
+        Self {
+            slots: std::array::from_fn(|_| FxSlotRuntime {
+                enabled: false,
+                osc: None,
+                filter: None,
+            }),
+        }
+    }
+}
+
+impl InputFxState {
+    pub fn new() -> Self {
+        Self {
+            banks: std::array::from_fn(|_| FxBankState::new()),
+        }
+    }
+}
+
+impl FxBankState {
+    pub fn new() -> Self {
+        Self {
+            slots: std::array::from_fn(|_| FxSlotState {
+                osc: OscillatorDspState::new(),
+                osc_filter_env: crate::dsp::envelope::AhdsrState::new(),
+                osc_filter: FilterDspState::new(),
+                filter: FilterDspState::new(),
+            }),
+        }
+    }
+}
+
+fn tension_to_exponent(value: usize) -> f32 {
+    let t = value.min(100) as f32;
+    2.0_f32.powf((t - 50.0) / 25.0)
+}
