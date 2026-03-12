@@ -391,10 +391,11 @@ pub fn draw_screen(ui: &mut egui::Ui, app: &mut MyApp) {
                         let selected = app.config.input_fx.slot_kind(bank_idx, slot_idx);
                         ui.horizontal_centered(|ui| {
                             ui.add_space(20.0);
-                            for idx in page_indices(2, 0) {
+                            for idx in page_indices(3, 0) {
                                 match idx {
                                     Some(0) => draw_fx_choice_block(ui, "Oscillator", selected == FxKind::Oscillator),
                                     Some(1) => draw_fx_choice_block(ui, "Filter", selected == FxKind::Filter),
+                                    Some(2) => draw_fx_choice_block(ui, "Reverb", selected == FxKind::Reverb),
                                     _ => draw_empty_block(ui),
                                 }
                             }
@@ -795,6 +796,64 @@ pub fn draw_screen(ui: &mut egui::Ui, app: &mut MyApp) {
                             }
                         }
                     }
+                    ScreenState::InFxReverb => {
+                        let bank_idx = app.config.input_fx.sel_bank_idx;
+                        let slot_idx = app.fx_screen_slot_idx;
+                        let slot = &app.config.input_fx.banks[bank_idx].slots[slot_idx];
+                        if let Some(fx) = slot.fx.as_ref() {
+                            match fx {
+                                crate::config::InputFx::Reverb(reverb) => {
+                                    let selected_idx = reverb.sel_idx.unwrap_or(0);
+                                    ui.horizontal_centered(|ui| {
+                                        ui.add_space(20.0);
+                                        for idx in page_indices(6, selected_idx) {
+                                            match idx {
+                                                Some(0) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", reverb.size.value),
+                                                    &reverb.size.label,
+                                                    reverb.sel_idx == Some(0),
+                                                ),
+                                                Some(1) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", reverb.decay_ms.value),
+                                                    &reverb.decay_ms.label,
+                                                    reverb.sel_idx == Some(1),
+                                                ),
+                                                Some(2) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", reverb.predelay_ms.value),
+                                                    &reverb.predelay_ms.label,
+                                                    reverb.sel_idx == Some(2),
+                                                ),
+                                                Some(3) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", reverb.width.value),
+                                                    &reverb.width.label,
+                                                    reverb.sel_idx == Some(3),
+                                                ),
+                                                Some(4) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", reverb.high_cut.value),
+                                                    &reverb.high_cut.label,
+                                                    reverb.sel_idx == Some(4),
+                                                ),
+                                                Some(5) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", reverb.low_cut.value),
+                                                    &reverb.low_cut.label,
+                                                    reverb.sel_idx == Some(5),
+                                                ),
+                                                _ => draw_empty_block(ui),
+                                            }
+                                        }
+                                    });
+                                    draw_page_indicator(ui, 6, selected_idx);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                 }
             });
         });
@@ -1054,6 +1113,23 @@ fn screen_breadcrumb(app: &MyApp) -> Option<String> {
                 .map(|fx| fx.name())
                 .unwrap_or("Empty");
             Some(format!("Bank{}-Fx{}-{}-Filter", bank, slot, fx_name))
+        }
+        ScreenState::InFxReverb => {
+            let bank = app.config.input_fx.sel_bank_idx + 1;
+            let slot = match app.fx_screen_slot_idx {
+                0 => "Q",
+                1 => "W",
+                2 => "E",
+                3 => "R",
+                _ => "?",
+            };
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx]
+                .slots[app.fx_screen_slot_idx]
+                .fx
+                .as_ref()
+                .map(|fx| fx.name())
+                .unwrap_or("Empty");
+            Some(format!("Bank{}-Fx{}-{}-Reverb", bank, slot, fx_name))
         }
     }
 }

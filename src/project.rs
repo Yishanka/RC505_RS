@@ -12,6 +12,10 @@ use crate::config::envelope_configs::{
     ENVELOPE_RELEASE_MAX_MS, ENVELOPE_RELEASE_MIN_MS, ENVELOPE_START_MAX_PCT, ENVELOPE_SUSTAIN_MAX_PCT,
     ENVELOPE_TENSION_MAX,
 };
+use crate::config::reverb_configs::{
+    REVERB_HIGHCUT_MAX, REVERB_LOWCUT_MAX_HZ, REVERB_LOWCUT_MIN_HZ, REVERB_PREDELAY_MAX_MS,
+    REVERB_RT60_MAX_MS, REVERB_RT60_MIN_MS, REVERB_SIZE_MAX, REVERB_WIDTH_MAX,
+};
 use crate::config::{AppConfig, FxKind, InputFx};
 
 const INDEX_FILE: &str = "projects_index.json";
@@ -63,6 +67,8 @@ pub struct FxSlotData {
     pub kind: String,
     pub osc: Option<OscData>,
     pub filter: Option<FilterData>,
+    #[serde(default)]
+    pub reverb: Option<ReverbData>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -113,6 +119,16 @@ pub struct FilterData {
     pub resonance_x10: usize,
     pub drive: usize,
     pub mix: usize,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ReverbData {
+    pub size: usize,
+    pub decay_ms: usize,
+    pub predelay_ms: usize,
+    pub width: usize,
+    pub high_cut: usize,
+    pub low_cut: usize,
 }
 
 impl Default for EnvelopeData {
@@ -205,6 +221,7 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                 kind: "None".to_string(),
                 osc: None,
                 filter: None,
+                reverb: None,
             };
             if let Some(fx) = slot.fx.as_ref() {
                 match fx {
@@ -269,6 +286,17 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                             resonance_x10: filter.resonance_x10.value,
                             drive: filter.drive.value,
                             mix: filter.mix.value,
+                        });
+                    }
+                    InputFx::Reverb(reverb) => {
+                        slot_data.kind = "Reverb".to_string();
+                        slot_data.reverb = Some(ReverbData {
+                            size: reverb.size.value,
+                            decay_ms: reverb.decay_ms.value,
+                            predelay_ms: reverb.predelay_ms.value,
+                            width: reverb.width.value,
+                            high_cut: reverb.high_cut.value,
+                            low_cut: reverb.low_cut.value,
                         });
                     }
                 }
@@ -402,6 +430,21 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                             filter.resonance_x10.value = filter_data.resonance_x10.clamp(1, 100);
                             filter.drive.value = filter_data.drive.min(100);
                             filter.mix.value = filter_data.mix.min(100);
+                        }
+                    }
+                }
+                "Reverb" => {
+                    slot.set_kind(FxKind::Reverb);
+                    if let Some(InputFx::Reverb(reverb)) = slot.fx.as_mut() {
+                        if let Some(reverb_data) = &slot_data.reverb {
+                            reverb.size.value = reverb_data.size.min(REVERB_SIZE_MAX);
+                            reverb.decay_ms.value =
+                                reverb_data.decay_ms.clamp(REVERB_RT60_MIN_MS, REVERB_RT60_MAX_MS);
+                            reverb.predelay_ms.value = reverb_data.predelay_ms.min(REVERB_PREDELAY_MAX_MS);
+                            reverb.width.value = reverb_data.width.min(REVERB_WIDTH_MAX);
+                            reverb.high_cut.value = reverb_data.high_cut.min(REVERB_HIGHCUT_MAX);
+                            reverb.low_cut.value =
+                                reverb_data.low_cut.clamp(REVERB_LOWCUT_MIN_HZ, REVERB_LOWCUT_MAX_HZ);
                         }
                     }
                 }

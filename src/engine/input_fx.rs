@@ -8,11 +8,17 @@ use crate::config::filter_configs::{
     FILTER_CUTOFF_MAX_HZ, FILTER_CUTOFF_MIN_HZ, FILTER_DRIVE_MAX, FILTER_MIX_MAX, FILTER_Q_MAX_X10,
     FILTER_Q_MIN_X10, FilterType,
 };
+use crate::config::reverb_configs::{
+    REVERB_HIGHCUT_MAX, REVERB_LOWCUT_MAX_HZ, REVERB_LOWCUT_MIN_HZ, REVERB_PREDELAY_MAX_MS,
+    REVERB_RT60_MAX_MS, REVERB_RT60_MIN_MS, REVERB_SIZE_MAX, REVERB_SIZE_MAX_MS, REVERB_SIZE_MIN_MS,
+    REVERB_WIDTH_MAX,
+};
 use crate::config::note_configs::NoteOct;
 use crate::config::osc_configs::Waveform;
 use crate::config::{input_fx_configs::FX_BANK_COUNT, input_fx_configs::FX_SLOT_COUNT, InputFx, InputFxConfig};
 use crate::dsp::envelope::AhdsrParams;
 use crate::dsp::filter::{process_sample as process_filter_sample, FilterDspState, FilterParams};
+use crate::dsp::reverb::{process_frame as process_reverb_frame, ReverbDspState, ReverbParams};
 use crate::dsp::oscillator::{
     default_note, note_at_time, process_sample as process_osc_sample, seq_bool_at_time, OscillatorDspState,
 };
@@ -41,11 +47,22 @@ pub struct FilterRuntime {
     pub mix: f32,
 }
 
+#[derive(Clone, Copy)]
+pub struct ReverbRuntime {
+    pub size_ms: f32,
+    pub rt60_ms: f32,
+    pub predelay_ms: f32,
+    pub width: f32,
+    pub high_cut_damp: f32,
+    pub low_cut_hz: f32,
+}
+
 #[derive(Clone)]
 pub struct FxSlotRuntime {
     pub enabled: bool,
     pub osc: Option<OscillatorRuntime>,
     pub filter: Option<FilterRuntime>,
+    pub reverb: Option<ReverbRuntime>,
 }
 
 #[derive(Clone)]
@@ -53,7 +70,9 @@ pub struct FxSlotState {
     pub osc: OscillatorDspState,
     pub osc_filter_env: crate::dsp::envelope::AhdsrState,
     pub osc_filter: FilterDspState,
-    pub filter: FilterDspState,
+    pub filter_l: FilterDspState,
+    pub filter_r: FilterDspState,
+    pub reverb: ReverbDspState,
 }
 
 #[derive(Clone)]
@@ -109,15 +128,15 @@ impl InputFxEngine {
         self.runtime = InputFxRuntime::from_config(config);
     }
 
-    pub fn process_sample(&mut self, elapsed_secs: f64, input: f32) -> f32 {
+    pub fn process_frame(&mut self, elapsed_secs: f64, input_l: f32, input_r: f32) -> (f32, f32) {
         let bank_idx = self.runtime.selected_bank_idx;
         if bank_idx >= FX_BANK_COUNT {
-            return input;
+            return (input_l, input_r);
         }
 
         let bank = &self.runtime.banks[bank_idx];
         let state_bank = &mut self.state.banks[bank_idx];
-        let input_level = input.abs();
+        let input_level = (input_l.abs() + input_r.abs()) * 0.5;
 
         let mut osc_mix = 0.0f32;
         let mut active_osc_count = 0usize;      
@@ -188,7 +207,8 @@ impl InputFxEngine {
             osc_mix /= active_osc_count as f32;
         }
 
-        let mut out = (input + osc_mix).clamp(-1.0, 1.0);
+        let mut out_l = (input_l + osc_mix).clamp(-1.0, 1.0);
+        let mut out_r = (input_r + osc_mix).clamp(-1.0, 1.0);
         for idx in 0..FX_SLOT_COUNT {
             let slot = &bank.slots[idx];
             if !slot.enabled {
@@ -197,8 +217,8 @@ impl InputFxEngine {
             let Some(filter) = slot.filter else {
                 continue;
             };
-            out = process_filter_sample(
-                &mut state_bank.slots[idx].filter,
+            out_l = process_filter_sample(
+                &mut state_bank.slots[idx].filter_l,
                 FilterParams {
                     filter_type: filter.filter_type,
                     cutoff_hz: filter.cutoff_hz,
@@ -207,11 +227,49 @@ impl InputFxEngine {
                     mix: filter.mix,
                 },
                 self.sample_rate,
-                out,
+                out_l,
+            );
+            out_r = process_filter_sample(
+                &mut state_bank.slots[idx].filter_r,
+                FilterParams {
+                    filter_type: filter.filter_type,
+                    cutoff_hz: filter.cutoff_hz,
+                    q: filter.q,
+                    drive: filter.drive,
+                    mix: filter.mix,
+                },
+                self.sample_rate,
+                out_r,
             );
         }
 
-        out.clamp(-1.0, 1.0)
+        for idx in 0..FX_SLOT_COUNT {
+            let slot = &bank.slots[idx];
+            if !slot.enabled {
+                continue;
+            }
+            let Some(reverb) = slot.reverb else {
+                continue;
+            };
+            let (wet_l, wet_r) = process_reverb_frame(
+                &mut state_bank.slots[idx].reverb,
+                ReverbParams {
+                    size_ms: reverb.size_ms,
+                    rt60_ms: reverb.rt60_ms,
+                    predelay_ms: reverb.predelay_ms,
+                    width: reverb.width,
+                    high_cut_damp: reverb.high_cut_damp,
+                    low_cut_hz: reverb.low_cut_hz,
+                },
+                self.sample_rate,
+                out_l,
+                out_r,
+            );
+            out_l = wet_l;
+            out_r = wet_r;
+        }
+
+        (out_l.clamp(-1.0, 1.0), out_r.clamp(-1.0, 1.0))
     }
 
     pub fn metronome_start(&self) -> Option<Instant> {
@@ -236,7 +294,7 @@ impl InputFxRuntime {
             let bank = &config.banks[bank_idx];
             let slots = std::array::from_fn(|slot_idx| {
                 let slot = &bank.slots[slot_idx];
-                let (osc, filter) = match slot.fx.as_ref() {
+                let (osc, filter, reverb) = match slot.fx.as_ref() {
                     Some(InputFx::Oscillator(osc)) => (
                         Some(OscillatorRuntime {
                             waveform: osc.waveform.value,
@@ -341,6 +399,7 @@ impl InputFxRuntime {
                             },
                         }),
                         None,
+                        None,
                     ),
                     Some(InputFx::Filter(filter)) => (
                         None,
@@ -356,13 +415,48 @@ impl InputFxRuntime {
                             drive: (filter.drive.value.min(FILTER_DRIVE_MAX) as f32 / 100.0).clamp(0.0, 1.0),
                             mix: (filter.mix.value.min(FILTER_MIX_MAX) as f32 / 100.0).clamp(0.0, 1.0),
                         }),
+                        None,
                     ),
-                    _ => (None, None),
+                    Some(InputFx::Reverb(reverb)) => {
+                        let size_pct = (reverb.size.value.min(REVERB_SIZE_MAX) as f32)
+                            / REVERB_SIZE_MAX.max(1) as f32;
+                        let size_ms = REVERB_SIZE_MIN_MS as f32
+                            + (REVERB_SIZE_MAX_MS - REVERB_SIZE_MIN_MS) as f32 * size_pct;
+                        let rt60_ms = reverb
+                            .decay_ms
+                            .value
+                            .clamp(REVERB_RT60_MIN_MS, REVERB_RT60_MAX_MS) as f32;
+                        let predelay_ms = reverb
+                            .predelay_ms
+                            .value
+                            .min(REVERB_PREDELAY_MAX_MS) as f32;
+                        let width = (reverb.width.value.min(REVERB_WIDTH_MAX) as f32 / 100.0).clamp(0.0, 1.0);
+                        let high_cut_damp =
+                            (reverb.high_cut.value.min(REVERB_HIGHCUT_MAX) as f32 / 100.0).clamp(0.0, 1.0);
+                        let low_cut_hz = reverb
+                            .low_cut
+                            .value
+                            .clamp(REVERB_LOWCUT_MIN_HZ, REVERB_LOWCUT_MAX_HZ) as f32;
+                        (
+                            None,
+                            None,
+                            Some(ReverbRuntime {
+                                size_ms,
+                                rt60_ms,
+                                predelay_ms,
+                                width,
+                                high_cut_damp,
+                                low_cut_hz,
+                            }),
+                        )
+                    },
+                    _ => (None, None, None),
                 };
                 FxSlotRuntime {
                     enabled: slot.is_enabled,
                     osc,
                     filter,
+                    reverb,
                 }
             });
             FxBankRuntime { slots }
@@ -381,6 +475,7 @@ impl FxBankRuntime {
                 enabled: false,
                 osc: None,
                 filter: None,
+                reverb: None,
             }),
         }
     }
@@ -401,7 +496,9 @@ impl FxBankState {
                 osc: OscillatorDspState::new(),
                 osc_filter_env: crate::dsp::envelope::AhdsrState::new(),
                 osc_filter: FilterDspState::new(),
-                filter: FilterDspState::new(),
+                filter_l: FilterDspState::new(),
+                filter_r: FilterDspState::new(),
+                reverb: ReverbDspState::new(),
             }),
         }
     }

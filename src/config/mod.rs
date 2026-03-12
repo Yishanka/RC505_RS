@@ -8,6 +8,7 @@ pub mod system_configs;
 pub mod note_configs;
 pub mod envelope_configs;
 pub mod filter_configs;
+pub mod reverb_configs;
 
 pub use app_config::{AppConfig};
 pub use beat_configs::{BeatConfigs};

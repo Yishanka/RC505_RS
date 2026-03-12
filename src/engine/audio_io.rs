@@ -285,18 +285,20 @@ impl AudioIO {
                 let mut processed_block: Vec<f32> = Vec::with_capacity(data.len());
 
                 for (frame_idx, frame) in data.chunks(channels).enumerate() {
-                    let sample = frame[0];
+                    let input_l = frame[0];
+                    let input_r = if channels > 1 { frame[1] } else { frame[0] };
                     let elapsed = base_elapsed + frame_idx as f64 * sec_per_frame;
-                    let processed = if let Some(fx) = fx_guard.as_mut() {
-                        fx.process_sample(elapsed, sample)
+                    let (processed_l, processed_r) = if let Some(fx) = fx_guard.as_mut() {
+                        fx.process_frame(elapsed, input_l, input_r)
                     } else {
-                        sample
+                        (input_l, input_r)
                     };
                     // Keep capturing input samples into ring buffer for overdub alignment.
                     // We do not monitor this directly to output.
-                    for _ in 0..channels {
-                        let _ = prod.push(processed);
-                        processed_block.push(processed);
+                    for ch in 0..channels {
+                        let sample = if ch == 0 { processed_l } else if ch == 1 { processed_r } else { processed_l };
+                        let _ = prod.push(sample);
+                        processed_block.push(sample);
                     }
                 }
 

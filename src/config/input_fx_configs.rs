@@ -1,6 +1,7 @@
 // src/config/input_fx_configs
 
 use crate::config::filter_configs::FilterConfigs;
+use crate::config::reverb_configs::ReverbConfigs;
 use crate::config::OscillatorConfigs;
 
 pub const FX_BANK_COUNT: usize = 4;
@@ -9,6 +10,7 @@ pub const FX_SLOT_COUNT: usize = 4;
 pub enum InputFx {
     Oscillator(OscillatorConfigs),
     Filter(FilterConfigs),
+    Reverb(ReverbConfigs),
 }
 
 impl InputFx {
@@ -16,6 +18,7 @@ impl InputFx {
         match self {
             InputFx::Oscillator(_) => "Oscillator",
             InputFx::Filter(_) => "Filter",
+            InputFx::Reverb(_) => "Reverb",
         }
     }
 
@@ -32,6 +35,13 @@ impl InputFx {
             _ => None,
         }
     }
+
+    pub fn as_reverb_mut(&mut self) -> Option<&mut ReverbConfigs> {
+        match self {
+            InputFx::Reverb(reverb) => Some(reverb),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -39,6 +49,7 @@ pub enum FxKind {
     None,
     Oscillator,
     Filter,
+    Reverb,
 }
 
 pub struct FxSlot {
@@ -59,6 +70,7 @@ impl FxSlot {
             None => FxKind::None,
             Some(InputFx::Oscillator(_)) => FxKind::Oscillator,
             Some(InputFx::Filter(_)) => FxKind::Filter,
+            Some(InputFx::Reverb(_)) => FxKind::Reverb,
         }
     }
 
@@ -67,6 +79,7 @@ impl FxSlot {
             FxKind::None => None,
             FxKind::Oscillator => Some(InputFx::Oscillator(OscillatorConfigs::new())),
             FxKind::Filter => Some(InputFx::Filter(FilterConfigs::new())),
+            FxKind::Reverb => Some(InputFx::Reverb(ReverbConfigs::new())),
         };
     }
 }
@@ -135,8 +148,10 @@ impl InputFxConfig {
         let next = match (current, dir.signum()) {
             (FxKind::None, 1) => FxKind::Oscillator,
             (FxKind::Oscillator, 1) => FxKind::Filter,
-            (FxKind::Filter, 1) => FxKind::None,
-            (FxKind::None, -1) => FxKind::Filter,
+            (FxKind::Filter, 1) => FxKind::Reverb,
+            (FxKind::Reverb, 1) => FxKind::None,
+            (FxKind::None, -1) => FxKind::Reverb,
+            (FxKind::Reverb, -1) => FxKind::Filter,
             (FxKind::Filter, -1) => FxKind::Oscillator,
             (FxKind::Oscillator, -1) => FxKind::None,
             (_, _) => current,

@@ -30,6 +30,7 @@ pub enum ScreenState {
     InFxOscFilter,
     InFxOscFilterEnv,
     InFxFilter,
+    InFxReverb,
 }
 
 #[derive(PartialEq, Clone, Copy)]

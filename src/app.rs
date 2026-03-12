@@ -10,6 +10,10 @@ use crate::config::filter_configs::{
     FILTER_CUTOFF_MAX_HZ, FILTER_CUTOFF_MIN_HZ, FILTER_DRIVE_MAX, FILTER_MIX_MAX, FILTER_Q_MAX_X10,
     FILTER_Q_MIN_X10,
 };
+use crate::config::reverb_configs::{
+    REVERB_HIGHCUT_MAX, REVERB_LOWCUT_MAX_HZ, REVERB_LOWCUT_MIN_HZ, REVERB_PREDELAY_MAX_MS,
+    REVERB_RT60_MAX_MS, REVERB_RT60_MIN_MS, REVERB_SIZE_MAX, REVERB_WIDTH_MAX,
+};
 use crate::engine::audio_io::AudioIO;
 use crate::engine::metronome::Metronome;
 use crate::project::{self, ProjectEntry};
@@ -420,6 +424,7 @@ impl MyApp {
                     match self.screen_state {
                         ScreenState::Empty => self.request_exit(PendingExit::ToInit),
                         ScreenState::InFxFilter => self.screen_state = ScreenState::FxSelect,
+                        ScreenState::InFxReverb => self.screen_state = ScreenState::FxSelect,
                         ScreenState::InFxOscAudioEnv => self.screen_state = ScreenState::InFxOscAudio,
                         ScreenState::InFxOscFilterEnv => self.screen_state = ScreenState::InFxOscFilter,
                         ScreenState::InFxOscAudio => self.screen_state = ScreenState::InFxOsc,
@@ -542,6 +547,9 @@ impl MyApp {
                                 } else if let Some(filter) = fx.as_filter_mut() {
                                     filter.sel_idx = Some(0);
                                     self.screen_state = ScreenState::InFxFilter;
+                                } else if let Some(reverb) = fx.as_reverb_mut() {
+                                    reverb.sel_idx = Some(0);
+                                    self.screen_state = ScreenState::InFxReverb;
                                 }
                             }
                         }
@@ -848,6 +856,39 @@ impl MyApp {
                                     }
                                     Some(4) => {
                                         filter.mix.input(i, FILTER_MIX_MAX);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    ScreenState::InFxReverb => {
+                        let bank_idx = self.config.input_fx.sel_bank_idx;
+                        let slot_idx = self.fx_screen_slot_idx;
+                        let slot = &mut self.config.input_fx.banks[bank_idx].slots[slot_idx];
+                        if let Some(fx) = slot.fx.as_mut() {
+                            if let Some(reverb) = fx.as_reverb_mut() {
+                                if i.key_pressed(egui::Key::ArrowLeft) {
+                                    reverb.prev();
+                                }
+                                if i.key_pressed(egui::Key::ArrowRight) {
+                                    reverb.next();
+                                }
+
+                                match reverb.sel_idx {
+                                    Some(0) => reverb.size.input(i, REVERB_SIZE_MAX),
+                                    Some(1) => {
+                                        reverb.decay_ms.input(i, REVERB_RT60_MAX_MS);
+                                        reverb.decay_ms.value =
+                                            reverb.decay_ms.value.clamp(REVERB_RT60_MIN_MS, REVERB_RT60_MAX_MS);
+                                    }
+                                    Some(2) => reverb.predelay_ms.input(i, REVERB_PREDELAY_MAX_MS),
+                                    Some(3) => reverb.width.input(i, REVERB_WIDTH_MAX),
+                                    Some(4) => reverb.high_cut.input(i, REVERB_HIGHCUT_MAX),
+                                    Some(5) => {
+                                        reverb.low_cut.input(i, REVERB_LOWCUT_MAX_HZ);
+                                        reverb.low_cut.value =
+                                            reverb.low_cut.value.clamp(REVERB_LOWCUT_MIN_HZ, REVERB_LOWCUT_MAX_HZ);
                                     }
                                     _ => {}
                                 }
