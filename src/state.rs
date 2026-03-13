@@ -31,6 +31,12 @@ pub enum ScreenState {
     InFxOscFilterEnv,
     InFxFilter,
     InFxReverb,
+    InFxMyDelay,
+    InFxMyDelayAudio,
+    InFxMyDelayAudioEnv,
+    InFxMyDelayNote,
+    InFxMyDelayFilter,
+    InFxMyDelayFilterEnv,
 }
 
 #[derive(PartialEq, Clone, Copy)]

@@ -1,6 +1,7 @@
 // src/config/input_fx_configs
 
 use crate::config::filter_configs::FilterConfigs;
+use crate::config::mydelay_configs::MyDelayConfigs;
 use crate::config::reverb_configs::ReverbConfigs;
 use crate::config::OscillatorConfigs;
 
@@ -11,6 +12,7 @@ pub enum InputFx {
     Oscillator(OscillatorConfigs),
     Filter(FilterConfigs),
     Reverb(ReverbConfigs),
+    MyDelay(MyDelayConfigs),
 }
 
 impl InputFx {
@@ -19,6 +21,7 @@ impl InputFx {
             InputFx::Oscillator(_) => "Oscillator",
             InputFx::Filter(_) => "Filter",
             InputFx::Reverb(_) => "Reverb",
+            InputFx::MyDelay(_) => "MyDelay",
         }
     }
 
@@ -42,6 +45,13 @@ impl InputFx {
             _ => None,
         }
     }
+
+    pub fn as_mydelay_mut(&mut self) -> Option<&mut MyDelayConfigs> {
+        match self {
+            InputFx::MyDelay(delay) => Some(delay),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -50,6 +60,7 @@ pub enum FxKind {
     Oscillator,
     Filter,
     Reverb,
+    MyDelay,
 }
 
 pub struct FxSlot {
@@ -71,6 +82,7 @@ impl FxSlot {
             Some(InputFx::Oscillator(_)) => FxKind::Oscillator,
             Some(InputFx::Filter(_)) => FxKind::Filter,
             Some(InputFx::Reverb(_)) => FxKind::Reverb,
+            Some(InputFx::MyDelay(_)) => FxKind::MyDelay,
         }
     }
 
@@ -80,6 +92,7 @@ impl FxSlot {
             FxKind::Oscillator => Some(InputFx::Oscillator(OscillatorConfigs::new())),
             FxKind::Filter => Some(InputFx::Filter(FilterConfigs::new())),
             FxKind::Reverb => Some(InputFx::Reverb(ReverbConfigs::new())),
+            FxKind::MyDelay => Some(InputFx::MyDelay(MyDelayConfigs::new())),
         };
     }
 }
@@ -149,8 +162,10 @@ impl InputFxConfig {
             (FxKind::None, 1) => FxKind::Oscillator,
             (FxKind::Oscillator, 1) => FxKind::Filter,
             (FxKind::Filter, 1) => FxKind::Reverb,
-            (FxKind::Reverb, 1) => FxKind::None,
-            (FxKind::None, -1) => FxKind::Reverb,
+            (FxKind::Reverb, 1) => FxKind::MyDelay,
+            (FxKind::MyDelay, 1) => FxKind::None,
+            (FxKind::None, -1) => FxKind::MyDelay,
+            (FxKind::MyDelay, -1) => FxKind::Reverb,
             (FxKind::Reverb, -1) => FxKind::Filter,
             (FxKind::Filter, -1) => FxKind::Oscillator,
             (FxKind::Oscillator, -1) => FxKind::None,

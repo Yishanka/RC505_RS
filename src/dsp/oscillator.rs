@@ -31,13 +31,8 @@ pub fn note_at_time(seq: &[Option<NoteOct>], bpm: usize, elapsed_secs: f64) -> O
     let ticks_per_beat = NoteConfigs::ticks_per_beat();
     let secs_per_beat = 60.0 / bpm.max(1) as f64;
     let tick = ((elapsed_secs / secs_per_beat) * ticks_per_beat as f64).floor() as usize;
-    let len = seq.len().max(ticks_per_beat);
-    let idx = tick % len;
-    if idx >= seq.len() {
-        None
-    } else {
-        seq[idx]
-    }
+    let idx = tick % seq.len();
+    seq[idx]
 }
 
 pub fn seq_bool_at_time(seq: &[bool], bpm: usize, elapsed_secs: f64) -> bool {
@@ -47,13 +42,8 @@ pub fn seq_bool_at_time(seq: &[bool], bpm: usize, elapsed_secs: f64) -> bool {
     let ticks_per_beat = NoteConfigs::ticks_per_beat();
     let secs_per_beat = 60.0 / bpm.max(1) as f64;
     let tick = ((elapsed_secs / secs_per_beat) * ticks_per_beat as f64).floor() as usize;
-    let len = seq.len().max(ticks_per_beat);
-    let idx = tick % len;
-    if idx >= seq.len() {
-        false
-    } else {
-        seq[idx]
-    }
+    let idx = tick % seq.len();
+    seq[idx]
 }
 
 pub fn process_sample(

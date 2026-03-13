@@ -10,6 +10,7 @@ use crate::config::filter_configs::{
     FILTER_CUTOFF_MAX_HZ, FILTER_CUTOFF_MIN_HZ, FILTER_DRIVE_MAX, FILTER_MIX_MAX, FILTER_Q_MAX_X10,
     FILTER_Q_MIN_X10,
 };
+use crate::config::mydelay_configs::{MYDELAY_LEVEL_MAX, MYDELAY_THRESHOLD_MAX};
 use crate::config::reverb_configs::{
     REVERB_HIGHCUT_MAX, REVERB_LOWCUT_MAX_HZ, REVERB_LOWCUT_MIN_HZ, REVERB_PREDELAY_MAX_MS,
     REVERB_RT60_MAX_MS, REVERB_RT60_MIN_MS, REVERB_SIZE_MAX, REVERB_WIDTH_MAX,
@@ -425,6 +426,12 @@ impl MyApp {
                         ScreenState::Empty => self.request_exit(PendingExit::ToInit),
                         ScreenState::InFxFilter => self.screen_state = ScreenState::FxSelect,
                         ScreenState::InFxReverb => self.screen_state = ScreenState::FxSelect,
+                        ScreenState::InFxMyDelay => self.screen_state = ScreenState::FxSelect,
+                        ScreenState::InFxMyDelayAudio => self.screen_state = ScreenState::InFxMyDelay,
+                        ScreenState::InFxMyDelayAudioEnv => self.screen_state = ScreenState::InFxMyDelayAudio,
+                        ScreenState::InFxMyDelayNote => self.screen_state = ScreenState::InFxMyDelay,
+                        ScreenState::InFxMyDelayFilter => self.screen_state = ScreenState::InFxMyDelay,
+                        ScreenState::InFxMyDelayFilterEnv => self.screen_state = ScreenState::InFxMyDelayFilter,
                         ScreenState::InFxOscAudioEnv => self.screen_state = ScreenState::InFxOscAudio,
                         ScreenState::InFxOscFilterEnv => self.screen_state = ScreenState::InFxOscFilter,
                         ScreenState::InFxOscAudio => self.screen_state = ScreenState::InFxOsc,
@@ -550,6 +557,9 @@ impl MyApp {
                                 } else if let Some(reverb) = fx.as_reverb_mut() {
                                     reverb.sel_idx = Some(0);
                                     self.screen_state = ScreenState::InFxReverb;
+                                } else if let Some(delay) = fx.as_mydelay_mut() {
+                                    delay.sel_idx = Some(0);
+                                    self.screen_state = ScreenState::InFxMyDelay;
                                 }
                             }
                         }
@@ -890,6 +900,243 @@ impl MyApp {
                                         reverb.low_cut.value =
                                             reverb.low_cut.value.clamp(REVERB_LOWCUT_MIN_HZ, REVERB_LOWCUT_MAX_HZ);
                                     }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    ScreenState::InFxMyDelay => {
+                        let bank_idx = self.config.input_fx.sel_bank_idx;
+                        let slot_idx = self.fx_screen_slot_idx;
+                        let slot = &mut self.config.input_fx.banks[bank_idx].slots[slot_idx];
+                        if let Some(fx) = slot.fx.as_mut() {
+                            if let Some(delay) = fx.as_mydelay_mut() {
+                                if i.key_pressed(egui::Key::ArrowLeft) {
+                                    delay.prev();
+                                }
+                                if i.key_pressed(egui::Key::ArrowRight) {
+                                    delay.next();
+                                }
+
+                                if i.key_pressed(egui::Key::Enter) {
+                                    match delay.sel_idx {
+                                        Some(0) => {
+                                            delay.audio_sel_idx = Some(0);
+                                            self.screen_state = ScreenState::InFxMyDelayAudio;
+                                        }
+                                        Some(1) => {
+                                            delay.note.sel_idx = Some(0);
+                                            self.screen_state = ScreenState::InFxMyDelayNote;
+                                        }
+                                        Some(2) => {
+                                            delay.filter_sel_idx = Some(0);
+                                            self.screen_state = ScreenState::InFxMyDelayFilter;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ScreenState::InFxMyDelayAudio => {
+                        let bank_idx = self.config.input_fx.sel_bank_idx;
+                        let slot_idx = self.fx_screen_slot_idx;
+                        let slot = &mut self.config.input_fx.banks[bank_idx].slots[slot_idx];
+                        if let Some(fx) = slot.fx.as_mut() {
+                            if let Some(delay) = fx.as_mydelay_mut() {
+                                let curr = delay.audio_sel_idx.unwrap_or(0);
+                                if i.key_pressed(egui::Key::ArrowLeft) {
+                                    delay.audio_sel_idx = Some(curr.saturating_sub(1));
+                                }
+                                if i.key_pressed(egui::Key::ArrowRight) {
+                                    delay.audio_sel_idx = Some((curr + 1).min(2));
+                                }
+
+                                match delay.audio_sel_idx {
+                                    Some(0) => delay.level.input(i, MYDELAY_LEVEL_MAX),
+                                    Some(1) => delay.threshold.input(i, MYDELAY_THRESHOLD_MAX),
+                                    _ => {}
+                                }
+
+                                if i.key_pressed(egui::Key::Enter) && delay.audio_sel_idx == Some(2) {
+                                    delay.audio_env.sel_idx = Some(0);
+                                    self.screen_state = ScreenState::InFxMyDelayAudioEnv;
+                                }
+                            }
+                        }
+                    }
+                    ScreenState::InFxMyDelayAudioEnv => {
+                        let bank_idx = self.config.input_fx.sel_bank_idx;
+                        let slot_idx = self.fx_screen_slot_idx;
+                        let slot = &mut self.config.input_fx.banks[bank_idx].slots[slot_idx];
+                        if let Some(fx) = slot.fx.as_mut() {
+                            if let Some(delay) = fx.as_mydelay_mut() {
+                                let env_cfg = &mut delay.audio_env;
+                                if i.key_pressed(egui::Key::ArrowLeft) {
+                                    env_cfg.prev();
+                                }
+                                if i.key_pressed(egui::Key::ArrowRight) {
+                                    env_cfg.next();
+                                }
+
+                                match env_cfg.sel_idx {
+                                    Some(0) => env_cfg.attack_ms.input(i, ENVELOPE_ATTACK_MAX_MS),
+                                    Some(1) => env_cfg.hold_ms.input(i, ENVELOPE_HOLD_MAX_MS),
+                                    Some(2) => env_cfg.decay_ms.input(i, ENVELOPE_DECAY_MAX_MS),
+                                    Some(3) => env_cfg.sustain_pct.input(i, ENVELOPE_SUSTAIN_MAX_PCT),
+                                    Some(4) => env_cfg.release_ms.input(i, ENVELOPE_RELEASE_MAX_MS),
+                                    Some(5) => env_cfg.start_pct.input(i, ENVELOPE_START_MAX_PCT),
+                                    Some(6) => env_cfg.tension_a.input(i, ENVELOPE_TENSION_MAX),
+                                    Some(7) => env_cfg.tension_d.input(i, ENVELOPE_TENSION_MAX),
+                                    Some(8) => env_cfg.tension_r.input(i, ENVELOPE_TENSION_MAX),
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    ScreenState::InFxMyDelayNote => {
+                        let bank_idx = self.config.input_fx.sel_bank_idx;
+                        let slot_idx = self.fx_screen_slot_idx;
+                        let slot = &mut self.config.input_fx.banks[bank_idx].slots[slot_idx];
+                        if let Some(fx) = slot.fx.as_mut() {
+                            if let Some(delay) = fx.as_mydelay_mut() {
+                                let note_cfg = &mut delay.note;
+                                if i.key_pressed(egui::Key::ArrowLeft) {
+                                    note_cfg.prev();
+                                }
+                                if i.key_pressed(egui::Key::ArrowRight) {
+                                    note_cfg.next();
+                                }
+
+                                match note_cfg.sel_idx {
+                                    Some(0) => {
+                                        if i.key_pressed(egui::Key::ArrowUp) {
+                                            note_cfg.note.prev();
+                                        }
+                                        if i.key_pressed(egui::Key::ArrowDown) {
+                                            note_cfg.note.next();
+                                        }
+                                    }
+                                    Some(1) => {
+                                        if i.key_pressed(egui::Key::ArrowUp) {
+                                            note_cfg.octave.prev();
+                                        }
+                                        if i.key_pressed(egui::Key::ArrowDown) {
+                                            note_cfg.octave.next();
+                                        }
+                                    }
+                                    Some(2) => {
+                                        if i.key_pressed(egui::Key::ArrowUp) {
+                                            note_cfg.step.prev();
+                                        }
+                                        if i.key_pressed(egui::Key::ArrowDown) {
+                                            note_cfg.step.next();
+                                        }
+                                    }
+                                    Some(3) => {
+                                        if i.key_pressed(egui::Key::ArrowUp) {
+                                            note_cfg.edit.prev();
+                                        }
+                                        if i.key_pressed(egui::Key::ArrowDown) {
+                                            note_cfg.edit.next();
+                                        }
+                                    }
+                                    _ => {}
+                                }
+
+                                if i.key_pressed(egui::Key::Enter) && note_cfg.sel_idx == Some(3) {
+                                    note_cfg.apply_edit();
+                                }
+                            }
+                        }
+                    }
+                    ScreenState::InFxMyDelayFilter => {
+                        let bank_idx = self.config.input_fx.sel_bank_idx;
+                        let slot_idx = self.fx_screen_slot_idx;
+                        let slot = &mut self.config.input_fx.banks[bank_idx].slots[slot_idx];
+                        if let Some(fx) = slot.fx.as_mut() {
+                            if let Some(delay) = fx.as_mydelay_mut() {
+                                let filter = &mut delay.filter;
+                                let curr = delay.filter_sel_idx.unwrap_or(0);
+                                if i.key_pressed(egui::Key::ArrowLeft) {
+                                    delay.filter_sel_idx = Some(curr.saturating_sub(1));
+                                }
+                                if i.key_pressed(egui::Key::ArrowRight) {
+                                    delay.filter_sel_idx = Some((curr + 1).min(5));
+                                }
+
+                                match delay.filter_sel_idx {
+                                    Some(0) => {
+                                        if i.key_pressed(egui::Key::ArrowUp) {
+                                            filter.filter_type.prev();
+                                        }
+                                        if i.key_pressed(egui::Key::ArrowDown) {
+                                            filter.filter_type.next();
+                                        }
+                                    }
+                                    Some(1) => {
+                                        filter.cutoff_hz.input(i, FILTER_CUTOFF_MAX_HZ);
+                                        filter.cutoff_hz.value =
+                                            filter.cutoff_hz.value.clamp(FILTER_CUTOFF_MIN_HZ, FILTER_CUTOFF_MAX_HZ);
+                                        if i.key_pressed(egui::Key::ArrowUp) {
+                                            filter.cutoff_hz.value = ((filter.cutoff_hz.value as f32) * 1.06)
+                                                .round() as usize;
+                                            filter.cutoff_hz.value =
+                                                filter.cutoff_hz.value.clamp(FILTER_CUTOFF_MIN_HZ, FILTER_CUTOFF_MAX_HZ);
+                                        }
+                                        if i.key_pressed(egui::Key::ArrowDown) {
+                                            filter.cutoff_hz.value = ((filter.cutoff_hz.value as f32) / 1.06)
+                                                .round() as usize;
+                                            filter.cutoff_hz.value =
+                                                filter.cutoff_hz.value.clamp(FILTER_CUTOFF_MIN_HZ, FILTER_CUTOFF_MAX_HZ);
+                                        }
+                                    }
+                                    Some(2) => {
+                                        filter.resonance_x10.input(i, FILTER_Q_MAX_X10);
+                                        filter.resonance_x10.value =
+                                            filter.resonance_x10.value.clamp(FILTER_Q_MIN_X10, FILTER_Q_MAX_X10);
+                                    }
+                                    Some(3) => {
+                                        filter.drive.input(i, FILTER_DRIVE_MAX);
+                                    }
+                                    Some(4) => {
+                                        filter.mix.input(i, FILTER_MIX_MAX);
+                                    }
+                                    Some(5) => {
+                                        if i.key_pressed(egui::Key::Enter) {
+                                            delay.filter_env.sel_idx = Some(0);
+                                            self.screen_state = ScreenState::InFxMyDelayFilterEnv;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    ScreenState::InFxMyDelayFilterEnv => {
+                        let bank_idx = self.config.input_fx.sel_bank_idx;
+                        let slot_idx = self.fx_screen_slot_idx;
+                        let slot = &mut self.config.input_fx.banks[bank_idx].slots[slot_idx];
+                        if let Some(fx) = slot.fx.as_mut() {
+                            if let Some(delay) = fx.as_mydelay_mut() {
+                                let env_cfg = &mut delay.filter_env;
+                                if i.key_pressed(egui::Key::ArrowLeft) {
+                                    env_cfg.prev();
+                                }
+                                if i.key_pressed(egui::Key::ArrowRight) {
+                                    env_cfg.next();
+                                }
+
+                                match env_cfg.sel_idx {
+                                    Some(0) => env_cfg.attack_ms.input(i, ENVELOPE_ATTACK_MAX_MS),
+                                    Some(1) => env_cfg.hold_ms.input(i, ENVELOPE_HOLD_MAX_MS),
+                                    Some(2) => env_cfg.decay_ms.input(i, ENVELOPE_DECAY_MAX_MS),
+                                    Some(3) => env_cfg.sustain_pct.input(i, ENVELOPE_SUSTAIN_MAX_PCT),
+                                    Some(4) => env_cfg.release_ms.input(i, ENVELOPE_RELEASE_MAX_MS),
+                                    Some(5) => env_cfg.start_pct.input(i, ENVELOPE_START_MAX_PCT),
+                                    Some(6) => env_cfg.tension_a.input(i, ENVELOPE_TENSION_MAX),
+                                    Some(7) => env_cfg.tension_d.input(i, ENVELOPE_TENSION_MAX),
+                                    Some(8) => env_cfg.tension_r.input(i, ENVELOPE_TENSION_MAX),
                                     _ => {}
                                 }
                             }

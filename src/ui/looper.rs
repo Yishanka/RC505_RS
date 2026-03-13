@@ -391,11 +391,12 @@ pub fn draw_screen(ui: &mut egui::Ui, app: &mut MyApp) {
                         let selected = app.config.input_fx.slot_kind(bank_idx, slot_idx);
                         ui.horizontal_centered(|ui| {
                             ui.add_space(20.0);
-                            for idx in page_indices(3, 0) {
+                            for idx in page_indices(4, 0) {
                                 match idx {
                                     Some(0) => draw_fx_choice_block(ui, "Oscillator", selected == FxKind::Oscillator),
                                     Some(1) => draw_fx_choice_block(ui, "Filter", selected == FxKind::Filter),
                                     Some(2) => draw_fx_choice_block(ui, "Reverb", selected == FxKind::Reverb),
+                                    Some(3) => draw_fx_choice_block(ui, "MyDelay", selected == FxKind::MyDelay),
                                     _ => draw_empty_block(ui),
                                 }
                             }
@@ -854,6 +855,343 @@ pub fn draw_screen(ui: &mut egui::Ui, app: &mut MyApp) {
                             }
                         }
                     }
+                    ScreenState::InFxMyDelay => {
+                        let bank_idx = app.config.input_fx.sel_bank_idx;
+                        let slot_idx = app.fx_screen_slot_idx;
+                        let slot = &app.config.input_fx.banks[bank_idx].slots[slot_idx];
+                        if let Some(fx) = slot.fx.as_ref() {
+                            match fx {
+                                crate::config::InputFx::MyDelay(delay) => {
+                                    let selected_idx = delay.sel_idx.unwrap_or(0);
+                                    ui.horizontal_centered(|ui| {
+                                        ui.add_space(20.0);
+                                        for idx in page_indices(3, selected_idx) {
+                                            match idx {
+                                                Some(0) => draw_setting_option_block(
+                                                    ui,
+                                                    "Audio",
+                                                    "Audio",
+                                                    delay.sel_idx == Some(0),
+                                                ),
+                                                Some(1) => draw_setting_option_block(
+                                                    ui,
+                                                    "Note",
+                                                    "Note",
+                                                    delay.sel_idx == Some(1),
+                                                ),
+                                                Some(2) => draw_setting_option_block(
+                                                    ui,
+                                                    "Filter",
+                                                    "Filter",
+                                                    delay.sel_idx == Some(2),
+                                                ),
+                                                _ => draw_empty_block(ui),
+                                            }
+                                        }
+                                    });
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    ScreenState::InFxMyDelayAudio => {
+                        let bank_idx = app.config.input_fx.sel_bank_idx;
+                        let slot_idx = app.fx_screen_slot_idx;
+                        let slot = &app.config.input_fx.banks[bank_idx].slots[slot_idx];
+                        if let Some(fx) = slot.fx.as_ref() {
+                            match fx {
+                                crate::config::InputFx::MyDelay(delay) => {
+                                    let selected_idx = delay.audio_sel_idx.unwrap_or(0);
+                                    ui.horizontal_centered(|ui| {
+                                        ui.add_space(20.0);
+                                        for idx in page_indices(3, selected_idx) {
+                                            match idx {
+                                                Some(0) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", delay.level.value),
+                                                    &delay.level.label,
+                                                    delay.audio_sel_idx == Some(0),
+                                                ),
+                                                Some(1) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", delay.threshold.value),
+                                                    &delay.threshold.label,
+                                                    delay.audio_sel_idx == Some(1),
+                                                ),
+                                                Some(2) => draw_setting_option_block(
+                                                    ui,
+                                                    "Env",
+                                                    "Envelope",
+                                                    delay.audio_sel_idx == Some(2),
+                                                ),
+                                                _ => draw_empty_block(ui),
+                                            }
+                                        }
+                                    });
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    ScreenState::InFxMyDelayAudioEnv => {
+                        let bank_idx = app.config.input_fx.sel_bank_idx;
+                        let slot_idx = app.fx_screen_slot_idx;
+                        let slot = &app.config.input_fx.banks[bank_idx].slots[slot_idx];
+                        if let Some(fx) = slot.fx.as_ref() {
+                            match fx {
+                                crate::config::InputFx::MyDelay(delay) => {
+                                    let env_cfg = &delay.audio_env;
+                                    let selected_idx = env_cfg.sel_idx.unwrap_or(0);
+                                    ui.horizontal_centered(|ui| {
+                                        ui.add_space(20.0);
+                                        for idx in page_indices(9, selected_idx) {
+                                            match idx {
+                                                Some(0) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", env_cfg.attack_ms.value),
+                                                    &env_cfg.attack_ms.label,
+                                                    env_cfg.sel_idx == Some(0),
+                                                ),
+                                                Some(1) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", env_cfg.hold_ms.value),
+                                                    &env_cfg.hold_ms.label,
+                                                    env_cfg.sel_idx == Some(1),
+                                                ),
+                                                Some(2) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", env_cfg.decay_ms.value),
+                                                    &env_cfg.decay_ms.label,
+                                                    env_cfg.sel_idx == Some(2),
+                                                ),
+                                                Some(3) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", env_cfg.sustain_pct.value),
+                                                    &env_cfg.sustain_pct.label,
+                                                    env_cfg.sel_idx == Some(3),
+                                                ),
+                                                Some(4) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", env_cfg.release_ms.value),
+                                                    &env_cfg.release_ms.label,
+                                                    env_cfg.sel_idx == Some(4),
+                                                ),
+                                                Some(5) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", env_cfg.start_pct.value),
+                                                    &env_cfg.start_pct.label,
+                                                    env_cfg.sel_idx == Some(5),
+                                                ),
+                                                Some(6) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", env_cfg.tension_a.value),
+                                                    &env_cfg.tension_a.label,
+                                                    env_cfg.sel_idx == Some(6),
+                                                ),
+                                                Some(7) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", env_cfg.tension_d.value),
+                                                    &env_cfg.tension_d.label,
+                                                    env_cfg.sel_idx == Some(7),
+                                                ),
+                                                Some(8) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", env_cfg.tension_r.value),
+                                                    &env_cfg.tension_r.label,
+                                                    env_cfg.sel_idx == Some(8),
+                                                ),
+                                                _ => draw_empty_block(ui),
+                                            }
+                                        }
+                                    });
+                                    draw_page_indicator(ui, 9, selected_idx);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    ScreenState::InFxMyDelayNote => {
+                        let bank_idx = app.config.input_fx.sel_bank_idx;
+                        let slot_idx = app.fx_screen_slot_idx;
+                        let slot = &app.config.input_fx.banks[bank_idx].slots[slot_idx];
+                        if let Some(fx) = slot.fx.as_ref() {
+                            match fx {
+                                crate::config::InputFx::MyDelay(delay) => {
+                                    let note_cfg = &delay.note;
+                                    let selected_idx = note_cfg.sel_idx.unwrap_or(0);
+                                    ui.horizontal_centered(|ui| {
+                                        ui.add_space(20.0);
+                                        for idx in page_indices(4, selected_idx) {
+                                            match idx {
+                                                Some(0) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", note_cfg.note.value),
+                                                    &note_cfg.note.label,
+                                                    note_cfg.sel_idx == Some(0),
+                                                ),
+                                                Some(1) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", note_cfg.octave.value),
+                                                    &note_cfg.octave.label,
+                                                    note_cfg.sel_idx == Some(1),
+                                                ),
+                                                Some(2) => draw_setting_option_block(
+                                                    ui,
+                                                    &note_cfg.step.value,
+                                                    &note_cfg.step.label,
+                                                    note_cfg.sel_idx == Some(2),
+                                                ),
+                                                Some(3) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", note_cfg.edit.value),
+                                                    &note_cfg.edit.label,
+                                                    note_cfg.sel_idx == Some(3),
+                                                ),
+                                                _ => draw_empty_block(ui),
+                                            }
+                                        }
+                                    });
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    ScreenState::InFxMyDelayFilter => {
+                        let bank_idx = app.config.input_fx.sel_bank_idx;
+                        let slot_idx = app.fx_screen_slot_idx;
+                        let slot = &app.config.input_fx.banks[bank_idx].slots[slot_idx];
+                        if let Some(fx) = slot.fx.as_ref() {
+                            match fx {
+                                crate::config::InputFx::MyDelay(delay) => {
+                                    let filter = &delay.filter;
+                                    let selected_idx = delay.filter_sel_idx.unwrap_or(0);
+                                    ui.horizontal_centered(|ui| {
+                                        ui.add_space(20.0);
+                                        for idx in page_indices(6, selected_idx) {
+                                            match idx {
+                                                Some(0) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", filter.filter_type.value),
+                                                    &filter.filter_type.label,
+                                                    delay.filter_sel_idx == Some(0),
+                                                ),
+                                                Some(1) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", filter.cutoff_hz.value),
+                                                    &filter.cutoff_hz.label,
+                                                    delay.filter_sel_idx == Some(1),
+                                                ),
+                                                Some(2) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{:.1}", filter.resonance_x10.value as f32 / 10.0),
+                                                    "Resonance(Q)",
+                                                    delay.filter_sel_idx == Some(2),
+                                                ),
+                                                Some(3) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", filter.drive.value),
+                                                    &filter.drive.label,
+                                                    delay.filter_sel_idx == Some(3),
+                                                ),
+                                                Some(4) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", filter.mix.value),
+                                                    &filter.mix.label,
+                                                    delay.filter_sel_idx == Some(4),
+                                                ),
+                                                Some(5) => draw_setting_option_block(
+                                                    ui,
+                                                    "Env",
+                                                    "Envelope",
+                                                    delay.filter_sel_idx == Some(5),
+                                                ),
+                                                _ => draw_empty_block(ui),
+                                            }
+                                        }
+                                    });
+                                    draw_page_indicator(ui, 6, selected_idx);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    ScreenState::InFxMyDelayFilterEnv => {
+                        let bank_idx = app.config.input_fx.sel_bank_idx;
+                        let slot_idx = app.fx_screen_slot_idx;
+                        let slot = &app.config.input_fx.banks[bank_idx].slots[slot_idx];
+                        if let Some(fx) = slot.fx.as_ref() {
+                            match fx {
+                                crate::config::InputFx::MyDelay(delay) => {
+                                    let env_cfg = &delay.filter_env;
+                                    let selected_idx = env_cfg.sel_idx.unwrap_or(0);
+                                    ui.horizontal_centered(|ui| {
+                                        ui.add_space(20.0);
+                                        for idx in page_indices(9, selected_idx) {
+                                            match idx {
+                                                Some(0) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", env_cfg.attack_ms.value),
+                                                    &env_cfg.attack_ms.label,
+                                                    env_cfg.sel_idx == Some(0),
+                                                ),
+                                                Some(1) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", env_cfg.hold_ms.value),
+                                                    &env_cfg.hold_ms.label,
+                                                    env_cfg.sel_idx == Some(1),
+                                                ),
+                                                Some(2) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", env_cfg.decay_ms.value),
+                                                    &env_cfg.decay_ms.label,
+                                                    env_cfg.sel_idx == Some(2),
+                                                ),
+                                                Some(3) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", env_cfg.sustain_pct.value),
+                                                    &env_cfg.sustain_pct.label,
+                                                    env_cfg.sel_idx == Some(3),
+                                                ),
+                                                Some(4) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", env_cfg.release_ms.value),
+                                                    &env_cfg.release_ms.label,
+                                                    env_cfg.sel_idx == Some(4),
+                                                ),
+                                                Some(5) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", env_cfg.start_pct.value),
+                                                    &env_cfg.start_pct.label,
+                                                    env_cfg.sel_idx == Some(5),
+                                                ),
+                                                Some(6) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", env_cfg.tension_a.value),
+                                                    &env_cfg.tension_a.label,
+                                                    env_cfg.sel_idx == Some(6),
+                                                ),
+                                                Some(7) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", env_cfg.tension_d.value),
+                                                    &env_cfg.tension_d.label,
+                                                    env_cfg.sel_idx == Some(7),
+                                                ),
+                                                Some(8) => draw_setting_option_block(
+                                                    ui,
+                                                    &format!("{}", env_cfg.tension_r.value),
+                                                    &env_cfg.tension_r.label,
+                                                    env_cfg.sel_idx == Some(8),
+                                                ),
+                                                _ => draw_empty_block(ui),
+                                            }
+                                        }
+                                    });
+                                    draw_page_indicator(ui, 9, selected_idx);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                 }
             });
         });
@@ -1112,7 +1450,7 @@ fn screen_breadcrumb(app: &MyApp) -> Option<String> {
                 .as_ref()
                 .map(|fx| fx.name())
                 .unwrap_or("Empty");
-            Some(format!("Bank{}-Fx{}-{}-Filter", bank, slot, fx_name))
+            Some(format!("Bank{}-Fx{}-{}", bank, slot, fx_name))
         }
         ScreenState::InFxReverb => {
             let bank = app.config.input_fx.sel_bank_idx + 1;
@@ -1129,7 +1467,109 @@ fn screen_breadcrumb(app: &MyApp) -> Option<String> {
                 .as_ref()
                 .map(|fx| fx.name())
                 .unwrap_or("Empty");
-            Some(format!("Bank{}-Fx{}-{}-Reverb", bank, slot, fx_name))
+            Some(format!("Bank{}-Fx{}-{}", bank, slot, fx_name))
+        }
+        ScreenState::InFxMyDelay => {
+            let bank = app.config.input_fx.sel_bank_idx + 1;
+            let slot = match app.fx_screen_slot_idx {
+                0 => "Q",
+                1 => "W",
+                2 => "E",
+                3 => "R",
+                _ => "?",
+            };
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx]
+                .slots[app.fx_screen_slot_idx]
+                .fx
+                .as_ref()
+                .map(|fx| fx.name())
+                .unwrap_or("Empty");
+            Some(format!("Bank{}-Fx{}-{}", bank, slot, fx_name))
+        }
+        ScreenState::InFxMyDelayAudio => {
+            let bank = app.config.input_fx.sel_bank_idx + 1;
+            let slot = match app.fx_screen_slot_idx {
+                0 => "Q",
+                1 => "W",
+                2 => "E",
+                3 => "R",
+                _ => "?",
+            };
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx]
+                .slots[app.fx_screen_slot_idx]
+                .fx
+                .as_ref()
+                .map(|fx| fx.name())
+                .unwrap_or("Empty");
+            Some(format!("Bank{}-Fx{}-{}-Audio", bank, slot, fx_name))
+        }
+        ScreenState::InFxMyDelayAudioEnv => {
+            let bank = app.config.input_fx.sel_bank_idx + 1;
+            let slot = match app.fx_screen_slot_idx {
+                0 => "Q",
+                1 => "W",
+                2 => "E",
+                3 => "R",
+                _ => "?",
+            };
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx]
+                .slots[app.fx_screen_slot_idx]
+                .fx
+                .as_ref()
+                .map(|fx| fx.name())
+                .unwrap_or("Empty");
+            Some(format!("Bank{}-Fx{}-{}-Audio-Envelope", bank, slot, fx_name))
+        }
+        ScreenState::InFxMyDelayNote => {
+            let bank = app.config.input_fx.sel_bank_idx + 1;
+            let slot = match app.fx_screen_slot_idx {
+                0 => "Q",
+                1 => "W",
+                2 => "E",
+                3 => "R",
+                _ => "?",
+            };
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx]
+                .slots[app.fx_screen_slot_idx]
+                .fx
+                .as_ref()
+                .map(|fx| fx.name())
+                .unwrap_or("Empty");
+            Some(format!("Bank{}-Fx{}-{}-Note", bank, slot, fx_name))
+        }
+        ScreenState::InFxMyDelayFilter => {
+            let bank = app.config.input_fx.sel_bank_idx + 1;
+            let slot = match app.fx_screen_slot_idx {
+                0 => "Q",
+                1 => "W",
+                2 => "E",
+                3 => "R",
+                _ => "?",
+            };
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx]
+                .slots[app.fx_screen_slot_idx]
+                .fx
+                .as_ref()
+                .map(|fx| fx.name())
+                .unwrap_or("Empty");
+            Some(format!("Bank{}-Fx{}-{}-Filter", bank, slot, fx_name))
+        }
+        ScreenState::InFxMyDelayFilterEnv => {
+            let bank = app.config.input_fx.sel_bank_idx + 1;
+            let slot = match app.fx_screen_slot_idx {
+                0 => "Q",
+                1 => "W",
+                2 => "E",
+                3 => "R",
+                _ => "?",
+            };
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx]
+                .slots[app.fx_screen_slot_idx]
+                .fx
+                .as_ref()
+                .map(|fx| fx.name())
+                .unwrap_or("Empty");
+            Some(format!("Bank{}-Fx{}-{}-Filter-Envelope", bank, slot, fx_name))
         }
     }
 }

@@ -16,6 +16,7 @@ use crate::config::reverb_configs::{
     REVERB_HIGHCUT_MAX, REVERB_LOWCUT_MAX_HZ, REVERB_LOWCUT_MIN_HZ, REVERB_PREDELAY_MAX_MS,
     REVERB_RT60_MAX_MS, REVERB_RT60_MIN_MS, REVERB_SIZE_MAX, REVERB_WIDTH_MAX,
 };
+use crate::config::mydelay_configs::{MYDELAY_LEVEL_MAX, MYDELAY_THRESHOLD_MAX};
 use crate::config::{AppConfig, FxKind, InputFx};
 
 const INDEX_FILE: &str = "projects_index.json";
@@ -69,6 +70,8 @@ pub struct FxSlotData {
     pub filter: Option<FilterData>,
     #[serde(default)]
     pub reverb: Option<ReverbData>,
+    #[serde(default)]
+    pub my_delay: Option<MyDelayData>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -119,6 +122,22 @@ pub struct FilterData {
     pub resonance_x10: usize,
     pub drive: usize,
     pub mix: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct MyDelayData {
+    pub level: usize,
+    pub threshold: usize,
+    pub note_current: String,
+    pub octave_current: usize,
+    pub step: String,
+    pub note_seq: Vec<Option<NoteOctData>>,
+    pub note_step_len_seq: Vec<usize>,
+    pub filter: FilterData,
+    #[serde(default)]
+    pub audio_env: EnvelopeData,
+    #[serde(default)]
+    pub filter_env: EnvelopeData,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -222,6 +241,7 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                 osc: None,
                 filter: None,
                 reverb: None,
+                my_delay: None,
             };
             if let Some(fx) = slot.fx.as_ref() {
                 match fx {
@@ -297,6 +317,58 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                             width: reverb.width.value,
                             high_cut: reverb.high_cut.value,
                             low_cut: reverb.low_cut.value,
+                        });
+                    }
+                    InputFx::MyDelay(delay) => {
+                        slot_data.kind = "MyDelay".to_string();
+                        let seq = delay
+                            .note
+                            .seq()
+                            .iter()
+                            .map(|n| {
+                                n.map(|x| NoteOctData {
+                                    note: note_to_string(x.note).to_string(),
+                                    octave: x.octave,
+                                })
+                            })
+                            .collect();
+                        slot_data.my_delay = Some(MyDelayData {
+                            level: delay.level.value,
+                            threshold: delay.threshold.value,
+                            note_current: note_to_string(delay.note.note.value).to_string(),
+                            octave_current: delay.note.octave.value,
+                            step: delay.note.step.value.clone(),
+                            note_seq: seq,
+                            note_step_len_seq: delay.note.step_len_seq().to_vec(),
+                            filter: FilterData {
+                                filter_type: filter_type_to_string(delay.filter.filter_type.value).to_string(),
+                                cutoff_hz: delay.filter.cutoff_hz.value,
+                                resonance_x10: delay.filter.resonance_x10.value,
+                                drive: delay.filter.drive.value,
+                                mix: delay.filter.mix.value,
+                            },
+                            audio_env: EnvelopeData {
+                                attack_ms: delay.audio_env.attack_ms.value,
+                                hold_ms: delay.audio_env.hold_ms.value,
+                                decay_ms: delay.audio_env.decay_ms.value,
+                                sustain_pct: delay.audio_env.sustain_pct.value,
+                                release_ms: delay.audio_env.release_ms.value,
+                                start_pct: delay.audio_env.start_pct.value,
+                                tension_a: delay.audio_env.tension_a.value,
+                                tension_d: delay.audio_env.tension_d.value,
+                                tension_r: delay.audio_env.tension_r.value,
+                            },
+                            filter_env: EnvelopeData {
+                                attack_ms: delay.filter_env.attack_ms.value,
+                                hold_ms: delay.filter_env.hold_ms.value,
+                                decay_ms: delay.filter_env.decay_ms.value,
+                                sustain_pct: delay.filter_env.sustain_pct.value,
+                                release_ms: delay.filter_env.release_ms.value,
+                                start_pct: delay.filter_env.start_pct.value,
+                                tension_a: delay.filter_env.tension_a.value,
+                                tension_d: delay.filter_env.tension_d.value,
+                                tension_r: delay.filter_env.tension_r.value,
+                            },
                         });
                     }
                 }
@@ -445,6 +517,79 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                             reverb.high_cut.value = reverb_data.high_cut.min(REVERB_HIGHCUT_MAX);
                             reverb.low_cut.value =
                                 reverb_data.low_cut.clamp(REVERB_LOWCUT_MIN_HZ, REVERB_LOWCUT_MAX_HZ);
+                        }
+                    }
+                }
+                "MyDelay" => {
+                    slot.set_kind(FxKind::MyDelay);
+                    if let Some(InputFx::MyDelay(delay)) = slot.fx.as_mut() {
+                        if let Some(delay_data) = &slot_data.my_delay {
+                            delay.level.value = delay_data.level.min(MYDELAY_LEVEL_MAX);
+                            delay.threshold.value = delay_data.threshold.min(MYDELAY_THRESHOLD_MAX);
+                            if let Some(n) = string_to_note(&delay_data.note_current) {
+                                delay.note.note.value = n;
+                            }
+                            delay.note.octave.value = delay_data.octave_current;
+                            delay.note.step.value = delay_data.step.clone();
+                            let seq = delay_data
+                                .note_seq
+                                .iter()
+                                .map(|n| {
+                                    n.as_ref().map(|x| NoteOct {
+                                        note: string_to_note(&x.note).unwrap_or(Note::N),
+                                        octave: x.octave,
+                                    })
+                                })
+                                .collect();
+                            delay.note
+                                .set_seq_with_steps(seq, delay_data.note_step_len_seq.clone());
+                            if let Some(t) = string_to_filter_type(&delay_data.filter.filter_type) {
+                                delay.filter.filter_type.value = t;
+                            }
+                            delay.filter.cutoff_hz.value = delay_data.filter.cutoff_hz.clamp(20, 20_000);
+                            delay.filter.resonance_x10.value = delay_data.filter.resonance_x10.clamp(1, 100);
+                            delay.filter.drive.value = delay_data.filter.drive.min(100);
+                            delay.filter.mix.value = delay_data.filter.mix.min(100);
+                            delay.audio_env.attack_ms.value =
+                                delay_data.audio_env.attack_ms.min(ENVELOPE_ATTACK_MAX_MS);
+                            delay.audio_env.hold_ms.value =
+                                delay_data.audio_env.hold_ms.min(ENVELOPE_HOLD_MAX_MS);
+                            delay.audio_env.decay_ms.value =
+                                delay_data.audio_env.decay_ms.min(ENVELOPE_DECAY_MAX_MS);
+                            delay.audio_env.sustain_pct.value =
+                                delay_data.audio_env.sustain_pct.min(ENVELOPE_SUSTAIN_MAX_PCT);
+                            delay.audio_env.release_ms.value = delay_data
+                                .audio_env
+                                .release_ms
+                                .clamp(ENVELOPE_RELEASE_MIN_MS, ENVELOPE_RELEASE_MAX_MS);
+                            delay.audio_env.start_pct.value =
+                                delay_data.audio_env.start_pct.min(ENVELOPE_START_MAX_PCT);
+                            delay.audio_env.tension_a.value =
+                                delay_data.audio_env.tension_a.min(ENVELOPE_TENSION_MAX);
+                            delay.audio_env.tension_d.value =
+                                delay_data.audio_env.tension_d.min(ENVELOPE_TENSION_MAX);
+                            delay.audio_env.tension_r.value =
+                                delay_data.audio_env.tension_r.min(ENVELOPE_TENSION_MAX);
+                            delay.filter_env.attack_ms.value =
+                                delay_data.filter_env.attack_ms.min(ENVELOPE_ATTACK_MAX_MS);
+                            delay.filter_env.hold_ms.value =
+                                delay_data.filter_env.hold_ms.min(ENVELOPE_HOLD_MAX_MS);
+                            delay.filter_env.decay_ms.value =
+                                delay_data.filter_env.decay_ms.min(ENVELOPE_DECAY_MAX_MS);
+                            delay.filter_env.sustain_pct.value =
+                                delay_data.filter_env.sustain_pct.min(ENVELOPE_SUSTAIN_MAX_PCT);
+                            delay.filter_env.release_ms.value = delay_data
+                                .filter_env
+                                .release_ms
+                                .clamp(ENVELOPE_RELEASE_MIN_MS, ENVELOPE_RELEASE_MAX_MS);
+                            delay.filter_env.start_pct.value =
+                                delay_data.filter_env.start_pct.min(ENVELOPE_START_MAX_PCT);
+                            delay.filter_env.tension_a.value =
+                                delay_data.filter_env.tension_a.min(ENVELOPE_TENSION_MAX);
+                            delay.filter_env.tension_d.value =
+                                delay_data.filter_env.tension_d.min(ENVELOPE_TENSION_MAX);
+                            delay.filter_env.tension_r.value =
+                                delay_data.filter_env.tension_r.min(ENVELOPE_TENSION_MAX);
                         }
                     }
                 }

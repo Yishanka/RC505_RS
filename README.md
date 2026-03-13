@@ -33,6 +33,9 @@ It can only be operated by keyboard. The mannual is listed below.
 
     In `Loop` status you can also controls the fx. Press `T` to toggle between selecting banks or togglingg fx. So far you can only controls Input FX. When you are selecting banks (buttons are blue), you can press `QWER` to switch among 4 banks. When you are toggling input fx (buttons are red), you can press `QWER` to controls the on/off of the 4 input fx respectively. 
 
-4. When you are in `Screen` status, you can controls the settings/configs of the project. 
+4. When you are in `Screen` status, you can controls the settings/configs of the project. There are 2 types of config: Enum Config, Numeric Config. For Enum Config, press `UpArrow` and `DownArrow` to switch between different values. For Numeric Config, input numbers or backspace to change the value. The configs are organized recursively, meaning you can find detailed config set in a config set, which also consists of Enum Config, Numeric Config and other config set. Press `Enter` to enter in the config set.
 
-- If you press `B`, you get into the beat configs. 
+The followings are different Configs Type (mention not *config* type). These are the entrance of the recursively organized configs.
+- If you press `B`, you get into the **Beat Configs**. You can just input numbers and `backspace` to change the BPM. There is another special feature: you can also tap `Space` consistently to get the BPM you would like. 
+- If you press `M`, you get into the **System Configs**. This mainly controls the input and output devices. 
+- If you press `QWER`, you get into the corresponding input fx of the current bank. You can choose one (and only one) Fx engine to bind on the selected input fx slot. If you press enter, you will get into the configs. **IMPORTANT: SO FAR, IF YOU SWITCH THE FX ENGINE, THE CONFIGS YOU HAVE SETTED WILL IMMEDIATELY BE LOST. THIS IS A BUG TO BE FIXED IN THE FUTURE.** 
