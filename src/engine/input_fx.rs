@@ -42,9 +42,8 @@ use crate::dsp::envelope::AhdsrParams;
 use crate::dsp::filter::{process_sample as process_filter_sample, FilterDspState, FilterParams};
 use crate::dsp::my_delay::{process_sample as process_mydelay_sample, MyDelayDspState, MyDelayParams};
 use crate::dsp::reverb::{process_frame as process_reverb_frame, ReverbDspState, ReverbParams};
-use crate::dsp::oscillator::{
-    note_at_time, process_sample as process_osc_sample, seq_bool_at_time, OscillatorDspState,
-};
+use crate::dsp::oscillator::{process_sample as process_osc_sample, OscillatorDspState,};
+use crate::dsp::note::{note_at_time, seq_bool_at_time}; 
 
 const DEFAULT_BPM: usize = 120;
 
