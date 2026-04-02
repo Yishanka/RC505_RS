@@ -37,6 +37,9 @@ pub enum ScreenState {
     InFxMyDelayNote,
     InFxMyDelayFilter,
     InFxMyDelayFilterEnv,
+    TrackFxSelect,
+    InTrackFxDelay,
+    InTrackFxRoll,
 }
 
 #[derive(PartialEq, Clone, Copy)]

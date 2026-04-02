@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::HeapRb;
 use crate::engine::input_fx::InputFxEngine;
+use crate::engine::track_fx::TrackFxEngine;
 
 // 128 在 48kHz 下约 2.6ms，在 96kHz 下约 1.3ms
 // 如果报错，可以尝试 256
@@ -91,7 +92,16 @@ impl EngineTrack {
     }
 }
 
-fn finalize_recording_stop(track: &mut EngineTrack, latency_comp_samples: usize) {
+fn align_cursor_to_channels(cursor: usize, len: usize, channels: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let ch = channels.max(1).min(len);
+    let aligned = cursor - (cursor % ch);
+    aligned % len
+}
+
+fn finalize_recording_stop(track: &mut EngineTrack, latency_comp_samples: usize, channels: usize) {
     track.recording = false;
     shift_buffer_earlier_in_place(&mut track.buffer, latency_comp_samples);
     if let Some(target_len) = track.record_target_len {
@@ -108,7 +118,7 @@ fn finalize_recording_stop(track: &mut EngineTrack, latency_comp_samples: usize)
     track.play_cursor = if track.buffer.is_empty() {
         0
     } else {
-        latency_comp_samples % track.buffer.len()
+        align_cursor_to_channels(latency_comp_samples, track.buffer.len(), channels)
     };
     track.overdub_cursor = track.play_cursor;
     track.record_tail_remaining = 0;
@@ -126,7 +136,7 @@ impl EngineState {
         }
     }
 
-    fn process_timeline(&mut self, now: Instant, latency_comp_samples: usize) {
+    fn process_timeline(&mut self, now: Instant, latency_comp_samples: usize, channels: usize) {
         for track in &mut self.tracks {
             if let Some(start_at) = track.record_start_at {
                 if now >= start_at {
@@ -150,7 +160,7 @@ impl EngineState {
                         track.record_target_len = Some(track.buffer.len());
                         track.record_tail_remaining = latency_comp_samples;
                         if track.record_tail_remaining == 0 {
-                            finalize_recording_stop(track, latency_comp_samples);
+                            finalize_recording_stop(track, latency_comp_samples, channels);
                         }
                     }
                     track.record_stop_at = None;
@@ -185,6 +195,7 @@ pub struct AudioIO {
     state: Arc<Mutex<EngineState>>,
     latency_comp: usize, // Input latency compensation (in milliseconds).
     fx_engine: Arc<Mutex<InputFxEngine>>,
+    track_fx_engine: Arc<Mutex<TrackFxEngine>>,
     realtime_enabled: Arc<AtomicBool>,
 }
 
@@ -192,6 +203,7 @@ impl AudioIO {
     pub fn new(input_name: &str, output_name: &str, track_count: usize, latency_comp: usize) -> Result<Self> {
         let state = Arc::new(Mutex::new(EngineState::new(track_count)));
         let fx_engine = Arc::new(Mutex::new(InputFxEngine::new(48_000.0)));
+        let track_fx_engine = Arc::new(Mutex::new(TrackFxEngine::new(48_000.0, track_count)));
         let realtime_enabled = Arc::new(AtomicBool::new(true));
         let (input_stream, output_stream, config) =
             Self::build_streams(
@@ -199,6 +211,7 @@ impl AudioIO {
                 output_name,
                 Arc::clone(&state),
                 Arc::clone(&fx_engine),
+                Arc::clone(&track_fx_engine),
                 Arc::clone(&realtime_enabled),
                 latency_comp,
             )?;
@@ -212,6 +225,7 @@ impl AudioIO {
             state,
             latency_comp,
             fx_engine,
+            track_fx_engine,
             realtime_enabled,
         })
     }
@@ -221,6 +235,7 @@ impl AudioIO {
         output_name: &str,
         state: Arc<Mutex<EngineState>>,
         fx_engine: Arc<Mutex<InputFxEngine>>,
+        track_fx_engine: Arc<Mutex<TrackFxEngine>>,
         realtime_enabled: Arc<AtomicBool>,
         latency_comp: usize, 
     ) -> Result<(cpal::Stream, cpal::Stream, cpal::StreamConfig)> {
@@ -246,6 +261,9 @@ impl AudioIO {
         config.buffer_size = cpal::BufferSize::Fixed(BUFFER_SIZE);
         if let Ok(mut fx) = fx_engine.lock() {
             fx.set_sample_rate(config.sample_rate.0 as f32);
+        }
+        if let Ok(mut track_fx) = track_fx_engine.lock() {
+            track_fx.set_sample_rate(config.sample_rate.0 as f32);
         }
         let latency_comp_samples =
             ((config.sample_rate.0 as f32 * latency_comp as f32 / 1000.0) as usize)
@@ -310,7 +328,7 @@ impl AudioIO {
                                 let consumed = processed_block.len().min(track.record_tail_remaining);
                                 track.record_tail_remaining -= consumed;
                                 if track.record_tail_remaining == 0 {
-                                    finalize_recording_stop(track, latency_comp_samples);
+                                    finalize_recording_stop(track, latency_comp_samples, channels);
                                 }
                             }
                         }
@@ -325,6 +343,7 @@ impl AudioIO {
         )?;
 
         let output_state = Arc::clone(&state);
+        let output_track_fx = Arc::clone(&track_fx_engine);
         let output_rt_enabled = Arc::clone(&realtime_enabled);
         let output_stream = output_device.build_output_stream(
             &config,
@@ -337,38 +356,94 @@ impl AudioIO {
                 }
                 let now: Instant = Instant::now();
                 let mut guard: Option<std::sync::MutexGuard<'_, EngineState>> = output_state.lock().ok();
+                let channels = config.channels as usize;
                 if let Some(engine) = guard.as_mut() {
-                    engine.process_timeline(now, latency_comp_samples);
+                    engine.process_timeline(now, latency_comp_samples, channels);
                 }
-                for out in data.iter_mut() {
-                    let input_processed = cons.pop().unwrap_or(0.0);
-                    let mut mixed = 0.0;
+                let mut track_fx_guard = output_track_fx.lock().ok();
+                let (base_elapsed, sample_rate) = if let Some(track_fx) = track_fx_guard.as_ref() {
+                    let elapsed = track_fx
+                        .metronome_start()
+                        .map(|start| now.saturating_duration_since(start).as_secs_f64())
+                        .unwrap_or(0.0);
+                    (elapsed, track_fx.sample_rate())
+                } else {
+                    (0.0, config.sample_rate.0 as f32)
+                };
+                let sec_per_frame = 1.0 / sample_rate.max(1.0) as f64;
+
+                for (frame_idx, frame) in data.chunks_mut(channels).enumerate() {
+                    let input_l = cons.pop().unwrap_or(0.0);
+                    let input_r = if channels > 1 {
+                        cons.pop().unwrap_or(input_l)
+                    } else {
+                        input_l
+                    };
+                    for _ in 2..channels {
+                        let _ = cons.pop();
+                    }
+
+                    let elapsed = base_elapsed + frame_idx as f64 * sec_per_frame;
+                    let mut mixed_l = 0.0f32;
+                    let mut mixed_r = 0.0f32;
 
                     if let Some(engine) = guard.as_mut() {
-                        for track in &mut engine.tracks {
-                            if track.playing && !track.buffer.is_empty() {
-                                let idx = track.play_cursor;
-                                if track.overdubbing {
-                                    let len = track.buffer.len();
-                                    let comp = latency_comp_samples % len;
-                                    // Write overdub a bit earlier than current play cursor
-                                    // so overdub timing better aligns with intended beat.
-                                    let write_idx = (idx + len - comp) % len;
-                                    track.overdub_cursor = write_idx;
-                                    let overdubbed = track.buffer[write_idx] + input_processed;
-                                    track.buffer[write_idx] = overdubbed.clamp(-1.0, 1.0);
-                                }
-                                mixed += track.buffer[idx];
-                                track.play_cursor += 1;
-                                if track.play_cursor >= track.buffer.len() {
-                                    track.play_cursor = 0;
+                        for (track_idx, track) in engine.tracks.iter_mut().enumerate() {
+                            if !track.playing || track.buffer.is_empty() {
+                                continue;
+                            }
+
+                            let len = track.buffer.len();
+                            let idx_l = track.play_cursor % len;
+                            let idx_r = if channels > 1 {
+                                (idx_l + 1) % len
+                            } else {
+                                idx_l
+                            };
+
+                            if track.overdubbing {
+                                let comp = latency_comp_samples % len;
+                                let write_l = (idx_l + len - comp) % len;
+                                track.overdub_cursor = write_l;
+                                track.buffer[write_l] = (track.buffer[write_l] + input_l).clamp(-1.0, 1.0);
+                                if channels > 1 {
+                                    let write_r = (write_l + 1) % len;
+                                    track.buffer[write_r] = (track.buffer[write_r] + input_r).clamp(-1.0, 1.0);
                                 }
                             }
+
+                            let dry_l = track.buffer[idx_l];
+                            let dry_r = if channels > 1 { track.buffer[idx_r] } else { dry_l };
+                            let (wet_l, wet_r) = if let Some(track_fx) = track_fx_guard.as_mut() {
+                                track_fx.process_frame(
+                                    track_idx,
+                                    elapsed,
+                                    dry_l,
+                                    dry_r,
+                                    &track.buffer,
+                                    idx_l,
+                                    channels,
+                                )
+                            } else {
+                                (dry_l, dry_r)
+                            };
+
+                            mixed_l += wet_l;
+                            mixed_r += wet_r;
+
+                            track.play_cursor = (track.play_cursor + channels) % len;
                         }
                     }
-                    // realtime io
-                    mixed += input_processed;
-                    *out = mixed;
+
+                    let out_l = (mixed_l + input_l).clamp(-1.0, 1.0);
+                    let out_r = (mixed_r + input_r).clamp(-1.0, 1.0);
+                    frame[0] = out_l;
+                    if channels > 1 {
+                        frame[1] = out_r;
+                    }
+                    for ch in 2..channels {
+                        frame[ch] = ((out_l + out_r) * 0.5).clamp(-1.0, 1.0);
+                    }
                 }
             },
             err_fn,
@@ -392,6 +467,7 @@ impl AudioIO {
                 output_name,
                 Arc::clone(&self.state),
                 Arc::clone(&self.fx_engine),
+                Arc::clone(&self.track_fx_engine),
                 Arc::clone(&self.realtime_enabled),
                 self.latency_comp,
             )?;
@@ -417,6 +493,7 @@ impl AudioIO {
             &self.output_name,
             Arc::clone(&self.state),
             Arc::clone(&self.fx_engine),
+            Arc::clone(&self.track_fx_engine),
             Arc::clone(&self.realtime_enabled),
             latency_comp,
         )?;
@@ -445,8 +522,17 @@ impl AudioIO {
         }
     }
 
+    pub fn update_track_fx(&self, config: &crate::config::TrackFxConfig) {
+        if let Ok(mut fx) = self.track_fx_engine.lock() {
+            fx.update_from_config(config);
+        }
+    }
+
     pub fn update_metronome(&self, start_time: Option<Instant>, bpm: usize) {
         if let Ok(mut fx) = self.fx_engine.lock() {
+            fx.update_metronome(start_time, bpm);
+        }
+        if let Ok(mut fx) = self.track_fx_engine.lock() {
             fx.update_metronome(start_time, bpm);
         }
     }
@@ -488,12 +574,14 @@ impl AudioIO {
         if let Ok(mut engine) = self.state.lock() {
             if let Some(track) = engine.tracks.get_mut(track_id) {
                 if !track.buffer.is_empty() {
+                    let channels = self.config.channels as usize;
                     if let Some(p) = progress {
                         let len = track.buffer.len();
                         let normalized = p.rem_euclid(1.0);
                         let cursor = ((normalized * len as f32).floor() as usize).min(len - 1);
-                        track.play_cursor = cursor;
-                        track.overdub_cursor = cursor;
+                        let aligned = align_cursor_to_channels(cursor, len, channels);
+                        track.play_cursor = aligned;
+                        track.overdub_cursor = aligned;
                     } else {
                         track.play_cursor = 0;
                         track.overdub_cursor = 0;
@@ -511,8 +599,10 @@ impl AudioIO {
                     return;
                 }
                 let len = track.buffer.len();
+                let channels = self.config.channels as usize;
                 let normalized = progress.rem_euclid(1.0);
                 let target = ((normalized * len as f32).floor() as usize).min(len - 1);
+                let target = align_cursor_to_channels(target, len, channels);
                 let curr = track.play_cursor;
                 let direct = curr.abs_diff(target);
                 let cyclic = direct.min(len - direct);

@@ -7,6 +7,11 @@ use crate::config::input_fx_configs::{FX_BANK_COUNT, FX_SLOT_COUNT};
 use crate::config::note_configs::{Note, NoteOct};
 use crate::config::osc_configs::Waveform;
 use crate::config::filter_configs::FilterType;
+use crate::config::track_delay_configs::{
+    TRACK_DELAY_DAMP_MAX_HZ, TRACK_DELAY_DAMP_MIN_HZ, TRACK_DELAY_FEEDBACK_MAX_PCT,
+    TRACK_DELAY_MIX_MAX_PCT, TRACK_DELAY_TIME_MAX_MS, TRACK_DELAY_TIME_MIN_MS,
+};
+use crate::config::track_fx_configs::{TRACK_FX_BANK_COUNT, TRACK_FX_SLOT_COUNT};
 use crate::config::envelope_configs::{
     ENVELOPE_ATTACK_MAX_MS, ENVELOPE_DECAY_MAX_MS, ENVELOPE_HOLD_MAX_MS,
     ENVELOPE_RELEASE_MAX_MS, ENVELOPE_RELEASE_MIN_MS, ENVELOPE_START_MAX_PCT, ENVELOPE_SUSTAIN_MAX_PCT,
@@ -16,8 +21,9 @@ use crate::config::reverb_configs::{
     REVERB_HIGHCUT_MAX, REVERB_LOWCUT_MAX_HZ, REVERB_LOWCUT_MIN_HZ, REVERB_PREDELAY_MAX_MS,
     REVERB_RT60_MAX_MS, REVERB_RT60_MIN_MS, REVERB_SIZE_MAX, REVERB_WIDTH_MAX,
 };
+use crate::config::track_roll_configs::RollStep;
 use crate::config::mydelay_configs::{MYDELAY_LEVEL_MAX, MYDELAY_THRESHOLD_MAX};
-use crate::config::{AppConfig, FxKind, InputFx};
+use crate::config::{AppConfig, FxKind, InputFx, TrackFx, TrackFxKind};
 
 const INDEX_FILE: &str = "projects_index.json";
 
@@ -37,6 +43,8 @@ pub struct ProjectData {
     pub beat: BeatData,
     pub system: SystemData,
     pub input_fx: InputFxData,
+    #[serde(default)]
+    pub track_fx: TrackFxData,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -55,6 +63,51 @@ pub struct SystemData {
 pub struct InputFxData {
     pub selected_bank_idx: usize,
     pub banks: Vec<FxBankData>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TrackFxData {
+    pub selected_bank_idx: usize,
+    #[serde(default)]
+    pub banks: Vec<TrackFxBankData>,
+    #[serde(default)]
+    pub tracks: Vec<TrackFxTrackData>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TrackFxTrackData {
+    #[serde(default)]
+    pub enabled: Vec<Vec<bool>>,
+    #[serde(default)]
+    pub banks: Vec<TrackFxBankData>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TrackFxBankData {
+    pub slots: Vec<TrackFxSlotData>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TrackFxSlotData {
+    pub is_enabled: bool,
+    pub kind: String,
+    #[serde(default)]
+    pub delay: Option<TrackDelayData>,
+    #[serde(default)]
+    pub roll: Option<TrackRollData>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TrackDelayData {
+    pub time_ms: usize,
+    pub feedback_pct: usize,
+    pub high_damp_hz: usize,
+    pub mix_pct: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TrackRollData {
+    pub step: usize,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -174,6 +227,16 @@ impl Default for FilterData {
             resonance_x10: 7,
             drive: 0,
             mix: 100,
+        }
+    }
+}
+
+impl Default for TrackFxData {
+    fn default() -> Self {
+        Self {
+            selected_bank_idx: 0,
+            banks: Vec::new(),
+            tracks: Vec::new(),
         }
     }
 }
@@ -378,6 +441,49 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
         banks.push(FxBankData { slots });
     }
 
+    let mut track_fx_banks = Vec::with_capacity(TRACK_FX_BANK_COUNT);
+    for bank in &config.track_fx.banks {
+        let mut track_slots = Vec::with_capacity(TRACK_FX_SLOT_COUNT);
+        for slot in &bank.slots {
+            let mut slot_data = TrackFxSlotData {
+                is_enabled: false,
+                kind: "None".to_string(),
+                delay: None,
+                roll: None,
+            };
+            if let Some(fx) = slot.fx.as_ref() {
+                match fx {
+                    TrackFx::Delay(delay) => {
+                        slot_data.kind = "Delay".to_string();
+                        slot_data.delay = Some(TrackDelayData {
+                            time_ms: delay.time_ms.value,
+                            feedback_pct: delay.feedback_pct.value,
+                            high_damp_hz: delay.high_damp_hz.value,
+                            mix_pct: delay.mix_pct.value,
+                        });
+                    }
+                    TrackFx::Roll(roll) => {
+                        slot_data.kind = "Roll".to_string();
+                        slot_data.roll = Some(TrackRollData {
+                            step: roll.step.value.value(),
+                        });
+                    }
+                }
+            }
+            track_slots.push(slot_data);
+        }
+        track_fx_banks.push(TrackFxBankData { slots: track_slots });
+    }
+
+    let mut track_fx_tracks = Vec::with_capacity(config.track_fx.tracks.len());
+    for track in &config.track_fx.tracks {
+        let enabled: Vec<Vec<bool>> = track.enabled.iter().map(|row| row.to_vec()).collect();
+        track_fx_tracks.push(TrackFxTrackData {
+            enabled,
+            banks: Vec::new(),
+        });
+    }
+
     ProjectData {
         beat: BeatData {
             bpm: config.beat_config.current_bpm(),
@@ -390,6 +496,11 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
         input_fx: InputFxData {
             selected_bank_idx: config.input_fx.sel_bank_idx,
             banks,
+        },
+        track_fx: TrackFxData {
+            selected_bank_idx: config.track_fx.sel_bank_idx,
+            banks: track_fx_banks,
+            tracks: track_fx_tracks,
         },
     }
 }
@@ -595,6 +706,87 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                 }
                 _ => {
                     slot.set_kind(FxKind::None);
+                }
+            }
+        }
+    }
+
+    config.track_fx.sel_bank_idx = data.track_fx.selected_bank_idx.min(TRACK_FX_BANK_COUNT - 1);
+
+    // Reset all per-track enable states before applying loaded data.
+    for track in &mut config.track_fx.tracks {
+        for bank in 0..TRACK_FX_BANK_COUNT {
+            for slot in 0..TRACK_FX_SLOT_COUNT {
+                track.enabled[bank][slot] = false;
+            }
+        }
+    }
+
+    let binding_banks: &[TrackFxBankData] = if !data.track_fx.banks.is_empty() {
+        data.track_fx.banks.as_slice()
+    } else if let Some(first_track) = data.track_fx.tracks.first() {
+        // Backward compatibility: old schema stored bindings under each track.
+        first_track.banks.as_slice()
+    } else {
+        &[]
+    };
+
+    for (bank_idx, bank_data) in binding_banks.iter().take(TRACK_FX_BANK_COUNT).enumerate() {
+        for (slot_idx, slot_data) in bank_data.slots.iter().take(TRACK_FX_SLOT_COUNT).enumerate() {
+            match slot_data.kind.as_str() {
+                "Delay" => {
+                    config.track_fx.set_slot_kind(bank_idx, slot_idx, TrackFxKind::Delay);
+                    if let Some(TrackFx::Delay(delay)) = config.track_fx.slot_fx_mut(bank_idx, slot_idx) {
+                        if let Some(delay_data) = &slot_data.delay {
+                            delay.time_ms.value = delay_data
+                                .time_ms
+                                .clamp(TRACK_DELAY_TIME_MIN_MS, TRACK_DELAY_TIME_MAX_MS);
+                            delay.feedback_pct.value = delay_data.feedback_pct.min(TRACK_DELAY_FEEDBACK_MAX_PCT);
+                            delay.high_damp_hz.value = delay_data
+                                .high_damp_hz
+                                .clamp(TRACK_DELAY_DAMP_MIN_HZ, TRACK_DELAY_DAMP_MAX_HZ);
+                            delay.mix_pct.value = delay_data.mix_pct.min(TRACK_DELAY_MIX_MAX_PCT);
+                        }
+                    }
+                }
+                "Roll" => {
+                    config.track_fx.set_slot_kind(bank_idx, slot_idx, TrackFxKind::Roll);
+                    if let Some(TrackFx::Roll(roll)) = config.track_fx.slot_fx_mut(bank_idx, slot_idx) {
+                        if let Some(roll_data) = &slot_data.roll {
+                            roll.step.value = match roll_data.step {
+                                2 => RollStep::Two,
+                                8 => RollStep::Eight,
+                                _ => RollStep::Four,
+                            };
+                        }
+                    }
+                }
+                _ => {
+                    config.track_fx.set_slot_kind(bank_idx, slot_idx, TrackFxKind::None);
+                }
+            }
+        }
+    }
+
+    for (track_idx, track_data) in data
+        .track_fx
+        .tracks
+        .iter()
+        .take(config.track_fx.tracks.len())
+        .enumerate()
+    {
+        let track = &mut config.track_fx.tracks[track_idx];
+        if !track_data.enabled.is_empty() {
+            for (bank_idx, bank_enabled) in track_data.enabled.iter().take(TRACK_FX_BANK_COUNT).enumerate() {
+                for (slot_idx, enabled) in bank_enabled.iter().take(TRACK_FX_SLOT_COUNT).enumerate() {
+                    track.enabled[bank_idx][slot_idx] = *enabled;
+                }
+            }
+        } else {
+            // Backward compatibility: old schema stored per-track `is_enabled` in `banks.slots`.
+            for (bank_idx, bank_data) in track_data.banks.iter().take(TRACK_FX_BANK_COUNT).enumerate() {
+                for (slot_idx, slot_data) in bank_data.slots.iter().take(TRACK_FX_SLOT_COUNT).enumerate() {
+                    track.enabled[bank_idx][slot_idx] = slot_data.is_enabled;
                 }
             }
         }

@@ -1,7 +1,7 @@
 use eframe::egui;
 use std::time::{Instant};
 
-use crate::config::{AppConfig, ConfigSet};
+use crate::config::{AppConfig, ConfigSet, FxKind};
 use crate::config::envelope_configs::{
     ENVELOPE_ATTACK_MAX_MS, ENVELOPE_DECAY_MAX_MS, ENVELOPE_HOLD_MAX_MS,
     ENVELOPE_RELEASE_MAX_MS, ENVELOPE_START_MAX_PCT, ENVELOPE_SUSTAIN_MAX_PCT, ENVELOPE_TENSION_MAX,
@@ -15,6 +15,11 @@ use crate::config::reverb_configs::{
     REVERB_HIGHCUT_MAX, REVERB_LOWCUT_MAX_HZ, REVERB_LOWCUT_MIN_HZ, REVERB_PREDELAY_MAX_MS,
     REVERB_RT60_MAX_MS, REVERB_RT60_MIN_MS, REVERB_SIZE_MAX, REVERB_WIDTH_MAX,
 };
+use crate::config::track_delay_configs::{
+    TRACK_DELAY_DAMP_MAX_HZ, TRACK_DELAY_DAMP_MIN_HZ, TRACK_DELAY_FEEDBACK_MAX_PCT,
+    TRACK_DELAY_MIX_MAX_PCT, TRACK_DELAY_TIME_MAX_MS, TRACK_DELAY_TIME_MIN_MS,
+};
+use crate::config::{TrackFx, TrackFxKind};
 use crate::engine::audio_io::AudioIO;
 use crate::engine::metronome::Metronome;
 use crate::project::{self, ProjectEntry};
@@ -47,6 +52,8 @@ pub struct MyApp {
     pub fx_state: FxState, 
     pub fx_screen_slot_idx: usize,
     pub fx_edit_row_idx: usize,
+    pub track_fx_screen_slot_idx: usize,
+    pub track_fx_edit_row_idx: usize,
 
     pub projects: Vec<ProjectEntry>,
     pub sel_project_idx: usize,
@@ -66,6 +73,7 @@ impl MyApp {
         let config = AppConfig::new(
             DEFAULT_BPM, 
             DEFAULT_LATENCY_COMP, 
+            TRACK_COUNT,
         );
         let audio_io: Result<AudioIO, anyhow::Error> = AudioIO::new(
             &config.system_config.input_device.value,
@@ -92,6 +100,8 @@ impl MyApp {
             fx_state: FxState::Single, 
             fx_screen_slot_idx: 0,
             fx_edit_row_idx: 0,
+            track_fx_screen_slot_idx: 0,
+            track_fx_edit_row_idx: 0,
             // tracks: (0..TRACK_COUNT).map(Track::new).collect(),
             config,
             projects,
@@ -128,7 +138,7 @@ impl MyApp {
             track.track_loop_duration = None;
             track.track_play_anchor_at = None;
         }
-        self.config = AppConfig::new(DEFAULT_BPM, DEFAULT_LATENCY_COMP);
+        self.config = AppConfig::new(DEFAULT_BPM, DEFAULT_LATENCY_COMP, TRACK_COUNT);
         let entry = self.projects[self.sel_project_idx].clone();
         if let Some(data) = project::load_project(&entry) {
             project::apply_data_to_config(&mut self.config, data);
@@ -225,6 +235,79 @@ impl MyApp {
         }
 
         self.fonts_initialized = true;
+    }
+
+    fn is_input_fx_screen(screen_state: ScreenState) -> bool {
+        matches!(
+            screen_state,
+            ScreenState::FxSelect
+                | ScreenState::InFxOsc
+                | ScreenState::InFxOscAudio
+                | ScreenState::InFxNote
+                | ScreenState::InFxOscAudioEnv
+                | ScreenState::InFxOscFilter
+                | ScreenState::InFxOscFilterEnv
+                | ScreenState::InFxFilter
+                | ScreenState::InFxReverb
+                | ScreenState::InFxMyDelay
+                | ScreenState::InFxMyDelayAudio
+                | ScreenState::InFxMyDelayAudioEnv
+                | ScreenState::InFxMyDelayNote
+                | ScreenState::InFxMyDelayFilter
+                | ScreenState::InFxMyDelayFilterEnv
+        )
+    }
+
+    fn normalize_input_fx_screen_for_current_slot(&mut self) {
+        if !Self::is_input_fx_screen(self.screen_state) || self.screen_state == ScreenState::FxSelect {
+            return;
+        }
+
+        let bank_idx = self.config.input_fx.sel_bank_idx;
+        let slot_idx = self.fx_screen_slot_idx;
+        let kind = self.config.input_fx.slot_kind(bank_idx, slot_idx);
+
+        match kind {
+            FxKind::None => {
+                self.screen_state = ScreenState::FxSelect;
+            }
+            FxKind::Oscillator => {
+                if !matches!(
+                    self.screen_state,
+                    ScreenState::InFxOsc
+                        | ScreenState::InFxOscAudio
+                        | ScreenState::InFxNote
+                        | ScreenState::InFxOscAudioEnv
+                        | ScreenState::InFxOscFilter
+                        | ScreenState::InFxOscFilterEnv
+                ) {
+                    self.screen_state = ScreenState::InFxOsc;
+                }
+            }
+            FxKind::Filter => {
+                if self.screen_state != ScreenState::InFxFilter {
+                    self.screen_state = ScreenState::InFxFilter;
+                }
+            }
+            FxKind::Reverb => {
+                if self.screen_state != ScreenState::InFxReverb {
+                    self.screen_state = ScreenState::InFxReverb;
+                }
+            }
+            FxKind::MyDelay => {
+                if !matches!(
+                    self.screen_state,
+                    ScreenState::InFxMyDelay
+                        | ScreenState::InFxMyDelayAudio
+                        | ScreenState::InFxMyDelayAudioEnv
+                        | ScreenState::InFxMyDelayNote
+                        | ScreenState::InFxMyDelayFilter
+                        | ScreenState::InFxMyDelayFilterEnv
+                ) {
+                    self.screen_state = ScreenState::InFxMyDelay;
+                }
+            }
+        }
     }
 
     fn handle_input(&mut self, ctx: &egui::Context) {
@@ -415,6 +498,27 @@ impl MyApp {
                         }
                     }
                 }
+
+                let track_fx_keys = [
+                    egui::Key::U,
+                    egui::Key::I,
+                    egui::Key::O,
+                    egui::Key::P,
+                ];
+                for (slot_idx, key) in track_fx_keys.iter().enumerate() {
+                    if i.key_pressed(*key) {
+                        match self.fx_state {
+                            FxState::Bank => {
+                                self.config.track_fx.select_bank(slot_idx);
+                            }
+                            FxState::Single => {
+                                if let Some(track_idx) = self.track_sel {
+                                    self.config.track_fx.toggle_slot_enabled(track_idx, slot_idx);
+                                }
+                            }
+                        }
+                    }
+                }
                 
             }
             AppState::MainScreen => {
@@ -424,6 +528,9 @@ impl MyApp {
                 if i.key_pressed(egui::Key::Escape) {
                     match self.screen_state {
                         ScreenState::Empty => self.request_exit(PendingExit::ToInit),
+                        ScreenState::TrackFxSelect => self.screen_state = ScreenState::Empty,
+                        ScreenState::InTrackFxDelay => self.screen_state = ScreenState::TrackFxSelect,
+                        ScreenState::InTrackFxRoll => self.screen_state = ScreenState::TrackFxSelect,
                         ScreenState::InFxFilter => self.screen_state = ScreenState::FxSelect,
                         ScreenState::InFxReverb => self.screen_state = ScreenState::FxSelect,
                         ScreenState::InFxMyDelay => self.screen_state = ScreenState::FxSelect,
@@ -458,24 +565,63 @@ impl MyApp {
                         self.screen_state = ScreenState::Empty;
                     }
                 }
-
-                if self.screen_state == ScreenState::Empty {
-                    let fx_keys = [
-                        egui::Key::Q,
-                        egui::Key::W,
-                        egui::Key::E,
-                        egui::Key::R,
-                    ];
-                    for (slot_idx, key) in fx_keys.iter().enumerate() {
-                        if i.key_pressed(*key) {
-                            match self.fx_state {
-                                FxState::Bank => {
-                                    self.config.input_fx.select_bank(slot_idx);
-                                }
-                                FxState::Single => {
+                let input_fx_keys = [
+                    egui::Key::Q,
+                    egui::Key::W,
+                    egui::Key::E,
+                    egui::Key::R,
+                ];
+                for (slot_idx, key) in input_fx_keys.iter().enumerate() {
+                    if i.key_pressed(*key) {
+                        match self.fx_state {
+                            FxState::Bank => {
+                                self.config.input_fx.select_bank(slot_idx);
+                            }
+                            FxState::Single => {
+                                if self.screen_state == ScreenState::Empty {
                                     self.fx_screen_slot_idx = slot_idx;
                                     self.fx_edit_row_idx = 0;
                                     self.screen_state = ScreenState::FxSelect;
+                                } else if Self::is_input_fx_screen(self.screen_state) {
+                                    self.fx_screen_slot_idx = slot_idx;
+                                    self.fx_edit_row_idx = 0;
+                                    self.normalize_input_fx_screen_for_current_slot();
+                                }
+                            }
+                        }
+                    }
+                }
+                if self.fx_state == FxState::Bank && self.screen_state != ScreenState::Empty {
+                    let track_fx_keys = [
+                        egui::Key::U,
+                        egui::Key::I,
+                        egui::Key::O,
+                        egui::Key::P,
+                    ];
+                    for (slot_idx, key) in track_fx_keys.iter().enumerate() {
+                        if i.key_pressed(*key) {
+                            self.config.track_fx.select_bank(slot_idx);
+                        }
+                    }
+                }
+
+                if self.screen_state == ScreenState::Empty {
+                    let track_fx_keys = [
+                        egui::Key::U,
+                        egui::Key::I,
+                        egui::Key::O,
+                        egui::Key::P,
+                    ];
+                    for (slot_idx, key) in track_fx_keys.iter().enumerate() {
+                        if i.key_pressed(*key) {
+                            match self.fx_state {
+                                FxState::Bank => {
+                                    self.config.track_fx.select_bank(slot_idx);
+                                }
+                                FxState::Single => {
+                                    self.track_fx_screen_slot_idx = slot_idx;
+                                    self.track_fx_edit_row_idx = 0;
+                                    self.screen_state = ScreenState::TrackFxSelect;
                                 }
                             }
                         }
@@ -1142,6 +1288,94 @@ impl MyApp {
                             }
                         }
                     }
+                    ScreenState::TrackFxSelect => {
+                        let slot_keys = [
+                            egui::Key::U,
+                            egui::Key::I,
+                            egui::Key::O,
+                            egui::Key::P,
+                        ];
+                        for (slot_idx, key) in slot_keys.iter().enumerate() {
+                            if i.key_pressed(*key) {
+                                match self.fx_state {
+                                    FxState::Bank => self.config.track_fx.select_bank(slot_idx),
+                                    FxState::Single => {
+                                        self.track_fx_screen_slot_idx = slot_idx;
+                                        self.track_fx_edit_row_idx = 0;
+                                    }
+                                }
+                            }
+                        }
+
+                        let bank_idx = self.config.track_fx.sel_bank_idx;
+                        let slot_idx = self.track_fx_screen_slot_idx;
+                        if self.fx_state == FxState::Single {
+                            if i.key_pressed(egui::Key::ArrowLeft) {
+                                self.config.track_fx.cycle_slot_kind(bank_idx, slot_idx, -1);
+                            }
+                            if i.key_pressed(egui::Key::ArrowRight) {
+                                self.config.track_fx.cycle_slot_kind(bank_idx, slot_idx, 1);
+                            }
+
+                            if i.key_pressed(egui::Key::Enter) {
+                                self.track_fx_edit_row_idx = 0;
+                                match self.config.track_fx.slot_kind(bank_idx, slot_idx) {
+                                    TrackFxKind::Delay => self.screen_state = ScreenState::InTrackFxDelay,
+                                    TrackFxKind::Roll => self.screen_state = ScreenState::InTrackFxRoll,
+                                    TrackFxKind::None => {}
+                                }
+                            }
+                        }
+                    }
+                    ScreenState::InTrackFxDelay => {
+                        if i.key_pressed(egui::Key::ArrowLeft) {
+                            self.track_fx_edit_row_idx = self.track_fx_edit_row_idx.saturating_sub(1);
+                        }
+                        if i.key_pressed(egui::Key::ArrowRight) {
+                            self.track_fx_edit_row_idx = (self.track_fx_edit_row_idx + 1).min(3);
+                        }
+
+                        let bank_idx = self.config.track_fx.sel_bank_idx;
+                        let slot_idx = self.track_fx_screen_slot_idx;
+                        if let Some(TrackFx::Delay(delay)) = self.config.track_fx.slot_fx_mut(bank_idx, slot_idx) {
+                            match self.track_fx_edit_row_idx {
+                                0 => {
+                                    delay.time_ms.input(i, TRACK_DELAY_TIME_MAX_MS);
+                                    delay.time_ms.value =
+                                        delay.time_ms.value.clamp(TRACK_DELAY_TIME_MIN_MS, TRACK_DELAY_TIME_MAX_MS);
+                                }
+                                1 => {
+                                    delay.feedback_pct.input(i, TRACK_DELAY_FEEDBACK_MAX_PCT);
+                                    delay.feedback_pct.value =
+                                        delay.feedback_pct.value.min(TRACK_DELAY_FEEDBACK_MAX_PCT);
+                                }
+                                2 => {
+                                    delay.high_damp_hz.input(i, TRACK_DELAY_DAMP_MAX_HZ);
+                                    delay.high_damp_hz.value = delay
+                                        .high_damp_hz
+                                        .value
+                                        .clamp(TRACK_DELAY_DAMP_MIN_HZ, TRACK_DELAY_DAMP_MAX_HZ);
+                                }
+                                3 => {
+                                    delay.mix_pct.input(i, TRACK_DELAY_MIX_MAX_PCT);
+                                    delay.mix_pct.value = delay.mix_pct.value.min(TRACK_DELAY_MIX_MAX_PCT);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    ScreenState::InTrackFxRoll => {
+                        let bank_idx = self.config.track_fx.sel_bank_idx;
+                        let slot_idx = self.track_fx_screen_slot_idx;
+                        if let Some(TrackFx::Roll(roll)) = self.config.track_fx.slot_fx_mut(bank_idx, slot_idx) {
+                            if i.key_pressed(egui::Key::ArrowUp) {
+                                roll.step.prev();
+                            }
+                            if i.key_pressed(egui::Key::ArrowDown) {
+                                roll.step.next();
+                            }
+                        }
+                    }
                     ScreenState::Empty => {}
                 }
             }
@@ -1163,6 +1397,7 @@ impl MyApp {
                     eprintln!("Failed to adjust latency compensation: {err}");
                 }
                 audio.update_input_fx(&self.config.input_fx);
+                audio.update_track_fx(&self.config.track_fx);
                 audio.update_metronome(self.metronome.start_time(), self.metronome.current_bpm());
                 if let Err(err) = audio.switch_devices(&desired_input, &desired_output) {
                     eprintln!("Failed to switch audio devices: {err}");
@@ -1181,6 +1416,7 @@ impl MyApp {
                 if let Ok(audio) = self.audio_io.as_mut() {
                     audio.set_realtime_enabled(self.app_state != AppState::Init);
                     audio.update_input_fx(&self.config.input_fx);
+                    audio.update_track_fx(&self.config.track_fx);
                     audio.update_metronome(self.metronome.start_time(), self.metronome.current_bpm());
                 }
             }
