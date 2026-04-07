@@ -1,4 +1,6 @@
 // src/dsp/my_delay.rs
+use crate::dsp::envelope::{AhdsrParams, AhdsrState};
+use crate::dsp::filter::{process_sample as process_filter_sample, FilterDspState, FilterParams};
 
 const RECORD_WINDOW_MS: f32 = 100.0;
 
@@ -18,6 +20,43 @@ pub struct MyDelayDspState {
     ready: bool,
     record_len_samples: usize,
     prev_above: bool,
+    last_loop_len_samples: Option<usize>,
+}
+
+#[derive(Clone)]
+pub struct MyDelayFxDspState {
+    pub delay: MyDelayDspState,
+    pub env: AhdsrState,
+    pub filter_l: FilterDspState,
+    pub filter_r: FilterDspState,
+    pub filter_env: AhdsrState,
+}
+
+impl MyDelayFxDspState {
+    pub fn new() -> Self {
+        Self {
+            delay: MyDelayDspState::new(),
+            env: AhdsrState::new(),
+            filter_l: FilterDspState::new(),
+            filter_r: FilterDspState::new(),
+            filter_env: AhdsrState::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct MyDelayFxParams {
+    pub level: f32,
+    pub threshold: f32,
+    pub loop_len_samples: Option<usize>,
+    pub gate_on: bool,
+    pub retrigger: bool,
+    pub input_mono: f32,
+    pub sample_rate: f32,
+    pub envelope: AhdsrParams,
+    pub filter_envelope: AhdsrParams,
+    pub filter: FilterParams,
+    pub cutoff_min_hz: f32,
 }
 
 impl MyDelayDspState {
@@ -30,6 +69,7 @@ impl MyDelayDspState {
             ready: false,
             record_len_samples: 0,
             prev_above: false,
+            last_loop_len_samples: None,
         }
     }
 
@@ -45,6 +85,22 @@ impl MyDelayDspState {
 
     pub fn clear_gate(&mut self) {
         self.prev_above = false;
+    }
+
+    pub fn resolve_loop_len(&mut self, current_loop_len: Option<usize>, gate_on: bool) -> Option<usize> {
+        if let Some(loop_len) = current_loop_len {
+            let clamped = loop_len.max(2);
+            self.last_loop_len_samples = Some(clamped);
+            return Some(clamped);
+        }
+        if !gate_on {
+            return self.last_loop_len_samples;
+        }
+        None
+    }
+
+    pub fn clear_loop_len_memory(&mut self) {
+        self.last_loop_len_samples = None;
     }
 }
 
@@ -106,6 +162,53 @@ pub fn process_sample(
     }
 
     0.0
+}
+
+pub fn process_fx_frame(state: &mut MyDelayFxDspState, p: MyDelayFxParams) -> (f32, f32) {
+    if !p.gate_on {
+        state.delay.clear_gate();
+    }
+
+    let loop_len_for_sample = state.delay.resolve_loop_len(p.loop_len_samples, p.gate_on);
+    let input_mono = if p.gate_on { p.input_mono } else { 0.0 };
+    let delay_out = if let Some(loop_len_samples) = loop_len_for_sample {
+        process_sample(
+            &mut state.delay,
+            MyDelayParams {
+                level: p.level,
+                threshold: p.threshold,
+                loop_len_samples,
+            },
+            p.sample_rate,
+            input_mono,
+        )
+    } else {
+        0.0
+    };
+
+    let dt = 1.0 / p.sample_rate.max(1.0);
+    let amp = state
+        .env
+        .next(p.gate_on, p.retrigger, p.envelope, dt)
+        .clamp(0.0, 1.0);
+    if !p.gate_on && amp <= 0.0001 {
+        state.delay.clear_loop_len_memory();
+    }
+    let delay_out = delay_out * amp;
+
+    let cutoff_env = state
+        .filter_env
+        .next(p.gate_on, p.retrigger, p.filter_envelope, dt)
+        .clamp(0.0, 1.0);
+    let cutoff_max = p.filter.cutoff_hz.max(p.cutoff_min_hz);
+    let cutoff_hz = p.cutoff_min_hz + (cutoff_max - p.cutoff_min_hz) * cutoff_env;
+    let filter_params = FilterParams {
+        cutoff_hz,
+        ..p.filter
+    };
+    let filtered_l = process_filter_sample(&mut state.filter_l, filter_params, p.sample_rate, delay_out);
+    let filtered_r = process_filter_sample(&mut state.filter_r, filter_params, p.sample_rate, delay_out);
+    (filtered_l, filtered_r)
 }
 
 fn loop_window_gain(idx: usize, len: usize) -> f32 {

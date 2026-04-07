@@ -40,6 +40,9 @@ pub enum ScreenState {
     TrackFxSelect,
     InTrackFxDelay,
     InTrackFxRoll,
+    InTrackFxFilter,
+    InTrackFxFilterSeq,
+    InTrackFxFilterEnv,
 }
 
 #[derive(PartialEq, Clone, Copy)]

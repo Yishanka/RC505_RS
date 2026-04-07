@@ -79,7 +79,17 @@ impl NoteConfigs {
             step: EnumConfig::new(
                 "Step", 
                 "1/4".to_string(),
-                vec!["1/6".to_string(), "1/4".to_string(), "1/3".to_string(), "1/2".to_string(), "1".to_string()] 
+                vec![
+                    "1/6".to_string(),
+                    "1/4".to_string(),
+                    "1/3".to_string(),
+                    "1/2".to_string(),
+                    "2/3".to_string(),
+                    "3/4".to_string(),
+                    "5/6".to_string(),
+                    "1".to_string(),
+                    "2".to_string(),
+                ] 
             ),
             edit: EnumConfig::new(
                 "Seq",
@@ -93,24 +103,14 @@ impl NoteConfigs {
         TICKS_PER_BEAT
     }
 
-    pub fn notes_per_beat(&self) -> usize {
-        match self.step.value.as_str() {
-            "1/6" => 6,
-            "1/4" => 4,
-            "1/3" => 3,
-            "1/2" => 2,
-            "1" => 1,
-            _ => 4,
-        }
+    pub fn notes_per_beat(&self) -> f32 {
+        let (num, den) = self.step_fraction();
+        den as f32 / num as f32
     }
 
     pub fn ticks_per_note(&self) -> usize {
-        let per_beat = self.notes_per_beat();
-        if per_beat == 0 {
-            TICKS_PER_BEAT
-        } else {
-            TICKS_PER_BEAT / per_beat
-        }
+        let per_beat = self.notes_per_beat().max(0.0001);
+        ((TICKS_PER_BEAT as f32 / per_beat).round() as usize).max(1)
     }
 
     pub fn seq(&self) -> &[Option<NoteOct>] {
@@ -190,6 +190,23 @@ impl NoteConfigs {
         }
     }
 
+}
+
+impl NoteConfigs {
+    fn step_fraction(&self) -> (usize, usize) {
+        match self.step.value.as_str() {
+            "1/6" => (1, 6),
+            "1/4" => (1, 4),
+            "1/3" => (1, 3),
+            "1/2" => (1, 2),
+            "2/3" => (2, 3),
+            "3/4" => (3, 4),
+            "5/6" => (5, 6),
+            "1" => (1, 1),
+            "2" => (2, 1),
+            _ => (1, 4),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

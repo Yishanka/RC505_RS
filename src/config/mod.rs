@@ -10,8 +10,10 @@ pub mod envelope_configs;
 pub mod filter_configs;
 pub mod reverb_configs;
 pub mod mydelay_configs;
-pub mod track_delay_configs;
-pub mod track_roll_configs;
+pub mod delay_configs;
+pub mod roll_configs;
+pub mod seq_configs;
+pub mod track_filter_configs;
 pub mod track_fx_configs;
 
 pub use app_config::{AppConfig};

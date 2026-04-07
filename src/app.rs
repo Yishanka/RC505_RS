@@ -15,7 +15,7 @@ use crate::config::reverb_configs::{
     REVERB_HIGHCUT_MAX, REVERB_LOWCUT_MAX_HZ, REVERB_LOWCUT_MIN_HZ, REVERB_PREDELAY_MAX_MS,
     REVERB_RT60_MAX_MS, REVERB_RT60_MIN_MS, REVERB_SIZE_MAX, REVERB_WIDTH_MAX,
 };
-use crate::config::track_delay_configs::{
+use crate::config::delay_configs::{
     TRACK_DELAY_DAMP_MAX_HZ, TRACK_DELAY_DAMP_MIN_HZ, TRACK_DELAY_FEEDBACK_MAX_PCT,
     TRACK_DELAY_MIX_MAX_PCT, TRACK_DELAY_TIME_MAX_MS, TRACK_DELAY_TIME_MIN_MS,
 };
@@ -531,6 +531,9 @@ impl MyApp {
                         ScreenState::TrackFxSelect => self.screen_state = ScreenState::Empty,
                         ScreenState::InTrackFxDelay => self.screen_state = ScreenState::TrackFxSelect,
                         ScreenState::InTrackFxRoll => self.screen_state = ScreenState::TrackFxSelect,
+                        ScreenState::InTrackFxFilter => self.screen_state = ScreenState::TrackFxSelect,
+                        ScreenState::InTrackFxFilterSeq => self.screen_state = ScreenState::InTrackFxFilter,
+                        ScreenState::InTrackFxFilterEnv => self.screen_state = ScreenState::InTrackFxFilter,
                         ScreenState::InFxFilter => self.screen_state = ScreenState::FxSelect,
                         ScreenState::InFxReverb => self.screen_state = ScreenState::FxSelect,
                         ScreenState::InFxMyDelay => self.screen_state = ScreenState::FxSelect,
@@ -1322,6 +1325,14 @@ impl MyApp {
                                 match self.config.track_fx.slot_kind(bank_idx, slot_idx) {
                                     TrackFxKind::Delay => self.screen_state = ScreenState::InTrackFxDelay,
                                     TrackFxKind::Roll => self.screen_state = ScreenState::InTrackFxRoll,
+                                    TrackFxKind::Filter => {
+                                        if let Some(TrackFx::Filter(filter)) =
+                                            self.config.track_fx.slot_fx_mut(bank_idx, slot_idx)
+                                        {
+                                            filter.sel_idx = Some(0);
+                                        }
+                                        self.screen_state = ScreenState::InTrackFxFilter;
+                                    }
                                     TrackFxKind::None => {}
                                 }
                             }
@@ -1373,6 +1384,152 @@ impl MyApp {
                             }
                             if i.key_pressed(egui::Key::ArrowDown) {
                                 roll.step.next();
+                            }
+                        }
+                    }
+                    ScreenState::InTrackFxFilter => {
+                        let bank_idx = self.config.track_fx.sel_bank_idx;
+                        let slot_idx = self.track_fx_screen_slot_idx;
+                        if let Some(TrackFx::Filter(filter_cfg)) =
+                            self.config.track_fx.slot_fx_mut(bank_idx, slot_idx)
+                        {
+                            if i.key_pressed(egui::Key::ArrowLeft) {
+                                filter_cfg.prev();
+                            }
+                            if i.key_pressed(egui::Key::ArrowRight) {
+                                filter_cfg.next();
+                            }
+
+                            match filter_cfg.sel_idx {
+                                Some(0) => {
+                                    if i.key_pressed(egui::Key::ArrowUp) {
+                                        filter_cfg.filter.filter_type.prev();
+                                    }
+                                    if i.key_pressed(egui::Key::ArrowDown) {
+                                        filter_cfg.filter.filter_type.next();
+                                    }
+                                }
+                                Some(1) => {
+                                    filter_cfg.filter.cutoff_hz.input(i, FILTER_CUTOFF_MAX_HZ);
+                                    filter_cfg.filter.cutoff_hz.value = filter_cfg
+                                        .filter
+                                        .cutoff_hz
+                                        .value
+                                        .clamp(FILTER_CUTOFF_MIN_HZ, FILTER_CUTOFF_MAX_HZ);
+                                    if i.key_pressed(egui::Key::ArrowUp) {
+                                        filter_cfg.filter.cutoff_hz.value =
+                                            ((filter_cfg.filter.cutoff_hz.value as f32) * 1.06).round() as usize;
+                                        filter_cfg.filter.cutoff_hz.value = filter_cfg
+                                            .filter
+                                            .cutoff_hz
+                                            .value
+                                            .clamp(FILTER_CUTOFF_MIN_HZ, FILTER_CUTOFF_MAX_HZ);
+                                    }
+                                    if i.key_pressed(egui::Key::ArrowDown) {
+                                        filter_cfg.filter.cutoff_hz.value =
+                                            ((filter_cfg.filter.cutoff_hz.value as f32) / 1.06).round() as usize;
+                                        filter_cfg.filter.cutoff_hz.value = filter_cfg
+                                            .filter
+                                            .cutoff_hz
+                                            .value
+                                            .clamp(FILTER_CUTOFF_MIN_HZ, FILTER_CUTOFF_MAX_HZ);
+                                    }
+                                }
+                                Some(2) => {
+                                    filter_cfg.filter.resonance_x10.input(i, FILTER_Q_MAX_X10);
+                                    filter_cfg.filter.resonance_x10.value = filter_cfg
+                                        .filter
+                                        .resonance_x10
+                                        .value
+                                        .clamp(FILTER_Q_MIN_X10, FILTER_Q_MAX_X10);
+                                }
+                                Some(3) => {
+                                    filter_cfg.filter.drive.input(i, FILTER_DRIVE_MAX);
+                                    filter_cfg.filter.drive.value =
+                                        filter_cfg.filter.drive.value.min(FILTER_DRIVE_MAX);
+                                }
+                                Some(4) => {
+                                    filter_cfg.filter.mix.input(i, FILTER_MIX_MAX);
+                                    filter_cfg.filter.mix.value = filter_cfg.filter.mix.value.min(FILTER_MIX_MAX);
+                                }
+                                Some(5) => {
+                                    if i.key_pressed(egui::Key::Enter) {
+                                        filter_cfg.seq.sel_idx = Some(0);
+                                        self.screen_state = ScreenState::InTrackFxFilterSeq;
+                                    }
+                                }
+                                Some(6) => {
+                                    if i.key_pressed(egui::Key::Enter) {
+                                        filter_cfg.env.sel_idx = Some(0);
+                                        self.screen_state = ScreenState::InTrackFxFilterEnv;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    ScreenState::InTrackFxFilterSeq => {
+                        let bank_idx = self.config.track_fx.sel_bank_idx;
+                        let slot_idx = self.track_fx_screen_slot_idx;
+                        if let Some(TrackFx::Filter(filter_cfg)) =
+                            self.config.track_fx.slot_fx_mut(bank_idx, slot_idx)
+                        {
+                            let seq_cfg = &mut filter_cfg.seq;
+                            if i.key_pressed(egui::Key::ArrowLeft) {
+                                seq_cfg.prev();
+                            }
+                            if i.key_pressed(egui::Key::ArrowRight) {
+                                seq_cfg.next();
+                            }
+                            match seq_cfg.sel_idx {
+                                Some(0) => {
+                                    if i.key_pressed(egui::Key::ArrowUp) {
+                                        seq_cfg.step.prev();
+                                    }
+                                    if i.key_pressed(egui::Key::ArrowDown) {
+                                        seq_cfg.step.next();
+                                    }
+                                }
+                                Some(1) => {
+                                    if i.key_pressed(egui::Key::ArrowUp) {
+                                        seq_cfg.edit.prev();
+                                    }
+                                    if i.key_pressed(egui::Key::ArrowDown) {
+                                        seq_cfg.edit.next();
+                                    }
+                                    if i.key_pressed(egui::Key::Enter) {
+                                        seq_cfg.apply_edit();
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    ScreenState::InTrackFxFilterEnv => {
+                        let bank_idx = self.config.track_fx.sel_bank_idx;
+                        let slot_idx = self.track_fx_screen_slot_idx;
+                        if let Some(TrackFx::Filter(filter_cfg)) =
+                            self.config.track_fx.slot_fx_mut(bank_idx, slot_idx)
+                        {
+                            let env_cfg = &mut filter_cfg.env;
+                            if i.key_pressed(egui::Key::ArrowLeft) {
+                                env_cfg.prev();
+                            }
+                            if i.key_pressed(egui::Key::ArrowRight) {
+                                env_cfg.next();
+                            }
+
+                            match env_cfg.sel_idx {
+                                Some(0) => env_cfg.attack_ms.input(i, ENVELOPE_ATTACK_MAX_MS),
+                                Some(1) => env_cfg.hold_ms.input(i, ENVELOPE_HOLD_MAX_MS),
+                                Some(2) => env_cfg.decay_ms.input(i, ENVELOPE_DECAY_MAX_MS),
+                                Some(3) => env_cfg.sustain_pct.input(i, ENVELOPE_SUSTAIN_MAX_PCT),
+                                Some(4) => env_cfg.release_ms.input(i, ENVELOPE_RELEASE_MAX_MS),
+                                Some(5) => env_cfg.start_pct.input(i, ENVELOPE_START_MAX_PCT),
+                                Some(6) => env_cfg.tension_a.input(i, ENVELOPE_TENSION_MAX),
+                                Some(7) => env_cfg.tension_d.input(i, ENVELOPE_TENSION_MAX),
+                                Some(8) => env_cfg.tension_r.input(i, ENVELOPE_TENSION_MAX),
+                                _ => {}
                             }
                         }
                     }
@@ -1450,10 +1607,35 @@ impl MyApp {
                 t.track_state ==TrackState::NxtPlay
             )
             .count();
-        if on_track == 0 {self.metronome.reset();}
+        let metronome_was_running = self.metronome.start_time().is_some();
+        if on_track == 0 {
+            self.metronome.reset();
+        }
 
         let now = Instant::now();
         let audio = self.audio_io.as_ref().ok();
+        if on_track == 0 && metronome_was_running {
+            if let Some(engine) = audio {
+                engine.update_metronome(self.metronome.start_time(), self.metronome.current_bpm());
+            }
+        }
+
+        let timeline_start_at = if self.metronome.start_time().is_none() && on_track > 0 {
+            let beat_time = self.metronome.get_beat_time();
+            // When timeline restarts from all-paused, all looped tracks share one anchor.
+            // Paused tracks stay silent, but will re-enter at phase-correct positions.
+            for track in &mut self.tracks {
+                if track.track_loop_duration.is_some() {
+                    track.track_play_anchor_at = Some(beat_time);
+                }
+            }
+            if let Some(engine) = audio {
+                engine.update_metronome(self.metronome.start_time(), self.metronome.current_bpm());
+            }
+            Some(beat_time)
+        } else {
+            None
+        };
 
         for idx in 0..TRACK_COUNT {
             let current = self.tracks[idx].track_state;
@@ -1462,7 +1644,7 @@ impl MyApp {
             if current != previous {
                 match current {
                     TrackState::Record => {
-                        let beat_time = self.metronome.get_beat_time();
+                        let beat_time = timeline_start_at.unwrap_or_else(|| self.metronome.get_beat_time());
                         self.tracks[idx].track_record_start_at = Some(beat_time);
                         self.tracks[idx].track_loop_duration = None;
                         self.tracks[idx].track_play_anchor_at = None;
@@ -1492,11 +1674,11 @@ impl MyApp {
                         }
                     }
                     TrackState::Play => {
-                        let metronome_running = self.metronome.start_time().is_some();
-                        let progress = if metronome_running {
+                        let progress = if self.tracks[idx].track_play_anchor_at.is_some()
+                            && self.tracks[idx].track_loop_duration.is_some()
+                        {
                             Some(self.tracks[idx].track_play_progress(now))
                         } else {
-                            self.tracks[idx].track_play_anchor_at = Some(now);
                             Some(0.0)
                         };
 

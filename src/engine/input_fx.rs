@@ -40,9 +40,9 @@ use crate::config::osc_configs::Waveform;
 use crate::config::{input_fx_configs::FX_BANK_COUNT, input_fx_configs::FX_SLOT_COUNT, InputFx, InputFxConfig};
 use crate::dsp::envelope::AhdsrParams;
 use crate::dsp::filter::{process_sample as process_filter_sample, FilterDspState, FilterParams};
-use crate::dsp::my_delay::{process_sample as process_mydelay_sample, MyDelayDspState, MyDelayParams};
+use crate::dsp::my_delay::{process_fx_frame as process_mydelay_fx_frame, MyDelayFxDspState, MyDelayFxParams};
+use crate::dsp::oscillator::{process_fx_sample as process_osc_fx_sample, OscillatorFxDspState, OscillatorFxParams};
 use crate::dsp::reverb::{process_frame as process_reverb_frame, ReverbDspState, ReverbParams};
-use crate::dsp::oscillator::{process_sample as process_osc_sample, OscillatorDspState,};
 use crate::dsp::note::{note_at_time, seq_bool_at_time}; 
 
 const DEFAULT_BPM: usize = 120;
@@ -104,17 +104,11 @@ pub struct FxSlotRuntime {
 
 #[derive(Clone)]
 pub struct FxSlotState {
-    pub osc: OscillatorDspState,
-    pub osc_filter_env: crate::dsp::envelope::AhdsrState,
-    pub osc_filter: FilterDspState,
+    pub osc: OscillatorFxDspState,
     pub filter_l: FilterDspState,
     pub filter_r: FilterDspState,
     pub reverb: ReverbDspState,
-    pub my_delay: MyDelayDspState,
-    pub my_delay_env: crate::dsp::envelope::AhdsrState,
-    pub my_delay_filter_l: FilterDspState,
-    pub my_delay_filter_r: FilterDspState,
-    pub my_delay_filter_env: crate::dsp::envelope::AhdsrState,
+    pub my_delay: MyDelayFxDspState,
 }
 
 #[derive(Clone)]
@@ -208,39 +202,28 @@ impl InputFxEngine {
             } else {
                 seq_bool_at_time(&osc.note_trigger_seq, self.bpm, elapsed_secs)
             };
-            let osc_sample = process_osc_sample(
+            let osc_filtered = process_osc_fx_sample(
                 &mut state_bank.slots[idx].osc,
-                osc.waveform,
-                osc.level,
-                osc.threshold,
-                input_level,
-                self.sample_rate,
-                note,
-                note_on,
-                note_retrigger,
-                osc.envelope,
-            );
-            let gate_on = note_on && input_level >= osc.threshold;
-            let retrigger = note_retrigger && input_level >= osc.threshold;
-            let dt = 1.0 / self.sample_rate.max(1.0);
-            let cutoff_env = state_bank.slots[idx]
-                .osc_filter_env
-                .next(gate_on, retrigger, osc.osc_filter_envelope, dt)
-                .clamp(0.0, 1.0);
-            let cutoff_min = FILTER_CUTOFF_MIN_HZ as f32;
-            let cutoff_max = osc.osc_filter.cutoff_hz.max(cutoff_min);
-            let cutoff_hz = cutoff_min + (cutoff_max - cutoff_min) * cutoff_env;
-            let osc_filtered = process_filter_sample(
-                &mut state_bank.slots[idx].osc_filter,
-                FilterParams {
-                    filter_type: osc.osc_filter.filter_type,
-                    cutoff_hz,
-                    q: osc.osc_filter.q,
-                    drive: osc.osc_filter.drive,
-                    mix: osc.osc_filter.mix,
+                OscillatorFxParams {
+                    waveform: osc.waveform,
+                    level: osc.level,
+                    threshold: osc.threshold,
+                    input_level,
+                    sample_rate: self.sample_rate,
+                    note,
+                    note_on,
+                    note_retrigger,
+                    envelope: osc.envelope,
+                    filter_envelope: osc.osc_filter_envelope,
+                    filter: FilterParams {
+                        filter_type: osc.osc_filter.filter_type,
+                        cutoff_hz: osc.osc_filter.cutoff_hz,
+                        q: osc.osc_filter.q,
+                        drive: osc.osc_filter.drive,
+                        mix: osc.osc_filter.mix,
+                    },
+                    cutoff_min_hz: FILTER_CUTOFF_MIN_HZ as f32,
                 },
-                self.sample_rate,
-                osc_sample,
             );
             osc_mix += osc_filtered;
             active_osc_count += 1;
@@ -281,68 +264,28 @@ impl InputFxEngine {
                 note_at_time(&delay.note_seq, self.bpm, elapsed_secs)
             };
 
-            if !note_on {
-                state_bank.slots[idx].my_delay.clear_gate();
-                continue;
-            }
-
-            let gate_on = note_on;
-            let retrigger = note_retrigger;
-            let dt = 1.0 / self.sample_rate.max(1.0);
-
-            let input_mono = (input_l + input_r) * 0.5;
-            let Some(note) = note else {
-                continue;
-            };
-            let loop_len_samples = (self.sample_rate / note.freq_hz()).round() as usize;
-            let delay_out = process_mydelay_sample(
+            let loop_len_samples = note.map(|n| (self.sample_rate / n.freq_hz()).round() as usize);
+            let (filtered_l, filtered_r) = process_mydelay_fx_frame(
                 &mut state_bank.slots[idx].my_delay,
-                MyDelayParams {
+                MyDelayFxParams {
                     level: delay.level,
                     threshold: delay.threshold,
                     loop_len_samples,
+                    gate_on: note_on,
+                    retrigger: note_retrigger,
+                    input_mono: (input_l + input_r) * 0.5,
+                    sample_rate: self.sample_rate,
+                    envelope: delay.audio_env,
+                    filter_envelope: delay.filter_env,
+                    filter: FilterParams {
+                        filter_type: delay.filter.filter_type,
+                        cutoff_hz: delay.filter.cutoff_hz,
+                        q: delay.filter.q,
+                        drive: delay.filter.drive,
+                        mix: delay.filter.mix,
+                    },
+                    cutoff_min_hz: FILTER_CUTOFF_MIN_HZ as f32,
                 },
-                self.sample_rate,
-                input_mono,
-            );
-
-            let amp = state_bank.slots[idx]
-                .my_delay_env
-                .next(gate_on, retrigger, delay.audio_env, dt)
-                .clamp(0.0, 1.0);
-            let delay_out = delay_out * amp;
-
-            let cutoff_env = state_bank.slots[idx]
-                .my_delay_filter_env
-                .next(gate_on, retrigger, delay.filter_env, dt)
-                .clamp(0.0, 1.0);
-            let cutoff_min = FILTER_CUTOFF_MIN_HZ as f32;
-            let cutoff_max = delay.filter.cutoff_hz.max(cutoff_min);
-            let cutoff_hz = cutoff_min + (cutoff_max - cutoff_min) * cutoff_env;
-
-            let filtered_l = process_filter_sample(
-                &mut state_bank.slots[idx].my_delay_filter_l,
-                FilterParams {
-                    filter_type: delay.filter.filter_type,
-                    cutoff_hz,
-                    q: delay.filter.q,
-                    drive: delay.filter.drive,
-                    mix: delay.filter.mix,
-                },
-                self.sample_rate,
-                delay_out,
-            );
-            let filtered_r = process_filter_sample(
-                &mut state_bank.slots[idx].my_delay_filter_r,
-                FilterParams {
-                    filter_type: delay.filter.filter_type,
-                    cutoff_hz,
-                    q: delay.filter.q,
-                    drive: delay.filter.drive,
-                    mix: delay.filter.mix,
-                },
-                self.sample_rate,
-                delay_out,
             );
 
             out_l += filtered_l;
@@ -737,23 +680,17 @@ impl FxBankState {
     pub fn new() -> Self {
         Self {
             slots: std::array::from_fn(|_| FxSlotState {
-                osc: OscillatorDspState::new(),
-                osc_filter_env: crate::dsp::envelope::AhdsrState::new(),
-                osc_filter: FilterDspState::new(),
+                osc: OscillatorFxDspState::new(),
                 filter_l: FilterDspState::new(),
                 filter_r: FilterDspState::new(),
                 reverb: ReverbDspState::new(),
-                my_delay: MyDelayDspState::new(),
-                my_delay_env: crate::dsp::envelope::AhdsrState::new(),
-                my_delay_filter_l: FilterDspState::new(),
-                my_delay_filter_r: FilterDspState::new(),
-                my_delay_filter_env: crate::dsp::envelope::AhdsrState::new(),
+                my_delay: MyDelayFxDspState::new(),
             }),
         }
     }
 }
 
 fn tension_to_exponent(value: usize) -> f32 {
-    let t = value.min(100) as f32;
-    2.0_f32.powf((t - 50.0) / 25.0)
+    let t = value.min(ENVELOPE_TENSION_MAX) as f32;
+    2.0_f32.powf((t - 100.0) / 50.0)
 }

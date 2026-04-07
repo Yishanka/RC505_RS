@@ -1,12 +1,14 @@
-use crate::config::track_delay_configs::TrackDelayConfigs;
-use crate::config::track_roll_configs::TrackRollConfigs;
+use crate::config::delay_configs::TrackDelayConfigs;
+use crate::config::track_filter_configs::TrackFilterConfigs;
+use crate::config::roll_configs::RollConfigs;
 
 pub const TRACK_FX_BANK_COUNT: usize = 4;
 pub const TRACK_FX_SLOT_COUNT: usize = 4;
 
 pub enum TrackFx {
     Delay(TrackDelayConfigs),
-    Roll(TrackRollConfigs),
+    Roll(RollConfigs),
+    Filter(TrackFilterConfigs),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -14,6 +16,7 @@ pub enum TrackFxKind {
     None,
     Delay,
     Roll,
+    Filter,
 }
 
 pub struct TrackFxSlot {
@@ -29,7 +32,8 @@ impl TrackFxSlot {
         self.fx = match kind {
             TrackFxKind::None => None,
             TrackFxKind::Delay => Some(TrackFx::Delay(TrackDelayConfigs::new())),
-            TrackFxKind::Roll => Some(TrackFx::Roll(TrackRollConfigs::new())),
+            TrackFxKind::Roll => Some(TrackFx::Roll(RollConfigs::new())),
+            TrackFxKind::Filter => Some(TrackFx::Filter(TrackFilterConfigs::new())),
         };
     }
 
@@ -38,6 +42,7 @@ impl TrackFxSlot {
             None => TrackFxKind::None,
             Some(TrackFx::Delay(_)) => TrackFxKind::Delay,
             Some(TrackFx::Roll(_)) => TrackFxKind::Roll,
+            Some(TrackFx::Filter(_)) => TrackFxKind::Filter,
         }
     }
 }
@@ -127,11 +132,13 @@ impl TrackFxConfig {
         let current = self.slot_kind(bank_idx, slot_idx);
         let next = match (current, dir.signum()) {
             (TrackFxKind::Delay, 1) => TrackFxKind::Roll,
-            (TrackFxKind::Roll, 1) => TrackFxKind::None,
+            (TrackFxKind::Roll, 1) => TrackFxKind::Filter,
+            (TrackFxKind::Filter, 1) => TrackFxKind::None,
             (TrackFxKind::None, 1) => TrackFxKind::Delay,
             (TrackFxKind::Delay, -1) => TrackFxKind::None,
             (TrackFxKind::Roll, -1) => TrackFxKind::Delay,
-            (TrackFxKind::None, -1) => TrackFxKind::Roll,
+            (TrackFxKind::Filter, -1) => TrackFxKind::Roll,
+            (TrackFxKind::None, -1) => TrackFxKind::Filter,
             (_, _) => current,
         };
         self.set_slot_kind(bank_idx, slot_idx, next);

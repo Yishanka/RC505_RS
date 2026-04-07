@@ -406,16 +406,24 @@ pub fn draw_screen(ui: &mut egui::Ui, app: &mut MyApp) {
                         let bank_idx = app.config.track_fx.sel_bank_idx;
                         let slot_idx = app.track_fx_screen_slot_idx;
                         let selected = app.config.track_fx.slot_kind(bank_idx, slot_idx);
-                        let selected_idx = if selected == TrackFxKind::Roll { 1 } else { 0 };
+                        let selected_idx = match selected {
+                            TrackFxKind::Delay => 0,
+                            TrackFxKind::Roll => 1,
+                            TrackFxKind::Filter => 2,
+                            TrackFxKind::None => 0,
+                        };
                         ui.horizontal_centered(|ui| {
                             ui.add_space(20.0);
-                            for idx in page_indices(2, selected_idx) {
+                            for idx in page_indices(3, selected_idx) {
                                 match idx {
                                     Some(0) => {
                                         draw_fx_choice_block(ui, "Delay", selected == TrackFxKind::Delay)
                                     }
                                     Some(1) => {
                                         draw_fx_choice_block(ui, "Roll", selected == TrackFxKind::Roll)
+                                    }
+                                    Some(2) => {
+                                        draw_fx_choice_block(ui, "Filter", selected == TrackFxKind::Filter)
                                     }
                                     _ => draw_empty_block(ui),
                                 }
@@ -477,6 +485,168 @@ pub fn draw_screen(ui: &mut egui::Ui, app: &mut MyApp) {
                                 draw_empty_block(ui);
                                 draw_empty_block(ui);
                             });
+                        }
+                    }
+                    ScreenState::InTrackFxFilter => {
+                        let bank_idx = app.config.track_fx.sel_bank_idx;
+                        let slot_idx = app.track_fx_screen_slot_idx;
+                        if let Some(crate::config::TrackFx::Filter(filter_cfg)) =
+                            app.config.track_fx.slot_fx(bank_idx, slot_idx)
+                        {
+                            let selected_idx = filter_cfg.sel_idx.unwrap_or(0);
+                            ui.horizontal_centered(|ui| {
+                                ui.add_space(20.0);
+                                for idx in page_indices(7, selected_idx) {
+                                    match idx {
+                                        Some(0) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{}", filter_cfg.filter.filter_type.value),
+                                            &filter_cfg.filter.filter_type.label,
+                                            selected_idx == 0,
+                                        ),
+                                        Some(1) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{}", filter_cfg.filter.cutoff_hz.value),
+                                            &filter_cfg.filter.cutoff_hz.label,
+                                            selected_idx == 1,
+                                        ),
+                                        Some(2) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{:.1}", filter_cfg.filter.resonance_x10.value as f32 / 10.0),
+                                            &filter_cfg.filter.resonance_x10.label,
+                                            selected_idx == 2,
+                                        ),
+                                        Some(3) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{}", filter_cfg.filter.drive.value),
+                                            &filter_cfg.filter.drive.label,
+                                            selected_idx == 3,
+                                        ),
+                                        Some(4) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{}", filter_cfg.filter.mix.value),
+                                            &filter_cfg.filter.mix.label,
+                                            selected_idx == 4,
+                                        ),
+                                        Some(5) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{}", filter_cfg.seq.seq().len()),
+                                            "Seq",
+                                            selected_idx == 5,
+                                        ),
+                                        Some(6) => draw_setting_option_block(
+                                            ui,
+                                            "Env",
+                                            "Envelope",
+                                            selected_idx == 6,
+                                        ),
+                                        _ => draw_empty_block(ui),
+                                    }
+                                }
+                            });
+                            draw_page_indicator(ui, 7, selected_idx);
+                        }
+                    }
+                    ScreenState::InTrackFxFilterSeq => {
+                        let bank_idx = app.config.track_fx.sel_bank_idx;
+                        let slot_idx = app.track_fx_screen_slot_idx;
+                        if let Some(crate::config::TrackFx::Filter(filter_cfg)) =
+                            app.config.track_fx.slot_fx(bank_idx, slot_idx)
+                        {
+                            let selected_idx = filter_cfg.seq.sel_idx.unwrap_or(0);
+                            ui.horizontal_centered(|ui| {
+                                ui.add_space(20.0);
+                                for idx in page_indices(2, selected_idx) {
+                                    match idx {
+                                        Some(0) => draw_setting_option_block(
+                                            ui,
+                                            &filter_cfg.seq.step.value,
+                                            &filter_cfg.seq.step.label,
+                                            selected_idx == 0,
+                                        ),
+                                        Some(1) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{}", filter_cfg.seq.edit.value),
+                                            &filter_cfg.seq.edit.label,
+                                            selected_idx == 1,
+                                        ),
+                                        _ => draw_empty_block(ui),
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    ScreenState::InTrackFxFilterEnv => {
+                        let bank_idx = app.config.track_fx.sel_bank_idx;
+                        let slot_idx = app.track_fx_screen_slot_idx;
+                        if let Some(crate::config::TrackFx::Filter(filter_cfg)) =
+                            app.config.track_fx.slot_fx(bank_idx, slot_idx)
+                        {
+                            let env_cfg = &filter_cfg.env;
+                            let selected_idx = env_cfg.sel_idx.unwrap_or(0);
+                            ui.horizontal_centered(|ui| {
+                                ui.add_space(20.0);
+                                for idx in page_indices(9, selected_idx) {
+                                    match idx {
+                                        Some(0) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{}", env_cfg.attack_ms.value),
+                                            &env_cfg.attack_ms.label,
+                                            env_cfg.sel_idx == Some(0),
+                                        ),
+                                        Some(1) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{}", env_cfg.hold_ms.value),
+                                            &env_cfg.hold_ms.label,
+                                            env_cfg.sel_idx == Some(1),
+                                        ),
+                                        Some(2) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{}", env_cfg.decay_ms.value),
+                                            &env_cfg.decay_ms.label,
+                                            env_cfg.sel_idx == Some(2),
+                                        ),
+                                        Some(3) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{}", env_cfg.sustain_pct.value),
+                                            &env_cfg.sustain_pct.label,
+                                            env_cfg.sel_idx == Some(3),
+                                        ),
+                                        Some(4) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{}", env_cfg.release_ms.value),
+                                            &env_cfg.release_ms.label,
+                                            env_cfg.sel_idx == Some(4),
+                                        ),
+                                        Some(5) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{}", env_cfg.start_pct.value),
+                                            &env_cfg.start_pct.label,
+                                            env_cfg.sel_idx == Some(5),
+                                        ),
+                                        Some(6) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{}", env_cfg.tension_a.value),
+                                            &env_cfg.tension_a.label,
+                                            env_cfg.sel_idx == Some(6),
+                                        ),
+                                        Some(7) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{}", env_cfg.tension_d.value),
+                                            &env_cfg.tension_d.label,
+                                            env_cfg.sel_idx == Some(7),
+                                        ),
+                                        Some(8) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{}", env_cfg.tension_r.value),
+                                            &env_cfg.tension_r.label,
+                                            env_cfg.sel_idx == Some(8),
+                                        ),
+                                        _ => draw_empty_block(ui),
+                                    }
+                                }
+                            });
+                            draw_page_indicator(ui, 9, selected_idx);
                         }
                     }
                     ScreenState::InFxOsc => {
@@ -1442,6 +1612,39 @@ fn screen_breadcrumb(app: &MyApp) -> Option<String> {
                 _ => "?",
             };
             Some(format!("Track-Bank{}-Fx{}-Roll", bank, slot))
+        }
+        ScreenState::InTrackFxFilter => {
+            let bank = app.config.track_fx.sel_bank_idx + 1;
+            let slot = match app.track_fx_screen_slot_idx {
+                0 => "U",
+                1 => "I",
+                2 => "O",
+                3 => "P",
+                _ => "?",
+            };
+            Some(format!("Track-Bank{}-Fx{}-Filter", bank, slot))
+        }
+        ScreenState::InTrackFxFilterSeq => {
+            let bank = app.config.track_fx.sel_bank_idx + 1;
+            let slot = match app.track_fx_screen_slot_idx {
+                0 => "U",
+                1 => "I",
+                2 => "O",
+                3 => "P",
+                _ => "?",
+            };
+            Some(format!("Track-Bank{}-Fx{}-Filter-Seq", bank, slot))
+        }
+        ScreenState::InTrackFxFilterEnv => {
+            let bank = app.config.track_fx.sel_bank_idx + 1;
+            let slot = match app.track_fx_screen_slot_idx {
+                0 => "U",
+                1 => "I",
+                2 => "O",
+                3 => "P",
+                _ => "?",
+            };
+            Some(format!("Track-Bank{}-Fx{}-Filter-Envelope", bank, slot))
         }
         ScreenState::InFxOsc => {
             let bank = app.config.input_fx.sel_bank_idx + 1;

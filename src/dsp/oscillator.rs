@@ -1,11 +1,46 @@
 use crate::config::note_configs::{NoteOct};
 use crate::config::osc_configs::Waveform;
 use crate::dsp::envelope::{AhdsrParams, AhdsrState};
+use crate::dsp::filter::{process_sample as process_filter_sample, FilterDspState, FilterParams};
 
 #[derive(Clone, Copy)]
 pub struct OscillatorDspState {
     pub phase: f32,
     pub envelope: AhdsrState,
+    pub last_note: Option<NoteOct>,
+}
+
+#[derive(Clone, Copy)]
+pub struct OscillatorFxDspState {
+    pub osc: OscillatorDspState,
+    pub filter_env: AhdsrState,
+    pub filter: FilterDspState,
+}
+
+impl OscillatorFxDspState {
+    pub fn new() -> Self {
+        Self {
+            osc: OscillatorDspState::new(),
+            filter_env: AhdsrState::new(),
+            filter: FilterDspState::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct OscillatorFxParams {
+    pub waveform: Waveform,
+    pub level: f32,
+    pub threshold: f32,
+    pub input_level: f32,
+    pub sample_rate: f32,
+    pub note: Option<NoteOct>,
+    pub note_on: bool,
+    pub note_retrigger: bool,
+    pub envelope: AhdsrParams,
+    pub filter_envelope: AhdsrParams,
+    pub filter: FilterParams,
+    pub cutoff_min_hz: f32,
 }
 
 impl OscillatorDspState {
@@ -13,6 +48,7 @@ impl OscillatorDspState {
         Self {
             phase: 0.0,
             envelope: AhdsrState::new(),
+            last_note: None,
         }
     }
 }
@@ -33,7 +69,24 @@ pub fn process_sample(
     let gate_on = note_on && input_level >= threshold;
     let retrigger = note_retrigger && input_level >= threshold;
     let amp = state.envelope.next(gate_on, retrigger, envelope, dt);
+
     if let Some(n) = note {
+        state.last_note = Some(n);
+    }
+
+    let note_for_sample = if note.is_some() {
+        note
+    } else if !gate_on {
+        state.last_note
+    } else {
+        None
+    };
+
+    if !gate_on && amp <= 0.0001 {
+        state.last_note = None;
+    }
+
+    if let Some(n) = note_for_sample {
         let freq = n.freq_hz();
         let (sample, phase) = osc_sample(waveform, state.phase, freq, sample_rate);
         state.phase = phase;
@@ -41,6 +94,37 @@ pub fn process_sample(
     } else {
         0.0
     }
+}
+
+pub fn process_fx_sample(state: &mut OscillatorFxDspState, p: OscillatorFxParams) -> f32 {
+    let osc_sample = process_sample(
+        &mut state.osc,
+        p.waveform,
+        p.level,
+        p.threshold,
+        p.input_level,
+        p.sample_rate,
+        p.note,
+        p.note_on,
+        p.note_retrigger,
+        p.envelope,
+    );
+
+    let gate_on = p.note_on && p.input_level >= p.threshold;
+    let retrigger = p.note_retrigger && p.input_level >= p.threshold;
+    let dt = 1.0 / p.sample_rate.max(1.0);
+    let cutoff_env = state
+        .filter_env
+        .next(gate_on, retrigger, p.filter_envelope, dt)
+        .clamp(0.0, 1.0);
+    let cutoff_max = p.filter.cutoff_hz.max(p.cutoff_min_hz);
+    let cutoff_hz = p.cutoff_min_hz + (cutoff_max - p.cutoff_min_hz) * cutoff_env;
+    process_filter_sample(
+        &mut state.filter,
+        FilterParams { cutoff_hz, ..p.filter },
+        p.sample_rate,
+        osc_sample,
+    )
 }
 
 fn osc_sample(waveform: Waveform, phase: f32, freq: f32, sample_rate: f32) -> (f32, f32) {

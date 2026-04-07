@@ -6,8 +6,11 @@ use serde::{Deserialize, Serialize};
 use crate::config::input_fx_configs::{FX_BANK_COUNT, FX_SLOT_COUNT};
 use crate::config::note_configs::{Note, NoteOct};
 use crate::config::osc_configs::Waveform;
-use crate::config::filter_configs::FilterType;
-use crate::config::track_delay_configs::{
+use crate::config::filter_configs::{
+    FILTER_CUTOFF_MAX_HZ, FILTER_CUTOFF_MIN_HZ, FILTER_DRIVE_MAX, FILTER_MIX_MAX, FILTER_Q_MAX_X10,
+    FILTER_Q_MIN_X10, FilterType,
+};
+use crate::config::delay_configs::{
     TRACK_DELAY_DAMP_MAX_HZ, TRACK_DELAY_DAMP_MIN_HZ, TRACK_DELAY_FEEDBACK_MAX_PCT,
     TRACK_DELAY_MIX_MAX_PCT, TRACK_DELAY_TIME_MAX_MS, TRACK_DELAY_TIME_MIN_MS,
 };
@@ -21,7 +24,7 @@ use crate::config::reverb_configs::{
     REVERB_HIGHCUT_MAX, REVERB_LOWCUT_MAX_HZ, REVERB_LOWCUT_MIN_HZ, REVERB_PREDELAY_MAX_MS,
     REVERB_RT60_MAX_MS, REVERB_RT60_MIN_MS, REVERB_SIZE_MAX, REVERB_WIDTH_MAX,
 };
-use crate::config::track_roll_configs::RollStep;
+use crate::config::roll_configs::RollStep;
 use crate::config::mydelay_configs::{MYDELAY_LEVEL_MAX, MYDELAY_THRESHOLD_MAX};
 use crate::config::{AppConfig, FxKind, InputFx, TrackFx, TrackFxKind};
 
@@ -95,6 +98,8 @@ pub struct TrackFxSlotData {
     pub delay: Option<TrackDelayData>,
     #[serde(default)]
     pub roll: Option<TrackRollData>,
+    #[serde(default)]
+    pub filter: Option<TrackFilterData>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -108,6 +113,20 @@ pub struct TrackDelayData {
 #[derive(Serialize, Deserialize)]
 pub struct TrackRollData {
     pub step: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TrackFilterData {
+    #[serde(default)]
+    pub filter: FilterData,
+    #[serde(default)]
+    pub seq_step: String,
+    #[serde(default)]
+    pub seq: Vec<bool>,
+    #[serde(default)]
+    pub seq_step_len_seq: Vec<usize>,
+    #[serde(default)]
+    pub env: EnvelopeData,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -450,6 +469,7 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                 kind: "None".to_string(),
                 delay: None,
                 roll: None,
+                filter: None,
             };
             if let Some(fx) = slot.fx.as_ref() {
                 match fx {
@@ -466,6 +486,32 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                         slot_data.kind = "Roll".to_string();
                         slot_data.roll = Some(TrackRollData {
                             step: roll.step.value.value(),
+                        });
+                    }
+                    TrackFx::Filter(filter) => {
+                        slot_data.kind = "Filter".to_string();
+                        slot_data.filter = Some(TrackFilterData {
+                            filter: FilterData {
+                                filter_type: filter_type_to_string(filter.filter.filter_type.value).to_string(),
+                                cutoff_hz: filter.filter.cutoff_hz.value,
+                                resonance_x10: filter.filter.resonance_x10.value,
+                                drive: filter.filter.drive.value,
+                                mix: filter.filter.mix.value,
+                            },
+                            seq_step: filter.seq.step.value.clone(),
+                            seq: filter.seq.seq().to_vec(),
+                            seq_step_len_seq: filter.seq.step_len_seq().to_vec(),
+                            env: EnvelopeData {
+                                attack_ms: filter.env.attack_ms.value,
+                                hold_ms: filter.env.hold_ms.value,
+                                decay_ms: filter.env.decay_ms.value,
+                                sustain_pct: filter.env.sustain_pct.value,
+                                release_ms: filter.env.release_ms.value,
+                                start_pct: filter.env.start_pct.value,
+                                tension_a: filter.env.tension_a.value,
+                                tension_d: filter.env.tension_d.value,
+                                tension_r: filter.env.tension_r.value,
+                            },
                         });
                     }
                 }
@@ -761,6 +807,55 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                         }
                     }
                 }
+                "Filter" => {
+                    config.track_fx.set_slot_kind(bank_idx, slot_idx, TrackFxKind::Filter);
+                    if let Some(TrackFx::Filter(filter_cfg)) = config.track_fx.slot_fx_mut(bank_idx, slot_idx) {
+                        if let Some(filter_data) = &slot_data.filter {
+                            if let Some(ft) = string_to_filter_type(&filter_data.filter.filter_type) {
+                                filter_cfg.filter.filter_type.value = ft;
+                            }
+                            filter_cfg.filter.cutoff_hz.value = filter_data
+                                .filter
+                                .cutoff_hz
+                                .clamp(FILTER_CUTOFF_MIN_HZ, FILTER_CUTOFF_MAX_HZ);
+                            filter_cfg.filter.resonance_x10.value = filter_data
+                                .filter
+                                .resonance_x10
+                                .clamp(FILTER_Q_MIN_X10, FILTER_Q_MAX_X10);
+                            filter_cfg.filter.drive.value = filter_data.filter.drive.min(FILTER_DRIVE_MAX);
+                            filter_cfg.filter.mix.value = filter_data.filter.mix.min(FILTER_MIX_MAX);
+
+                            if !filter_data.seq_step.is_empty() {
+                                filter_cfg.seq.step.value = filter_data.seq_step.clone();
+                            }
+                            filter_cfg.seq.set_seq_with_steps(
+                                filter_data.seq.clone(),
+                                filter_data.seq_step_len_seq.clone(),
+                            );
+
+                            filter_cfg.env.attack_ms.value =
+                                filter_data.env.attack_ms.min(ENVELOPE_ATTACK_MAX_MS);
+                            filter_cfg.env.hold_ms.value =
+                                filter_data.env.hold_ms.min(ENVELOPE_HOLD_MAX_MS);
+                            filter_cfg.env.decay_ms.value =
+                                filter_data.env.decay_ms.min(ENVELOPE_DECAY_MAX_MS);
+                            filter_cfg.env.sustain_pct.value =
+                                filter_data.env.sustain_pct.min(ENVELOPE_SUSTAIN_MAX_PCT);
+                            filter_cfg.env.release_ms.value = filter_data
+                                .env
+                                .release_ms
+                                .clamp(ENVELOPE_RELEASE_MIN_MS, ENVELOPE_RELEASE_MAX_MS);
+                            filter_cfg.env.start_pct.value =
+                                filter_data.env.start_pct.min(ENVELOPE_START_MAX_PCT);
+                            filter_cfg.env.tension_a.value =
+                                filter_data.env.tension_a.min(ENVELOPE_TENSION_MAX);
+                            filter_cfg.env.tension_d.value =
+                                filter_data.env.tension_d.min(ENVELOPE_TENSION_MAX);
+                            filter_cfg.env.tension_r.value =
+                                filter_data.env.tension_r.min(ENVELOPE_TENSION_MAX);
+                        }
+                    }
+                }
                 _ => {
                     config.track_fx.set_slot_kind(bank_idx, slot_idx, TrackFxKind::None);
                 }
@@ -794,7 +889,7 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
 }
 
 fn default_tension_value() -> usize {
-    50
+    100
 }
 
 fn projects_root() -> PathBuf {

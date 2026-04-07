@@ -371,6 +371,13 @@ impl AudioIO {
                     (0.0, config.sample_rate.0 as f32)
                 };
                 let sec_per_frame = 1.0 / sample_rate.max(1.0) as f64;
+                // Track recording is latency-compensated by shifting captured audio earlier.
+                // Advance track-FX timeline by the same amount so seq/env stays phase-aligned.
+                let latency_comp_secs = if channels > 0 {
+                    latency_comp_samples as f64 / channels as f64 / sample_rate.max(1.0) as f64
+                } else {
+                    0.0
+                };
 
                 for (frame_idx, frame) in data.chunks_mut(channels).enumerate() {
                     let input_l = cons.pop().unwrap_or(0.0);
@@ -384,6 +391,7 @@ impl AudioIO {
                     }
 
                     let elapsed = base_elapsed + frame_idx as f64 * sec_per_frame;
+                    let track_fx_elapsed = elapsed + latency_comp_secs;
                     let mut mixed_l = 0.0f32;
                     let mut mixed_r = 0.0f32;
 
@@ -417,7 +425,7 @@ impl AudioIO {
                             let (wet_l, wet_r) = if let Some(track_fx) = track_fx_guard.as_mut() {
                                 track_fx.process_frame(
                                     track_idx,
-                                    elapsed,
+                                    track_fx_elapsed,
                                     dry_l,
                                     dry_r,
                                     &track.buffer,

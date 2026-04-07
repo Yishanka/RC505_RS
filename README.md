@@ -1,41 +1,110 @@
-# RC505 for Free!
+﻿# RC505 for Free!
+
+English README. Chinese version: [README_CN.md](./README_CN.md)
 
 ## 1. Brief Intro
 
-This is an open source local app that simulates the BOSS RC505 MK2, or RC505. I can not afford an RC505, which basically costs around 5000 RMB in China, and all free apps I have used are just looper with very simple function and FX. So I decided to develop a free software RC505 with as many functions as I can handle. 
+This project is a free local looper app inspired by the BOSS RC-505 MK2. The real RC-505 Mk2 hardware is expensive, and many free software loopers are too limited for live ideas. So I decided to build one myself in Rust and keep adding features step by step.
 
----
+This is still an early version and still rough in many places, but the core workflow is already usable: multi-track looping, beat sync, input effects, track effects, and project save/load.
 
-## 2. What is RC505
+## 2. What Is RC-505
 
-简单来说，它是目前市面上**循环创作（Looping）的行业标杆**。
+The RC-505 style workflow is basically live looping with multiple tracks, quick switching, and effects that react to rhythm. You record short phrases, layer them, mute and unmute tracks, and shape sound in real time. This project follows that idea with 5 tracks and two effect layers: Input FX (before recording) and Track FX (on playback tracks).
 
-* **五轨道系统**：拥有五个独立的立体声循环轨道，每个轨道都有独立的录制、播放、停止按键和音量推子。
-* **双特效引擎**：支持 Input FX（录制时生效）和 Track FX（播放时生效），每个部分有 4 个可快速切换的效果。
-* **同步与节奏**：强大的内置鼓机和量化功能，确保不同长度的 Loop 能够完美对齐。
-* **操控中心**：虽然是桌面设备，但它本质上是一个高度可定制的音频工作站，支持复杂的 MIDI 映射。
-
----
+I am not trying to make a strict 1:1 hardware clone, because I don't have one =(. Many details here are my own design choices, especially in FX behavoir, FX parameters and UI behavior. The goal is practical live use first, then gradual refinement.
 
 ## 3. About the Project
 
-It is implemented with Rust. It only supports Windows OS. I have literally no experience in developing an mobile app, and I wish it will be extended and supported across the platforms. It would be perfect if it were available on IPad. 
+The app is written in Rust and currently targets Windows desktop. Audio I/O is built on `cpal` (WASAPI by default, optional ASIO feature), UI is built with `eframe/egui`, and project data is stored in JSON with `serde`.
 
-### Mannual (ver 0.1.0) 
+The architecture is split into clear layers: UI/input handling in `app.rs` and `ui/*`, user-editable parameter trees in `config/*`, real-time audio routing in `engine/*`, DSP algorithms in `dsp/*`, and project persistence in `project.rs`. Runtime DSP state is separated from config data so parameter edits can be pushed into the audio thread safely.
 
-It can only be operated by keyboard. The mannual is listed below.
+At a high level:
 
-1. When you lauch the app, it shows the initial interface for you to create or delete projects. You can press `UpArrow` or `DownArrow` to select projects. If you select the bottom item, you can press `Enter` and input the name to create a new project. Press `Delete` to delete the selected project. Press `Enter` to enter in the selected project.
+```text
+src/
+  app.rs                app state machine + key handling
+  ui/                   init screen + looper screen drawing
+  config/               all editable parameters (beat/system/fx)
+  engine/
+    audio_io.rs         input/output streams, ring buffer, track timeline
+    input_fx.rs         Input FX runtime and processing
+    track_fx.rs         Track FX runtime and processing
+    metronome.rs        beat timing
+  dsp/                  envelope/filter/osc/reverb/delay/roll/my_delay/note
+  project.rs            save/load project index and per-project JSON
+```
 
-2. When you enter in the app, you can see a simple loop panel. Mention that the UI are just for a similar appearance, and not clickable lol. There are 2 status for operation, which are **Loop** and **Screen**. Press `s` to switch the status. If the screen above has a red strove, you are in the **Screen** status. 
+## 4. How To Run and Play
 
-3. When you are in `Loop` status, you basically control the record of tracks. Press `1-5` to record/dub/play the corresponding track (i.e. the track with the same number). If the track is empty, it will record the input audio. If the track is playing, it will dub the input audio. If the track is pause, it will be played immediately. If the track is recording or playing, it will be played at the next beat time. Press `F1-F5` to pause the corresponding track. Press `RightArrow` and `LeftArrow` to select the track. Press `Delete` to delete the audio in the selected track. 
+### Build and Run
 
-    In `Loop` status you can also controls the fx. Press `T` to toggle between selecting banks or togglingg fx. So far you can only controls Input FX. When you are selecting banks (buttons are blue), you can press `QWER` to switch among 4 banks. When you are toggling input fx (buttons are red), you can press `QWER` to controls the on/off of the 4 input fx respectively. 
+Right now the safest path is building from source locally.
 
-4. When you are in `Screen` status, you can controls the settings/configs of the project. There are 2 types of config: Enum Config, Numeric Config. For Enum Config, press `UpArrow` and `DownArrow` to switch between different values. For Numeric Config, input numbers or backspace to change the value. The configs are organized recursively, meaning you can find detailed config set in a config set, which also consists of Enum Config, Numeric Config and other config set. Press `Enter` to enter in the config set.
+```powershell
+git clone <your-repo-url>
+cd rc505_rs
+cargo run --release
+```
 
-The followings are different Configs Type (mention not *config* type). These are the entrance of the recursively organized configs.
-- If you press `B`, you get into the **Beat Configs**. You can just input numbers and `backspace` to change the BPM. There is another special feature: you can also tap `Space` consistently to get the BPM you would like. 
-- If you press `M`, you get into the **System Configs**. This mainly controls the input and output devices. 
-- If you press `QWER`, you get into the corresponding input fx of the current bank. You can choose one (and only one) Fx engine to bind on the selected input fx slot. If you press enter, you will get into the configs. **IMPORTANT: SO FAR, IF YOU SWITCH THE FX ENGINE, THE CONFIGS YOU HAVE SETTED WILL IMMEDIATELY BE LOST. THIS IS A BUG TO BE FIXED IN THE FUTURE.** 
+If you want to try ASIO on Windows and your devices support it:
+
+```powershell
+cargo run --release --features asio
+```
+
+If you only want a binary, you can also build once and run `target/release/rc505_rs.exe`.
+
+### Basic Operation Flow
+
+When the app starts, you enter the project list. Use `Up/Down` to select, `Enter` to open, `Enter` on `[ NEW PROJECT ]` to create, `R` to rename and `Enter` to determine the name, and `Delete` to remove a project.
+
+Inside a project there are two working states: `Loop` and `Screen`. Press `S` to switch. In `Loop`, you mainly control record/play/dub and the on/off of the FXes. In `Screen`, you edit settings and FX parameters.
+
+In `Loop` state, `1..5` controls tracks. Empty track goes to record, playing track goes to overdub, recording or dubbing track schedules stop on next beat and returns to play, and paused track resumes with timeline alignment. `F1..F5` pauses tracks. `Left/Right` selects track. `Delete` clears the selected track.
+
+FX has two control modes toggled by `T`: `Bank` mode and `Single` mode. In Bank mode, `QWER` switches Input FX bank and `UIOP` switches Track FX bank. In Single mode, `QWER` toggles Input FX slots in current input bank, and `UIOP` toggles Track FX slots for the **currently selected track** in current track bank.
+
+### Screen Editing
+
+In `Screen` state, `B` opens Beat settings, `M` opens System settings, `QWER` opens Input FX slot editing, and `UIOP` opens Track FX slot editing. Most pages use `Left/Right` to move between fields and `Up/Down` to change enum values. Numeric fields accept number keys and `Backspace`. `Enter` is used for entering sub-pages or applying Push/Pop edits in sequence editors.
+
+The UI is intentionally keyboard-first. It looks like a panel, but controls are not mouse-click workflow yet.
+
+### Implemented FX (Current Version)
+
+Input FX has 4 banks x 4 slots. Slot type can be `Oscillator`, `Filter`, `Reverb`, or `MyDelay`.
+
+Oscillator includes waveform, level, threshold, note sequence, AHDSR envelope, plus its own filter and filter-envelope. MyDelay is a custom short-capture looping texture effect with note-driven loop length, its own AHDSR, and filter/filter-envelope. Input Filter is a biquad filter (LPF/HPF/BPF/Notch) with drive and wet mix. Reverb is an FDN-style reverb with size/decay/predelay/width/high-cut/low-cut.
+
+Track FX also has 4 banks x 4 slots, and per-track enable states, so one bank definition can be shared while each track chooses on/off independently. Implemented track effects are `Delay`, `Roll`, and `Filter`. The track filter includes its own `Seq` and `Env` sub-pages, so cutoff motion can be rhythm-gated and envelope-shaped during playback.
+
+### About Note / Seq / Envelope
+
+I don't know the logic of sequencer in RC-505, so I implemented these Fx. Note and Seq are tick-based (12 ticks per beat, max 32 beats). Step options include `1/6`, `1/4`, `1/3`, `1/2`, `2/3`, `3/4`, `5/6`, `1`, and `2`. `Push` appends one step block, `Pop` removes the latest block.
+
+Envelope is AHDSR plus `Start` and tension controls to provide a 'LFO' function. In the current mapping, tension default `100` means linear, values below it bend one way, values above it bend the other way, and max is `1000`.
+
+### Latency Compensation (IMPORTANT)
+
+Windows audio paths can have noticeable round-trip latency. Beat settings include `Latency Complement` (ms), which is used in recording alignment logic. Recorded buffers are compensated when recording stops, overdub write positions are offset accordingly, and track-FX timeline processing is shifted to stay phase-aligned with compensated track audio.
+
+This setting is hardware-dependent. A value that works on one machine may not work on another, so treat it as a per-device calibration value.
+
+### Save, Load, and Project Files
+
+Projects are stored under `%APPDATA%/rc505_rs/projects` (fallback to local `projects/` if `%APPDATA%` is unavailable). There is one index file for the project list and one JSON file per project.
+
+When exiting from loop/screen to init (or closing window), the app asks whether to save: `Y` save, `N` discard, `Esc` cancel exit. Beat/system/fx settings are persisted. Audio track waveform buffers are not persisted yet; this version stores configuration state, not recorded audio clips.
+
+Known limitation for now: if you change an FX slot type (for example Oscillator -> Filter), that slot is reinitialized and its previous parameter set is lost.
+
+## 5. Future Development
+
+There are still many bugs and edge cases. I have not done systematic testing yet, so issue reports are very welcome.
+
+The roadmap is to keep improving timing stability, expand DSP choices, and improve usability. Vocoder, pitch-related effects, and more refined track-level workflows are all candidates for future work.
+
+If you want to contribute, PRs and suggestions are welcome. I am building this in public and learning while doing it.
+

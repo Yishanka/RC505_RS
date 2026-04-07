@@ -23,11 +23,11 @@ impl std::fmt::Display for RollStep {
     }
 }
 
-pub struct TrackRollConfigs {
+pub struct RollConfigs {
     pub step: EnumConfig<RollStep>,
 }
 
-impl TrackRollConfigs {
+impl RollConfigs {
     pub fn new() -> Self {
         Self {
             step: EnumConfig::new(

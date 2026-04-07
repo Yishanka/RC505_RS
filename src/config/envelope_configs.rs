@@ -7,7 +7,7 @@ pub const ENVELOPE_HOLD_MAX_MS: usize = 5000;
 pub const ENVELOPE_DECAY_MAX_MS: usize = 10000;
 pub const ENVELOPE_SUSTAIN_MAX_PCT: usize = 100;
 pub const ENVELOPE_START_MAX_PCT: usize = 100;
-pub const ENVELOPE_TENSION_MAX: usize = 100;
+pub const ENVELOPE_TENSION_MAX: usize = 1000;
 pub const ENVELOPE_RELEASE_MIN_MS: usize = 1;
 pub const ENVELOPE_RELEASE_MAX_MS: usize = 5000;
 
@@ -34,9 +34,9 @@ impl EnvelopeConfigs {
             sustain_pct: NumericConfig::new("Sustain(%)", 100),
             release_ms: NumericConfig::new("Release(ms)", 0),
             start_pct: NumericConfig::new("Start(%)", 0),
-            tension_a: NumericConfig::new("Tension-A", 50),
-            tension_d: NumericConfig::new("Tension-D", 50),
-            tension_r: NumericConfig::new("Tension-R", 50),
+            tension_a: NumericConfig::new("Tension-A", 100),
+            tension_d: NumericConfig::new("Tension-D", 100),
+            tension_r: NumericConfig::new("Tension-R", 100),
         }
     }
 }
