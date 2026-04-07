@@ -54,7 +54,7 @@ cargo run --release
 cargo run --release --features asio
 ```
 
-如果只想拿可执行文件，也可以先编译，再运行 `target/release/rc505_rs.exe`。
+如果只想拿可执行文件，也可以先编译，再运行 `target/release/rc505_rs.exe`。或者直接在 Release 里下载 `.exe` 文件即可。
 
 ### 基本操作流程
 

@@ -56,6 +56,8 @@ cargo run --release --features asio
 
 If you only want a binary, you can also build once and run `target/release/rc505_rs.exe`.
 
+I upload a binary file to the release without ASIO. You can just download and open it. 
+
 ### Basic Operation Flow
 
 When the app starts, you enter the project list. Use `Up/Down` to select, `Enter` to open, `Enter` on `[ NEW PROJECT ]` to create, `R` to rename and `Enter` to determine the name, and `Delete` to remove a project.
