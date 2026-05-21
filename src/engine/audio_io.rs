@@ -361,25 +361,13 @@ impl AudioIO {
                     engine.process_timeline(now, latency_comp_samples, channels);
                 }
                 let mut track_fx_guard = output_track_fx.lock().ok();
-                let (base_elapsed, sample_rate) = if let Some(track_fx) = track_fx_guard.as_ref() {
-                    let elapsed = track_fx
-                        .metronome_start()
-                        .map(|start| now.saturating_duration_since(start).as_secs_f64())
-                        .unwrap_or(0.0);
-                    (elapsed, track_fx.sample_rate())
+                let sample_rate = if let Some(track_fx) = track_fx_guard.as_ref() {
+                    track_fx.sample_rate()
                 } else {
-                    (0.0, config.sample_rate.0 as f32)
-                };
-                let sec_per_frame = 1.0 / sample_rate.max(1.0) as f64;
-                // Track recording is latency-compensated by shifting captured audio earlier.
-                // Advance track-FX timeline by the same amount so seq/env stays phase-aligned.
-                let latency_comp_secs = if channels > 0 {
-                    latency_comp_samples as f64 / channels as f64 / sample_rate.max(1.0) as f64
-                } else {
-                    0.0
+                    config.sample_rate.0 as f32
                 };
 
-                for (frame_idx, frame) in data.chunks_mut(channels).enumerate() {
+                for frame in data.chunks_mut(channels) {
                     let input_l = cons.pop().unwrap_or(0.0);
                     let input_r = if channels > 1 {
                         cons.pop().unwrap_or(input_l)
@@ -389,9 +377,6 @@ impl AudioIO {
                     for _ in 2..channels {
                         let _ = cons.pop();
                     }
-
-                    let elapsed = base_elapsed + frame_idx as f64 * sec_per_frame;
-                    let track_fx_elapsed = elapsed + latency_comp_secs;
                     let mut mixed_l = 0.0f32;
                     let mut mixed_r = 0.0f32;
 
@@ -422,6 +407,14 @@ impl AudioIO {
 
                             let dry_l = track.buffer[idx_l];
                             let dry_r = if channels > 1 { track.buffer[idx_r] } else { dry_l };
+                            // Use this track's current playhead as the seq/env phase reference.
+                            // This keeps Track FX Filter step aligned with what is actually heard,
+                            // including latency-compensated recording and resume-from-pause offsets.
+                            let track_fx_elapsed = if channels > 0 {
+                                idx_l as f64 / channels as f64 / sample_rate.max(1.0) as f64
+                            } else {
+                                0.0
+                            };
                             let (wet_l, wet_r) = if let Some(track_fx) = track_fx_guard.as_mut() {
                                 track_fx.process_frame(
                                     track_idx,
@@ -524,13 +517,13 @@ impl AudioIO {
         &self.output_name
     }
 
-    pub fn update_input_fx(&self, config: &crate::config::InputFxConfig) {
+    pub fn update_input_fx(&self, config: &crate::config::InputFxConfigs) {
         if let Ok(mut fx) = self.fx_engine.lock() {
             fx.update_from_config(config);
         }
     }
 
-    pub fn update_track_fx(&self, config: &crate::config::TrackFxConfig) {
+    pub fn update_track_fx(&self, config: &crate::config::TrackFxConfigs) {
         if let Ok(mut fx) = self.track_fx_engine.lock() {
             fx.update_from_config(config);
         }

@@ -72,13 +72,13 @@ impl TrackFxTrackState {
     }
 }
 
-pub struct TrackFxConfig {
+pub struct TrackFxConfigs {
     pub banks: [TrackFxBank; TRACK_FX_BANK_COUNT],
     pub tracks: Vec<TrackFxTrackState>,
     pub sel_bank_idx: usize,
 }
 
-impl TrackFxConfig {
+impl TrackFxConfigs {
     pub fn new(track_count: usize) -> Self {
         let safe_count = track_count.max(1);
         Self {

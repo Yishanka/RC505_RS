@@ -164,7 +164,7 @@ pub fn process_sample(
     0.0
 }
 
-pub fn process_fx_frame(state: &mut MyDelayFxDspState, p: MyDelayFxParams) -> (f32, f32) {
+pub fn process_fx_sample(state: &mut MyDelayFxDspState, p: MyDelayFxParams) -> (f32, f32) {
     if !p.gate_on {
         state.delay.clear_gate();
     }

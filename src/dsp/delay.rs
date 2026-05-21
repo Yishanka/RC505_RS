@@ -58,7 +58,7 @@ impl DelayDspState {
     }
 }
 
-pub fn process_frame(
+pub fn process_sample(
     state: &mut DelayDspState,
     p: DelayParams,
     sample_rate: f32,

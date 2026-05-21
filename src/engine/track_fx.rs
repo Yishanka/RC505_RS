@@ -14,12 +14,12 @@ use crate::config::filter_configs::{
     FILTER_Q_MIN_X10, FilterType,
 };
 use crate::config::track_fx_configs::{
-    TRACK_FX_BANK_COUNT, TRACK_FX_SLOT_COUNT, TrackFx, TrackFxConfig,
+    TRACK_FX_BANK_COUNT, TRACK_FX_SLOT_COUNT, TrackFx, TrackFxConfigs,
 };
 use crate::dsp::envelope::{AhdsrParams, AhdsrState};
 use crate::dsp::filter::{process_sample as process_filter_sample, FilterDspState, FilterParams};
 use crate::dsp::note::seq_bool_at_time;
-use crate::dsp::delay::{process_frame as process_delay_frame, DelayDspState, DelayParams};
+use crate::dsp::delay::{process_sample as process_delay_sample, DelayDspState, DelayParams};
 use crate::dsp::roll::{process_sample as process_roll_sample, RollDspState, RollParams};
 
 const DEFAULT_BPM: usize = 120;
@@ -143,7 +143,7 @@ impl TrackFxEngine {
         self.bpm = bpm.max(1);
     }
 
-    pub fn update_from_config(&mut self, config: &TrackFxConfig) {
+    pub fn update_from_config(&mut self, config: &TrackFxConfigs) {
         let track_count = config.tracks.len();
         self.runtime = TrackFxRuntime::from_config(config);
         if self.state.tracks.len() != track_count {
@@ -181,7 +181,7 @@ impl TrackFxEngine {
             }
 
             if let Some(delay) = slot.delay {
-                let (l, r) = process_delay_frame(
+                let (l, r) = process_delay_sample(
                     &mut bank_state.slots[idx].delay,
                     DelayParams {
                         time_ms: delay.time_ms,
@@ -272,10 +272,6 @@ impl TrackFxEngine {
         (out_l.clamp(-1.0, 1.0), out_r.clamp(-1.0, 1.0))
     }
 
-    pub fn metronome_start(&self) -> Option<Instant> {
-        self.metronome_start
-    }
-
     pub fn sample_rate(&self) -> f32 {
         self.sample_rate
     }
@@ -296,7 +292,7 @@ impl TrackFxRuntime {
         }
     }
 
-    pub fn from_config(config: &TrackFxConfig) -> Self {
+    pub fn from_config(config: &TrackFxConfigs) -> Self {
         let banks = std::array::from_fn(|bank_idx| {
             let bank = &config.banks[bank_idx];
             let slots = std::array::from_fn(|slot_idx| {

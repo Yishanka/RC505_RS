@@ -1,5 +1,5 @@
 use eframe::egui;
-use std::time::{Instant};
+use std::time::{Duration, Instant};
 
 use crate::config::{AppConfig, ConfigSet, FxKind};
 use crate::config::envelope_configs::{
@@ -198,6 +198,30 @@ impl MyApp {
         let elapsed = now.saturating_duration_since(anchor);
         let loops = (elapsed.as_secs_f64() / loop_len.as_secs_f64()).floor() as u64;
         Some(anchor + loop_len * (loops as u32 + 1))
+    }
+
+    fn restart_anchor_with_latency(beat_time: Instant, loop_len: Duration, latency_ms: usize) -> Instant {
+        if loop_len.is_zero() || latency_ms == 0 {
+            return beat_time;
+        }
+
+        let loop_secs = loop_len.as_secs_f64();
+        if loop_secs <= 0.0 {
+            return beat_time;
+        }
+
+        let comp_secs = latency_ms as f64 / 1000.0;
+        let comp_mod_secs = comp_secs % loop_secs;
+        if comp_mod_secs <= 1e-9 {
+            return beat_time;
+        }
+
+        // Restart phase from the tail segment that corresponds to latency compensation.
+        // Equivalent phase at beat_time is: 1 - (comp_mod / loop_len).
+        let shift_back_secs = (loop_secs - comp_mod_secs).max(0.0);
+        beat_time
+            .checked_sub(Duration::from_secs_f64(shift_back_secs))
+            .unwrap_or(beat_time)
     }
 
 
@@ -1622,11 +1646,17 @@ impl MyApp {
 
         let timeline_start_at = if self.metronome.start_time().is_none() && on_track > 0 {
             let beat_time = self.metronome.get_beat_time();
-            // When timeline restarts from all-paused, all looped tracks share one anchor.
-            // Paused tracks stay silent, but will re-enter at phase-correct positions.
+            let latency_ms = self.config.beat_config.current_latency();
+            // When timeline restarts from all-paused, keep latency-compensated phase.
+            // This makes the first resumed track enter from the tail compensation segment,
+            // and paused tracks will re-enter phase-aligned later.
             for track in &mut self.tracks {
-                if track.track_loop_duration.is_some() {
-                    track.track_play_anchor_at = Some(beat_time);
+                if let Some(loop_len) = track.track_loop_duration {
+                    track.track_play_anchor_at = Some(Self::restart_anchor_with_latency(
+                        beat_time,
+                        loop_len,
+                        latency_ms,
+                    ));
                 }
             }
             if let Some(engine) = audio {

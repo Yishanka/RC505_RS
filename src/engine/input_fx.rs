@@ -37,12 +37,12 @@ use crate::config::reverb_configs::{
 };
 use crate::config::note_configs::NoteOct;
 use crate::config::osc_configs::Waveform;
-use crate::config::{input_fx_configs::FX_BANK_COUNT, input_fx_configs::FX_SLOT_COUNT, InputFx, InputFxConfig};
+use crate::config::{input_fx_configs::FX_BANK_COUNT, input_fx_configs::FX_SLOT_COUNT, InputFx, InputFxConfigs};
 use crate::dsp::envelope::AhdsrParams;
 use crate::dsp::filter::{process_sample as process_filter_sample, FilterDspState, FilterParams};
-use crate::dsp::my_delay::{process_fx_frame as process_mydelay_fx_frame, MyDelayFxDspState, MyDelayFxParams};
+use crate::dsp::my_delay::{process_fx_sample as process_mydelay_fx_sample, MyDelayFxDspState, MyDelayFxParams};
 use crate::dsp::oscillator::{process_fx_sample as process_osc_fx_sample, OscillatorFxDspState, OscillatorFxParams};
-use crate::dsp::reverb::{process_frame as process_reverb_frame, ReverbDspState, ReverbParams};
+use crate::dsp::reverb::{process_sample as process_reverb_frame, ReverbDspState, ReverbParams};
 use crate::dsp::note::{note_at_time, seq_bool_at_time}; 
 
 const DEFAULT_BPM: usize = 120;
@@ -160,7 +160,7 @@ impl InputFxEngine {
         self.bpm = bpm.max(1);
     }
 
-    pub fn update_from_config(&mut self, config: &InputFxConfig) {
+    pub fn update_from_config(&mut self, config: &InputFxConfigs) {
         self.runtime = InputFxRuntime::from_config(config);
     }
 
@@ -265,7 +265,7 @@ impl InputFxEngine {
             };
 
             let loop_len_samples = note.map(|n| (self.sample_rate / n.freq_hz()).round() as usize);
-            let (filtered_l, filtered_r) = process_mydelay_fx_frame(
+            let (filtered_l, filtered_r) = process_mydelay_fx_sample(
                 &mut state_bank.slots[idx].my_delay,
                 MyDelayFxParams {
                     level: delay.level,
@@ -371,7 +371,7 @@ impl InputFxRuntime {
         }
     }
 
-    pub fn from_config(config: &InputFxConfig) -> Self {
+    pub fn from_config(config: &InputFxConfigs) -> Self {
         let banks = std::array::from_fn(|bank_idx| {
             let bank = &config.banks[bank_idx];
             let slots = std::array::from_fn(|slot_idx| {
@@ -406,8 +406,7 @@ impl InputFxRuntime {
                                     .envelope
                                     .sustain_pct
                                     .value
-                                    .min(ENVELOPE_SUSTAIN_MAX_PCT) as f32
-                                    / 100.0)
+                                    .min(ENVELOPE_SUSTAIN_MAX_PCT) as f32 / 100.0)
                                     .clamp(0.0, 1.0),
                                 release_ms: osc
                                     .envelope
@@ -419,8 +418,7 @@ impl InputFxRuntime {
                                     .envelope
                                     .start_pct
                                     .value
-                                    .min(ENVELOPE_START_MAX_PCT) as f32
-                                    / 100.0)
+                                    .min(ENVELOPE_START_MAX_PCT) as f32 / 100.0)
                                     .clamp(0.0, 1.0),
                                 tension_attack: tension_to_exponent(
                                     osc.envelope.tension_a.value.min(ENVELOPE_TENSION_MAX),

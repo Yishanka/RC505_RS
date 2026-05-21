@@ -18,8 +18,8 @@ pub mod track_fx_configs;
 
 pub use app_config::{AppConfig};
 pub use beat_configs::{BeatConfigs};
-pub use input_fx_configs::{FxKind, InputFx, InputFxConfig,};
+pub use input_fx_configs::{FxKind, InputFx, InputFxConfigs,};
 pub use osc_configs::OscillatorConfigs; 
 pub use system_configs::{SystemConfigs};
 pub use config_type::{ConfigSet};
-pub use track_fx_configs::{TrackFx, TrackFxConfig, TrackFxKind};
+pub use track_fx_configs::{TrackFx, TrackFxConfigs, TrackFxKind};

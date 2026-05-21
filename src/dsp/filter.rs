@@ -56,7 +56,12 @@ impl FilterDspState {
     }
 }
 
-pub fn process_sample(state: &mut FilterDspState, p: FilterParams, sample_rate: f32, input: f32) -> f32 {
+pub fn process_sample(
+    state: &mut FilterDspState, 
+    p: FilterParams, 
+    sample_rate: f32, 
+    input: f32
+) -> f32 {
     let sr = sample_rate.max(1.0);
     let nyquist = (sr * 0.5 - 1.0).max(21.0);
     let cutoff = p.cutoff_hz.clamp(20.0, nyquist);

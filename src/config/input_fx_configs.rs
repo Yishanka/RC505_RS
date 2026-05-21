@@ -109,12 +109,12 @@ impl FxBank {
     }
 }
 
-pub struct InputFxConfig {
+pub struct InputFxConfigs {
     pub banks: [FxBank; FX_BANK_COUNT],
     pub sel_bank_idx: usize,
 }
 
-impl InputFxConfig {
+impl InputFxConfigs {
     pub fn new() -> Self {
         Self {
             banks: std::array::from_fn(|_| FxBank::new()),

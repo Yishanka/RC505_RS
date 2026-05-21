@@ -148,7 +148,7 @@ impl ReverbDspState {
     }
 }
 
-pub fn process_frame(
+pub fn process_sample(
     state: &mut ReverbDspState,
     p: ReverbParams,
     sample_rate: f32,
