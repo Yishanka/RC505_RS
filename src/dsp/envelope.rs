@@ -41,7 +41,13 @@ impl AhdsrState {
         }
     }
 
-    pub fn next(&mut self, note_on: bool, retrigger: bool, params: AhdsrParams, dt_secs: f32) -> f32 {
+    pub fn next(
+        &mut self,
+        note_on: bool,
+        retrigger: bool,
+        params: AhdsrParams,
+        dt_secs: f32,
+    ) -> f32 {
         if note_on && (!self.prev_note_on || retrigger) {
             self.phase = AhdsrPhase::Attack;
             self.phase_ms = 0.0;

@@ -45,7 +45,7 @@ impl BeatTapCaculator {
 /// All beat settings
 pub struct BeatConfigs {
     // bpm: usize,
-    // latency: usize,     
+    // latency: usize,
     pub sel_idx: Option<usize>,
     pub input_bpm: NumericConfig,
     pub input_latency: NumericConfig,

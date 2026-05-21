@@ -39,7 +39,9 @@ pub fn process_sample(
     let frames = (len / channels).max(1);
     let frames_per_beat = (sample_rate.max(1.0) * 60.0 / bpm.max(1) as f32).max(1.0);
     let loop_beats = (frames as f32 / frames_per_beat).max(1.0);
-    let repeat_frames = ((frames_per_beat * loop_beats) / step as f32).round().max(1.0) as usize;
+    let repeat_frames = ((frames_per_beat * loop_beats) / step as f32)
+        .round()
+        .max(1.0) as usize;
     let repeat_samples = (repeat_frames * channels).clamp(channels, len.max(channels));
     let layers = step.min((len / repeat_samples).max(1));
     let phase = play_cursor % repeat_samples;

@@ -1,6 +1,6 @@
 // src/dsp/my_delay.rs
 use crate::dsp::envelope::{AhdsrParams, AhdsrState};
-use crate::dsp::filter::{process_sample as process_filter_sample, FilterDspState, FilterParams};
+use crate::dsp::filter::{FilterDspState, FilterParams, process_sample as process_filter_sample};
 
 const RECORD_WINDOW_MS: f32 = 100.0;
 
@@ -87,7 +87,11 @@ impl MyDelayDspState {
         self.prev_above = false;
     }
 
-    pub fn resolve_loop_len(&mut self, current_loop_len: Option<usize>, gate_on: bool) -> Option<usize> {
+    pub fn resolve_loop_len(
+        &mut self,
+        current_loop_len: Option<usize>,
+        gate_on: bool,
+    ) -> Option<usize> {
         if let Some(loop_len) = current_loop_len {
             let clamped = loop_len.max(2);
             self.last_loop_len_samples = Some(clamped);
@@ -206,8 +210,10 @@ pub fn process_fx_sample(state: &mut MyDelayFxDspState, p: MyDelayFxParams) -> (
         cutoff_hz,
         ..p.filter
     };
-    let filtered_l = process_filter_sample(&mut state.filter_l, filter_params, p.sample_rate, delay_out);
-    let filtered_r = process_filter_sample(&mut state.filter_r, filter_params, p.sample_rate, delay_out);
+    let filtered_l =
+        process_filter_sample(&mut state.filter_l, filter_params, p.sample_rate, delay_out);
+    let filtered_r =
+        process_filter_sample(&mut state.filter_r, filter_params, p.sample_rate, delay_out);
     (filtered_l, filtered_r)
 }
 

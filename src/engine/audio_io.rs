@@ -4,14 +4,14 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 // use cpal::Host;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use ringbuf::HeapRb;
 use crate::engine::input_fx::InputFxEngine;
 use crate::engine::track_fx::TrackFxEngine;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use ringbuf::HeapRb;
 
 // 128 在 48kHz 下约 2.6ms，在 96kHz 下约 1.3ms
 // 如果报错，可以尝试 256
-const BUFFER_SIZE: u32 = 256; 
+const BUFFER_SIZE: u32 = 256;
 
 #[cfg(all(target_os = "windows", feature = "asio"))]
 fn device_exists_in_host(host: &cpal::Host, input_name: &str, output_name: &str) -> Result<bool> {
@@ -33,7 +33,9 @@ fn select_host(_input_name: &str, _output_name: &str) -> Result<cpal::Host> {
             if device_exists_in_host(&asio_host, _input_name, _output_name)? {
                 return Ok(asio_host);
             }
-            eprintln!("ASIO host is available but selected devices are not in ASIO. Falling back to default host.");
+            eprintln!(
+                "ASIO host is available but selected devices are not in ASIO. Falling back to default host."
+            );
         }
     }
 
@@ -57,6 +59,7 @@ fn shift_buffer_earlier_in_place(buffer: &mut [f32], shift: usize) {
 struct EngineTrack {
     buffer: Vec<f32>,
     play_cursor: usize,
+    carrier_cursor: usize,
     overdub_cursor: usize,
     record_start_at: Option<Instant>,
     record_stop_at: Option<Instant>,
@@ -71,6 +74,7 @@ struct EngineTrack {
     record_target_len: Option<usize>,
     overdubbing: bool,
     playing: bool,
+    paused_carrier: bool,
 }
 
 impl EngineTrack {
@@ -78,6 +82,7 @@ impl EngineTrack {
         Self {
             buffer: Vec::new(),
             play_cursor: 0,
+            carrier_cursor: 0,
             overdub_cursor: 0,
             record_start_at: None,
             record_stop_at: None,
@@ -88,6 +93,7 @@ impl EngineTrack {
             record_target_len: None,
             overdubbing: false,
             playing: false,
+            paused_carrier: false,
         }
     }
 }
@@ -112,6 +118,7 @@ fn finalize_recording_stop(track: &mut EngineTrack, latency_comp_samples: usize,
         }
     }
     track.playing = !track.buffer.is_empty();
+    track.paused_carrier = false;
     // Recording stop is finalized after an extra tail-capture delay.
     // To keep loop phase aligned with the original scheduled stop beat,
     // start playback at the compensated phase instead of restarting at 0.
@@ -120,6 +127,7 @@ fn finalize_recording_stop(track: &mut EngineTrack, latency_comp_samples: usize,
     } else {
         align_cursor_to_channels(latency_comp_samples, track.buffer.len(), channels)
     };
+    track.carrier_cursor = track.play_cursor;
     track.overdub_cursor = track.play_cursor;
     track.record_tail_remaining = 0;
     track.record_target_len = None;
@@ -148,6 +156,7 @@ impl EngineState {
                     track.record_target_len = None;
                     track.overdubbing = false;
                     track.playing = false;
+                    track.paused_carrier = false;
                     track.record_start_at = None;
                 }
             }
@@ -196,25 +205,32 @@ pub struct AudioIO {
     latency_comp: usize, // Input latency compensation (in milliseconds).
     fx_engine: Arc<Mutex<InputFxEngine>>,
     track_fx_engine: Arc<Mutex<TrackFxEngine>>,
+    track_carriers: Arc<Mutex<Vec<Option<(f32, f32)>>>>,
     realtime_enabled: Arc<AtomicBool>,
 }
 
 impl AudioIO {
-    pub fn new(input_name: &str, output_name: &str, track_count: usize, latency_comp: usize) -> Result<Self> {
+    pub fn new(
+        input_name: &str,
+        output_name: &str,
+        track_count: usize,
+        latency_comp: usize,
+    ) -> Result<Self> {
         let state = Arc::new(Mutex::new(EngineState::new(track_count)));
         let fx_engine = Arc::new(Mutex::new(InputFxEngine::new(48_000.0)));
         let track_fx_engine = Arc::new(Mutex::new(TrackFxEngine::new(48_000.0, track_count)));
+        let track_carriers = Arc::new(Mutex::new(vec![None; track_count]));
         let realtime_enabled = Arc::new(AtomicBool::new(true));
-        let (input_stream, output_stream, config) =
-            Self::build_streams(
-                input_name,
-                output_name,
-                Arc::clone(&state),
-                Arc::clone(&fx_engine),
-                Arc::clone(&track_fx_engine),
-                Arc::clone(&realtime_enabled),
-                latency_comp,
-            )?;
+        let (input_stream, output_stream, config) = Self::build_streams(
+            input_name,
+            output_name,
+            Arc::clone(&state),
+            Arc::clone(&fx_engine),
+            Arc::clone(&track_fx_engine),
+            Arc::clone(&track_carriers),
+            Arc::clone(&realtime_enabled),
+            latency_comp,
+        )?;
 
         Ok(Self {
             input_stream,
@@ -226,6 +242,7 @@ impl AudioIO {
             latency_comp,
             fx_engine,
             track_fx_engine,
+            track_carriers,
             realtime_enabled,
         })
     }
@@ -236,8 +253,9 @@ impl AudioIO {
         state: Arc<Mutex<EngineState>>,
         fx_engine: Arc<Mutex<InputFxEngine>>,
         track_fx_engine: Arc<Mutex<TrackFxEngine>>,
+        track_carriers: Arc<Mutex<Vec<Option<(f32, f32)>>>>,
         realtime_enabled: Arc<AtomicBool>,
-        latency_comp: usize, 
+        latency_comp: usize,
     ) -> Result<(cpal::Stream, cpal::Stream, cpal::StreamConfig)> {
         let host = select_host(input_name, output_name)?;
 
@@ -250,7 +268,7 @@ impl AudioIO {
             .output_devices()?
             .find(|d| d.name().ok().as_deref() == Some(output_name))
             .context("Failed to find an output device (Speaker)")?;
-        
+
         let supported_config = input_device
             .supported_input_configs()?
             .filter(|c| c.channels() == 2) // 强制双声道，减少映射开销
@@ -265,10 +283,10 @@ impl AudioIO {
         if let Ok(mut track_fx) = track_fx_engine.lock() {
             track_fx.set_sample_rate(config.sample_rate.0 as f32);
         }
-        let latency_comp_samples =
-            ((config.sample_rate.0 as f32 * latency_comp as f32 / 1000.0) as usize)
-                * config.channels as usize;
-        let frame_size = BUFFER_SIZE; 
+        let latency_comp_samples = ((config.sample_rate.0 as f32 * latency_comp as f32 / 1000.0)
+            as usize)
+            * config.channels as usize;
+        let frame_size = BUFFER_SIZE;
         let rb_size = frame_size as usize * config.channels as usize * 4; // 留 4 倍冗余防止断音
         let rb = HeapRb::<f32>::new(rb_size);
         let (mut prod, mut cons) = rb.split();
@@ -277,6 +295,7 @@ impl AudioIO {
 
         let input_state = Arc::clone(&state);
         let input_fx = Arc::clone(&fx_engine);
+        let input_carriers = Arc::clone(&track_carriers);
         let input_rt_enabled = Arc::clone(&realtime_enabled);
         let input_stream = input_device.build_input_stream(
             &config,
@@ -289,6 +308,10 @@ impl AudioIO {
                 }
                 let now = Instant::now();
                 let mut fx_guard = input_fx.lock().ok();
+                let carrier_snapshot = input_carriers
+                    .lock()
+                    .map(|carriers| carriers.clone())
+                    .unwrap_or_default();
                 let (base_elapsed, sample_rate) = if let Some(fx) = fx_guard.as_ref() {
                     let elapsed = fx
                         .metronome_start()
@@ -307,14 +330,20 @@ impl AudioIO {
                     let input_r = if channels > 1 { frame[1] } else { frame[0] };
                     let elapsed = base_elapsed + frame_idx as f64 * sec_per_frame;
                     let (processed_l, processed_r) = if let Some(fx) = fx_guard.as_mut() {
-                        fx.process_frame(elapsed, input_l, input_r)
+                        fx.process_frame(elapsed, input_l, input_r, &carrier_snapshot)
                     } else {
                         (input_l, input_r)
                     };
                     // Keep capturing input samples into ring buffer for overdub alignment.
                     // We do not monitor this directly to output.
                     for ch in 0..channels {
-                        let sample = if ch == 0 { processed_l } else if ch == 1 { processed_r } else { processed_l };
+                        let sample = if ch == 0 {
+                            processed_l
+                        } else if ch == 1 {
+                            processed_r
+                        } else {
+                            processed_l
+                        };
                         let _ = prod.push(sample);
                         processed_block.push(sample);
                     }
@@ -325,7 +354,8 @@ impl AudioIO {
                         if track.recording {
                             track.buffer.extend_from_slice(&processed_block);
                             if track.record_tail_remaining > 0 {
-                                let consumed = processed_block.len().min(track.record_tail_remaining);
+                                let consumed =
+                                    processed_block.len().min(track.record_tail_remaining);
                                 track.record_tail_remaining -= consumed;
                                 if track.record_tail_remaining == 0 {
                                     finalize_recording_stop(track, latency_comp_samples, channels);
@@ -344,6 +374,7 @@ impl AudioIO {
 
         let output_state = Arc::clone(&state);
         let output_track_fx = Arc::clone(&track_fx_engine);
+        let output_carriers = Arc::clone(&track_carriers);
         let output_rt_enabled = Arc::clone(&realtime_enabled);
         let output_stream = output_device.build_output_stream(
             &config,
@@ -355,17 +386,27 @@ impl AudioIO {
                     return;
                 }
                 let now: Instant = Instant::now();
-                let mut guard: Option<std::sync::MutexGuard<'_, EngineState>> = output_state.lock().ok();
+                let mut guard: Option<std::sync::MutexGuard<'_, EngineState>> =
+                    output_state.lock().ok();
                 let channels = config.channels as usize;
                 if let Some(engine) = guard.as_mut() {
                     engine.process_timeline(now, latency_comp_samples, channels);
                 }
                 let mut track_fx_guard = output_track_fx.lock().ok();
+                let track_count = guard
+                    .as_ref()
+                    .map(|engine| engine.tracks.len())
+                    .unwrap_or(0);
+                let mut latest_carriers = vec![None; track_count];
                 let sample_rate = if let Some(track_fx) = track_fx_guard.as_ref() {
                     track_fx.sample_rate()
                 } else {
                     config.sample_rate.0 as f32
                 };
+                let metronome_active = track_fx_guard
+                    .as_ref()
+                    .and_then(|track_fx| track_fx.metronome_start())
+                    .is_some();
 
                 for frame in data.chunks_mut(channels) {
                     let input_l = cons.pop().unwrap_or(0.0);
@@ -382,31 +423,47 @@ impl AudioIO {
 
                     if let Some(engine) = guard.as_mut() {
                         for (track_idx, track) in engine.tracks.iter_mut().enumerate() {
-                            if !track.playing || track.buffer.is_empty() {
+                            if track.buffer.is_empty() {
+                                continue;
+                            }
+                            let audible = track.playing;
+                            let carrier_only = !audible && metronome_active && track.paused_carrier;
+                            if !audible && !carrier_only {
                                 continue;
                             }
 
                             let len = track.buffer.len();
-                            let idx_l = track.play_cursor % len;
+                            let cursor = if audible {
+                                track.play_cursor
+                            } else {
+                                track.carrier_cursor
+                            };
+                            let idx_l = cursor % len;
                             let idx_r = if channels > 1 {
                                 (idx_l + 1) % len
                             } else {
                                 idx_l
                             };
 
-                            if track.overdubbing {
+                            if audible && track.overdubbing {
                                 let comp = latency_comp_samples % len;
                                 let write_l = (idx_l + len - comp) % len;
                                 track.overdub_cursor = write_l;
-                                track.buffer[write_l] = (track.buffer[write_l] + input_l).clamp(-1.0, 1.0);
+                                track.buffer[write_l] =
+                                    (track.buffer[write_l] + input_l).clamp(-1.0, 1.0);
                                 if channels > 1 {
                                     let write_r = (write_l + 1) % len;
-                                    track.buffer[write_r] = (track.buffer[write_r] + input_r).clamp(-1.0, 1.0);
+                                    track.buffer[write_r] =
+                                        (track.buffer[write_r] + input_r).clamp(-1.0, 1.0);
                                 }
                             }
 
                             let dry_l = track.buffer[idx_l];
-                            let dry_r = if channels > 1 { track.buffer[idx_r] } else { dry_l };
+                            let dry_r = if channels > 1 {
+                                track.buffer[idx_r]
+                            } else {
+                                dry_l
+                            };
                             // Use this track's current playhead as the seq/env phase reference.
                             // This keeps Track FX Filter step aligned with what is actually heard,
                             // including latency-compensated recording and resume-from-pause offsets.
@@ -429,10 +486,20 @@ impl AudioIO {
                                 (dry_l, dry_r)
                             };
 
-                            mixed_l += wet_l;
-                            mixed_r += wet_r;
+                            if audible {
+                                mixed_l += wet_l;
+                                mixed_r += wet_r;
+                            }
+                            if let Some(carrier) = latest_carriers.get_mut(track_idx) {
+                                *carrier = Some((wet_l, wet_r));
+                            }
 
-                            track.play_cursor = (track.play_cursor + channels) % len;
+                            if audible {
+                                track.play_cursor = (track.play_cursor + channels) % len;
+                                track.carrier_cursor = track.play_cursor;
+                            } else {
+                                track.carrier_cursor = (track.carrier_cursor + channels) % len;
+                            }
                         }
                     }
 
@@ -445,6 +512,9 @@ impl AudioIO {
                     for ch in 2..channels {
                         frame[ch] = ((out_l + out_r) * 0.5).clamp(-1.0, 1.0);
                     }
+                }
+                if let Ok(mut carriers) = output_carriers.lock() {
+                    *carriers = latest_carriers;
                 }
             },
             err_fn,
@@ -462,16 +532,16 @@ impl AudioIO {
             return Ok(());
         }
 
-        let (input_stream, output_stream, config) =
-            Self::build_streams(
-                input_name,
-                output_name,
-                Arc::clone(&self.state),
-                Arc::clone(&self.fx_engine),
-                Arc::clone(&self.track_fx_engine),
-                Arc::clone(&self.realtime_enabled),
-                self.latency_comp,
-            )?;
+        let (input_stream, output_stream, config) = Self::build_streams(
+            input_name,
+            output_name,
+            Arc::clone(&self.state),
+            Arc::clone(&self.fx_engine),
+            Arc::clone(&self.track_fx_engine),
+            Arc::clone(&self.track_carriers),
+            Arc::clone(&self.realtime_enabled),
+            self.latency_comp,
+        )?;
 
         self.input_stream.pause()?;
         self.output_stream.pause()?;
@@ -495,6 +565,7 @@ impl AudioIO {
             Arc::clone(&self.state),
             Arc::clone(&self.fx_engine),
             Arc::clone(&self.track_fx_engine),
+            Arc::clone(&self.track_carriers),
             Arc::clone(&self.realtime_enabled),
             latency_comp,
         )?;
@@ -566,6 +637,7 @@ impl AudioIO {
             if let Some(track) = engine.tracks.get_mut(track_id) {
                 if !track.buffer.is_empty() {
                     track.playing = true;
+                    track.paused_carrier = false;
                 }
             }
         }
@@ -588,6 +660,7 @@ impl AudioIO {
                         track.overdub_cursor = 0;
                     }
                     track.playing = true;
+                    track.paused_carrier = false;
                 }
             }
         }
@@ -620,6 +693,29 @@ impl AudioIO {
         if let Ok(mut engine) = self.state.lock() {
             if let Some(track) = engine.tracks.get_mut(track_id) {
                 track.playing = false;
+                track.paused_carrier = false;
+                track.recording = false;
+                track.overdubbing = false;
+            }
+        }
+    }
+
+    pub fn pause_at_progress_now(&self, track_id: usize, progress: Option<f32>) {
+        if let Ok(mut engine) = self.state.lock() {
+            if let Some(track) = engine.tracks.get_mut(track_id) {
+                if !track.buffer.is_empty() {
+                    let channels = self.config.channels as usize;
+                    if let Some(p) = progress {
+                        let len = track.buffer.len();
+                        let normalized = p.rem_euclid(1.0);
+                        let cursor = ((normalized * len as f32).floor() as usize).min(len - 1);
+                        track.carrier_cursor = align_cursor_to_channels(cursor, len, channels);
+                    } else {
+                        track.carrier_cursor = track.play_cursor;
+                    }
+                }
+                track.playing = false;
+                track.paused_carrier = !track.buffer.is_empty();
                 track.recording = false;
                 track.overdubbing = false;
             }

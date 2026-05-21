@@ -1,6 +1,6 @@
 use crate::config::delay_configs::TrackDelayConfigs;
-use crate::config::track_filter_configs::TrackFilterConfigs;
 use crate::config::roll_configs::RollConfigs;
+use crate::config::track_filter_configs::TrackFilterConfigs;
 
 pub const TRACK_FX_BANK_COUNT: usize = 4;
 pub const TRACK_FX_SLOT_COUNT: usize = 4;

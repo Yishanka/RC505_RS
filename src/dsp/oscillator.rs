@@ -1,7 +1,7 @@
-use crate::config::note_configs::{NoteOct};
+use crate::config::note_configs::NoteOct;
 use crate::config::osc_configs::Waveform;
 use crate::dsp::envelope::{AhdsrParams, AhdsrState};
-use crate::dsp::filter::{process_sample as process_filter_sample, FilterDspState, FilterParams};
+use crate::dsp::filter::{FilterDspState, FilterParams, process_sample as process_filter_sample};
 
 #[derive(Clone, Copy)]
 pub struct OscillatorDspState {
@@ -121,7 +121,10 @@ pub fn process_fx_sample(state: &mut OscillatorFxDspState, p: OscillatorFxParams
     let cutoff_hz = p.cutoff_min_hz + (cutoff_max - p.cutoff_min_hz) * cutoff_env;
     process_filter_sample(
         &mut state.filter,
-        FilterParams { cutoff_hz, ..p.filter },
+        FilterParams {
+            cutoff_hz,
+            ..p.filter
+        },
         p.sample_rate,
         osc_sample,
     )

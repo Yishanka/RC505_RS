@@ -5,8 +5,8 @@ use crate::config::delay_configs::{
     TRACK_DELAY_MIX_MAX_PCT, TRACK_DELAY_TIME_MAX_MS, TRACK_DELAY_TIME_MIN_MS,
 };
 use crate::config::envelope_configs::{
-    ENVELOPE_ATTACK_MAX_MS, ENVELOPE_DECAY_MAX_MS, ENVELOPE_HOLD_MAX_MS,
-    ENVELOPE_RELEASE_MAX_MS, ENVELOPE_RELEASE_MIN_MS, ENVELOPE_START_MAX_PCT, ENVELOPE_SUSTAIN_MAX_PCT,
+    ENVELOPE_ATTACK_MAX_MS, ENVELOPE_DECAY_MAX_MS, ENVELOPE_HOLD_MAX_MS, ENVELOPE_RELEASE_MAX_MS,
+    ENVELOPE_RELEASE_MIN_MS, ENVELOPE_START_MAX_PCT, ENVELOPE_SUSTAIN_MAX_PCT,
     ENVELOPE_TENSION_MAX,
 };
 use crate::config::filter_configs::{
@@ -16,11 +16,11 @@ use crate::config::filter_configs::{
 use crate::config::track_fx_configs::{
     TRACK_FX_BANK_COUNT, TRACK_FX_SLOT_COUNT, TrackFx, TrackFxConfigs,
 };
+use crate::dsp::delay::{DelayDspState, DelayParams, process_sample as process_delay_sample};
 use crate::dsp::envelope::{AhdsrParams, AhdsrState};
-use crate::dsp::filter::{process_sample as process_filter_sample, FilterDspState, FilterParams};
+use crate::dsp::filter::{FilterDspState, FilterParams, process_sample as process_filter_sample};
 use crate::dsp::note::seq_bool_at_time;
-use crate::dsp::delay::{process_sample as process_delay_sample, DelayDspState, DelayParams};
-use crate::dsp::roll::{process_sample as process_roll_sample, RollDspState, RollParams};
+use crate::dsp::roll::{RollDspState, RollParams, process_sample as process_roll_sample};
 
 const DEFAULT_BPM: usize = 120;
 
@@ -275,6 +275,10 @@ impl TrackFxEngine {
     pub fn sample_rate(&self) -> f32 {
         self.sample_rate
     }
+
+    pub fn metronome_start(&self) -> Option<Instant> {
+        self.metronome_start
+    }
 }
 
 impl TrackFxRuntime {
@@ -305,7 +309,9 @@ impl TrackFxRuntime {
                                 .value
                                 .clamp(TRACK_DELAY_TIME_MIN_MS, TRACK_DELAY_TIME_MAX_MS)
                                 as f32,
-                            feedback: (delay.feedback_pct.value.min(TRACK_DELAY_FEEDBACK_MAX_PCT) as f32 / 100.0)
+                            feedback: (delay.feedback_pct.value.min(TRACK_DELAY_FEEDBACK_MAX_PCT)
+                                as f32
+                                / 100.0)
                                 .clamp(0.0, 0.95),
                             high_damp_hz: delay
                                 .high_damp_hz
@@ -334,22 +340,31 @@ impl TrackFxRuntime {
                                 .filter
                                 .cutoff_hz
                                 .value
-                                .clamp(FILTER_CUTOFF_MIN_HZ, FILTER_CUTOFF_MAX_HZ) as f32,
+                                .clamp(FILTER_CUTOFF_MIN_HZ, FILTER_CUTOFF_MAX_HZ)
+                                as f32,
                             q: (filter
                                 .filter
                                 .resonance_x10
                                 .value
-                                .clamp(FILTER_Q_MIN_X10, FILTER_Q_MAX_X10) as f32)
+                                .clamp(FILTER_Q_MIN_X10, FILTER_Q_MAX_X10)
+                                as f32)
                                 / 10.0,
                             drive: (filter.filter.drive.value.min(FILTER_DRIVE_MAX) as f32 / 100.0)
                                 .clamp(0.0, 1.0),
                             mix: (filter.filter.mix.value.min(FILTER_MIX_MAX) as f32 / 100.0)
                                 .clamp(0.0, 1.0),
                             envelope: AhdsrParams {
-                                attack_ms: filter.env.attack_ms.value.min(ENVELOPE_ATTACK_MAX_MS) as f32,
+                                attack_ms: filter.env.attack_ms.value.min(ENVELOPE_ATTACK_MAX_MS)
+                                    as f32,
                                 hold_ms: filter.env.hold_ms.value.min(ENVELOPE_HOLD_MAX_MS) as f32,
-                                decay_ms: filter.env.decay_ms.value.min(ENVELOPE_DECAY_MAX_MS) as f32,
-                                sustain_level: (filter.env.sustain_pct.value.min(ENVELOPE_SUSTAIN_MAX_PCT) as f32
+                                decay_ms: filter.env.decay_ms.value.min(ENVELOPE_DECAY_MAX_MS)
+                                    as f32,
+                                sustain_level: (filter
+                                    .env
+                                    .sustain_pct
+                                    .value
+                                    .min(ENVELOPE_SUSTAIN_MAX_PCT)
+                                    as f32
                                     / 100.0)
                                     .clamp(0.0, 1.0),
                                 release_ms: filter
@@ -358,8 +373,10 @@ impl TrackFxRuntime {
                                     .value
                                     .clamp(ENVELOPE_RELEASE_MIN_MS, ENVELOPE_RELEASE_MAX_MS)
                                     as f32,
-                                start_level: (filter.env.start_pct.value.min(ENVELOPE_START_MAX_PCT) as f32 / 100.0)
-                                    .clamp(0.0, 1.0),
+                                start_level:
+                                    (filter.env.start_pct.value.min(ENVELOPE_START_MAX_PCT) as f32
+                                        / 100.0)
+                                        .clamp(0.0, 1.0),
                                 tension_attack: tension_to_exponent(
                                     filter.env.tension_a.value.min(ENVELOPE_TENSION_MAX),
                                 ),
@@ -377,7 +394,8 @@ impl TrackFxRuntime {
                                 .iter()
                                 .enumerate()
                                 .map(|(idx, step_len)| {
-                                    *step_len > 0 && filter.seq.seq().get(idx).copied().unwrap_or(false)
+                                    *step_len > 0
+                                        && filter.seq.seq().get(idx).copied().unwrap_or(false)
                                 })
                                 .collect(),
                         }),
@@ -393,11 +411,7 @@ impl TrackFxRuntime {
             TrackFxBankRuntime { slots }
         });
 
-        let track_enabled = config
-            .tracks
-            .iter()
-            .map(|track| track.enabled)
-            .collect();
+        let track_enabled = config.tracks.iter().map(|track| track.enabled).collect();
 
         Self {
             banks,

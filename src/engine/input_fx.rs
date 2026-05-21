@@ -1,49 +1,40 @@
 use std::time::Instant;
 
 use crate::config::envelope_configs::{
-    ENVELOPE_ATTACK_MAX_MS, 
-    ENVELOPE_DECAY_MAX_MS, 
-    ENVELOPE_HOLD_MAX_MS, 
-    ENVELOPE_RELEASE_MAX_MS,
-    ENVELOPE_RELEASE_MIN_MS, 
-    ENVELOPE_START_MAX_PCT, 
-    ENVELOPE_SUSTAIN_MAX_PCT, 
+    ENVELOPE_ATTACK_MAX_MS, ENVELOPE_DECAY_MAX_MS, ENVELOPE_HOLD_MAX_MS, ENVELOPE_RELEASE_MAX_MS,
+    ENVELOPE_RELEASE_MIN_MS, ENVELOPE_START_MAX_PCT, ENVELOPE_SUSTAIN_MAX_PCT,
     ENVELOPE_TENSION_MAX,
 };
 use crate::config::filter_configs::{
-    FILTER_CUTOFF_MAX_HZ, 
-    FILTER_CUTOFF_MIN_HZ, 
-    FILTER_DRIVE_MAX, 
-    FILTER_MIX_MAX, 
-    FILTER_Q_MAX_X10,
-    FILTER_Q_MIN_X10, 
-    FilterType,
+    FILTER_CUTOFF_MAX_HZ, FILTER_CUTOFF_MIN_HZ, FILTER_DRIVE_MAX, FILTER_MIX_MAX, FILTER_Q_MAX_X10,
+    FILTER_Q_MIN_X10, FilterType,
 };
-use crate::config::mydelay_configs::{
-    MYDELAY_LEVEL_MAX, 
-    MYDELAY_THRESHOLD_MAX
-};
-use crate::config::reverb_configs::{
-    REVERB_HIGHCUT_MAX, 
-    REVERB_LOWCUT_MAX_HZ, 
-    REVERB_LOWCUT_MIN_HZ, 
-    REVERB_PREDELAY_MAX_MS,
-    REVERB_RT60_MAX_MS, 
-    REVERB_RT60_MIN_MS, 
-    REVERB_SIZE_MAX, 
-    REVERB_SIZE_MAX_MS, 
-    REVERB_SIZE_MIN_MS,
-    REVERB_WIDTH_MAX,
-};
+use crate::config::mydelay_configs::{MYDELAY_LEVEL_MAX, MYDELAY_THRESHOLD_MAX};
 use crate::config::note_configs::NoteOct;
 use crate::config::osc_configs::Waveform;
-use crate::config::{input_fx_configs::FX_BANK_COUNT, input_fx_configs::FX_SLOT_COUNT, InputFx, InputFxConfigs};
+use crate::config::reverb_configs::{
+    REVERB_HIGHCUT_MAX, REVERB_LOWCUT_MAX_HZ, REVERB_LOWCUT_MIN_HZ, REVERB_PREDELAY_MAX_MS,
+    REVERB_RT60_MAX_MS, REVERB_RT60_MIN_MS, REVERB_SIZE_MAX, REVERB_SIZE_MAX_MS,
+    REVERB_SIZE_MIN_MS, REVERB_WIDTH_MAX,
+};
+use crate::config::vocoder_configs::{
+    VOCODER_ATTACK_MAX_MS, VOCODER_BANDS_MAX, VOCODER_BANDS_MIN, VOCODER_LEVEL_MAX,
+    VOCODER_MIX_MAX, VOCODER_RELEASE_MAX_MS, VocoderCarrier,
+};
+use crate::config::{
+    InputFx, InputFxConfigs, input_fx_configs::FX_BANK_COUNT, input_fx_configs::FX_SLOT_COUNT,
+};
 use crate::dsp::envelope::AhdsrParams;
-use crate::dsp::filter::{process_sample as process_filter_sample, FilterDspState, FilterParams};
-use crate::dsp::my_delay::{process_fx_sample as process_mydelay_fx_sample, MyDelayFxDspState, MyDelayFxParams};
-use crate::dsp::oscillator::{process_fx_sample as process_osc_fx_sample, OscillatorFxDspState, OscillatorFxParams};
-use crate::dsp::reverb::{process_sample as process_reverb_frame, ReverbDspState, ReverbParams};
-use crate::dsp::note::{note_at_time, seq_bool_at_time}; 
+use crate::dsp::filter::{FilterDspState, FilterParams, process_sample as process_filter_sample};
+use crate::dsp::my_delay::{
+    MyDelayFxDspState, MyDelayFxParams, process_fx_sample as process_mydelay_fx_sample,
+};
+use crate::dsp::note::{note_at_time, seq_bool_at_time};
+use crate::dsp::oscillator::{
+    OscillatorFxDspState, OscillatorFxParams, process_fx_sample as process_osc_fx_sample,
+};
+use crate::dsp::reverb::{ReverbDspState, ReverbParams, process_sample as process_reverb_frame};
+use crate::dsp::vocoder::{VocoderDspState, VocoderParams, process_frame as process_vocoder_frame};
 
 const DEFAULT_BPM: usize = 120;
 
@@ -93,6 +84,16 @@ pub struct MyDelayRuntime {
     pub filter: FilterRuntime,
 }
 
+#[derive(Clone, Copy)]
+pub struct VocoderRuntime {
+    pub carrier: VocoderCarrier,
+    pub bands: usize,
+    pub attack_ms: f32,
+    pub release_ms: f32,
+    pub level: f32,
+    pub mix: f32,
+}
+
 #[derive(Clone)]
 pub struct FxSlotRuntime {
     pub enabled: bool,
@@ -100,6 +101,7 @@ pub struct FxSlotRuntime {
     pub filter: Option<FilterRuntime>,
     pub reverb: Option<ReverbRuntime>,
     pub my_delay: Option<MyDelayRuntime>,
+    pub vocoder: Option<VocoderRuntime>,
 }
 
 #[derive(Clone)]
@@ -109,6 +111,7 @@ pub struct FxSlotState {
     pub filter_r: FilterDspState,
     pub reverb: ReverbDspState,
     pub my_delay: MyDelayFxDspState,
+    pub vocoder: VocoderDspState,
 }
 
 #[derive(Clone)]
@@ -164,7 +167,13 @@ impl InputFxEngine {
         self.runtime = InputFxRuntime::from_config(config);
     }
 
-    pub fn process_frame(&mut self, elapsed_secs: f64, input_l: f32, input_r: f32) -> (f32, f32) {
+    pub fn process_frame(
+        &mut self,
+        elapsed_secs: f64,
+        input_l: f32,
+        input_r: f32,
+        track_carriers: &[Option<(f32, f32)>],
+    ) -> (f32, f32) {
         let bank_idx = self.runtime.selected_bank_idx;
         if bank_idx >= FX_BANK_COUNT {
             return (input_l, input_r);
@@ -175,7 +184,7 @@ impl InputFxEngine {
         let input_level = (input_l.abs() + input_r.abs()) * 0.5;
 
         let mut osc_mix = 0.0f32;
-        let mut active_osc_count = 0usize;      
+        let mut active_osc_count = 0usize;
 
         for idx in 0..FX_SLOT_COUNT {
             let slot = &bank.slots[idx];
@@ -197,11 +206,12 @@ impl InputFxEngine {
             } else {
                 seq_bool_at_time(&osc.note_on_seq, self.bpm, elapsed_secs)
             };
-            let note_retrigger = if self.metronome_start.is_none() || osc.note_trigger_seq.is_empty() {
-                false
-            } else {
-                seq_bool_at_time(&osc.note_trigger_seq, self.bpm, elapsed_secs)
-            };
+            let note_retrigger =
+                if self.metronome_start.is_none() || osc.note_trigger_seq.is_empty() {
+                    false
+                } else {
+                    seq_bool_at_time(&osc.note_trigger_seq, self.bpm, elapsed_secs)
+                };
             let osc_filtered = process_osc_fx_sample(
                 &mut state_bank.slots[idx].osc,
                 OscillatorFxParams {
@@ -251,11 +261,12 @@ impl InputFxEngine {
             } else {
                 seq_bool_at_time(&delay.note_on_seq, self.bpm, elapsed_secs)
             };
-            let note_retrigger = if self.metronome_start.is_none() || delay.note_trigger_seq.is_empty() {
-                false
-            } else {
-                seq_bool_at_time(&delay.note_trigger_seq, self.bpm, elapsed_secs)
-            };
+            let note_retrigger =
+                if self.metronome_start.is_none() || delay.note_trigger_seq.is_empty() {
+                    false
+                } else {
+                    seq_bool_at_time(&delay.note_trigger_seq, self.bpm, elapsed_secs)
+                };
             let note = if delay.note_seq.is_empty() {
                 delay.note_current
             } else if self.metronome_start.is_none() {
@@ -291,6 +302,39 @@ impl InputFxEngine {
             out_l += filtered_l;
             out_r += filtered_r;
         }
+
+        for idx in 0..FX_SLOT_COUNT {
+            let slot = &bank.slots[idx];
+            if !slot.enabled {
+                continue;
+            }
+            let Some(vocoder) = slot.vocoder else {
+                continue;
+            };
+            let carrier_idx = vocoder.carrier.track_idx();
+            let carrier = carrier_idx
+                .and_then(|idx| track_carriers.get(idx))
+                .copied()
+                .flatten();
+            let (carrier_l, carrier_r) = carrier.unwrap_or((0.0, 0.0));
+            (out_l, out_r) = process_vocoder_frame(
+                &mut state_bank.slots[idx].vocoder,
+                VocoderParams {
+                    bands: vocoder.bands,
+                    attack_ms: vocoder.attack_ms,
+                    release_ms: vocoder.release_ms,
+                    level: vocoder.level,
+                    mix: vocoder.mix,
+                    sample_rate: self.sample_rate,
+                    track_carrier_l: carrier_l,
+                    track_carrier_r: carrier_r,
+                    has_track_carrier: carrier.is_some(),
+                },
+                out_l,
+                out_r,
+            );
+        }
+
         for idx in 0..FX_SLOT_COUNT {
             let slot = &bank.slots[idx];
             if !slot.enabled {
@@ -376,7 +420,7 @@ impl InputFxRuntime {
             let bank = &config.banks[bank_idx];
             let slots = std::array::from_fn(|slot_idx| {
                 let slot = &bank.slots[slot_idx];
-                let (osc, filter, reverb, my_delay) = match slot.fx.as_ref() {
+                let (osc, filter, reverb, my_delay, vocoder) = match slot.fx.as_ref() {
                     Some(InputFx::Oscillator(osc)) => (
                         Some(OscillatorRuntime {
                             waveform: osc.waveform.value,
@@ -395,18 +439,25 @@ impl InputFxRuntime {
                                 .step_len_seq()
                                 .iter()
                                 .enumerate()
-                                .map(|(idx, step_len)| *step_len > 0 && osc.note.seq()[idx].is_some())
+                                .map(|(idx, step_len)| {
+                                    *step_len > 0 && osc.note.seq()[idx].is_some()
+                                })
                                 .collect(),
                             threshold: (osc.threshold.value as f32 / 100.0).clamp(0.0, 1.0),
                             envelope: AhdsrParams {
-                                attack_ms: osc.envelope.attack_ms.value.min(ENVELOPE_ATTACK_MAX_MS) as f32,
-                                hold_ms: osc.envelope.hold_ms.value.min(ENVELOPE_HOLD_MAX_MS) as f32,
-                                decay_ms: osc.envelope.decay_ms.value.min(ENVELOPE_DECAY_MAX_MS) as f32,
+                                attack_ms: osc.envelope.attack_ms.value.min(ENVELOPE_ATTACK_MAX_MS)
+                                    as f32,
+                                hold_ms: osc.envelope.hold_ms.value.min(ENVELOPE_HOLD_MAX_MS)
+                                    as f32,
+                                decay_ms: osc.envelope.decay_ms.value.min(ENVELOPE_DECAY_MAX_MS)
+                                    as f32,
                                 sustain_level: (osc
                                     .envelope
                                     .sustain_pct
                                     .value
-                                    .min(ENVELOPE_SUSTAIN_MAX_PCT) as f32 / 100.0)
+                                    .min(ENVELOPE_SUSTAIN_MAX_PCT)
+                                    as f32
+                                    / 100.0)
                                     .clamp(0.0, 1.0),
                                 release_ms: osc
                                     .envelope
@@ -418,7 +469,9 @@ impl InputFxRuntime {
                                     .envelope
                                     .start_pct
                                     .value
-                                    .min(ENVELOPE_START_MAX_PCT) as f32 / 100.0)
+                                    .min(ENVELOPE_START_MAX_PCT)
+                                    as f32
+                                    / 100.0)
                                     .clamp(0.0, 1.0),
                                 tension_attack: tension_to_exponent(
                                     osc.envelope.tension_a.value.min(ENVELOPE_TENSION_MAX),
@@ -442,23 +495,36 @@ impl InputFxRuntime {
                                     .osc_filter
                                     .resonance_x10
                                     .value
-                                    .clamp(FILTER_Q_MIN_X10, FILTER_Q_MAX_X10) as f32)
+                                    .clamp(FILTER_Q_MIN_X10, FILTER_Q_MAX_X10)
+                                    as f32)
                                     / 10.0,
-                                drive: (osc.osc_filter.drive.value.min(FILTER_DRIVE_MAX) as f32 / 100.0)
+                                drive: (osc.osc_filter.drive.value.min(FILTER_DRIVE_MAX) as f32
+                                    / 100.0)
                                     .clamp(0.0, 1.0),
                                 mix: (osc.osc_filter.mix.value.min(FILTER_MIX_MAX) as f32 / 100.0)
                                     .clamp(0.0, 1.0),
                             },
                             osc_filter_envelope: AhdsrParams {
-                                attack_ms: osc.osc_filter_env.attack_ms.value.min(ENVELOPE_ATTACK_MAX_MS)
+                                attack_ms: osc
+                                    .osc_filter_env
+                                    .attack_ms
+                                    .value
+                                    .min(ENVELOPE_ATTACK_MAX_MS)
                                     as f32,
-                                hold_ms: osc.osc_filter_env.hold_ms.value.min(ENVELOPE_HOLD_MAX_MS) as f32,
-                                decay_ms: osc.osc_filter_env.decay_ms.value.min(ENVELOPE_DECAY_MAX_MS) as f32,
+                                hold_ms: osc.osc_filter_env.hold_ms.value.min(ENVELOPE_HOLD_MAX_MS)
+                                    as f32,
+                                decay_ms: osc
+                                    .osc_filter_env
+                                    .decay_ms
+                                    .value
+                                    .min(ENVELOPE_DECAY_MAX_MS)
+                                    as f32,
                                 sustain_level: (osc
                                     .osc_filter_env
                                     .sustain_pct
                                     .value
-                                    .min(ENVELOPE_SUSTAIN_MAX_PCT) as f32
+                                    .min(ENVELOPE_SUSTAIN_MAX_PCT)
+                                    as f32
                                     / 100.0)
                                     .clamp(0.0, 1.0),
                                 release_ms: osc
@@ -471,7 +537,8 @@ impl InputFxRuntime {
                                     .osc_filter_env
                                     .start_pct
                                     .value
-                                    .min(ENVELOPE_START_MAX_PCT) as f32
+                                    .min(ENVELOPE_START_MAX_PCT)
+                                    as f32
                                     / 100.0)
                                     .clamp(0.0, 1.0),
                                 tension_attack: tension_to_exponent(
@@ -488,6 +555,7 @@ impl InputFxRuntime {
                         None,
                         None,
                         None,
+                        None,
                     ),
                     Some(InputFx::Filter(filter)) => (
                         None,
@@ -498,11 +566,18 @@ impl InputFxRuntime {
                                 .value
                                 .clamp(FILTER_CUTOFF_MIN_HZ, FILTER_CUTOFF_MAX_HZ)
                                 as f32,
-                            q: (filter.resonance_x10.value.clamp(FILTER_Q_MIN_X10, FILTER_Q_MAX_X10) as f32)
+                            q: (filter
+                                .resonance_x10
+                                .value
+                                .clamp(FILTER_Q_MIN_X10, FILTER_Q_MAX_X10)
+                                as f32)
                                 / 10.0,
-                            drive: (filter.drive.value.min(FILTER_DRIVE_MAX) as f32 / 100.0).clamp(0.0, 1.0),
-                            mix: (filter.mix.value.min(FILTER_MIX_MAX) as f32 / 100.0).clamp(0.0, 1.0),
+                            drive: (filter.drive.value.min(FILTER_DRIVE_MAX) as f32 / 100.0)
+                                .clamp(0.0, 1.0),
+                            mix: (filter.mix.value.min(FILTER_MIX_MAX) as f32 / 100.0)
+                                .clamp(0.0, 1.0),
                         }),
+                        None,
                         None,
                         None,
                     ),
@@ -514,18 +589,20 @@ impl InputFxRuntime {
                         let rt60_ms = reverb
                             .decay_ms
                             .value
-                            .clamp(REVERB_RT60_MIN_MS, REVERB_RT60_MAX_MS) as f32;
-                        let predelay_ms = reverb
-                            .predelay_ms
-                            .value
-                            .min(REVERB_PREDELAY_MAX_MS) as f32;
-                        let width = (reverb.width.value.min(REVERB_WIDTH_MAX) as f32 / 100.0).clamp(0.0, 1.0);
-                        let high_cut_damp =
-                            (reverb.high_cut.value.min(REVERB_HIGHCUT_MAX) as f32 / 100.0).clamp(0.0, 1.0);
+                            .clamp(REVERB_RT60_MIN_MS, REVERB_RT60_MAX_MS)
+                            as f32;
+                        let predelay_ms =
+                            reverb.predelay_ms.value.min(REVERB_PREDELAY_MAX_MS) as f32;
+                        let width = (reverb.width.value.min(REVERB_WIDTH_MAX) as f32 / 100.0)
+                            .clamp(0.0, 1.0);
+                        let high_cut_damp = (reverb.high_cut.value.min(REVERB_HIGHCUT_MAX) as f32
+                            / 100.0)
+                            .clamp(0.0, 1.0);
                         let low_cut_hz = reverb
                             .low_cut
                             .value
-                            .clamp(REVERB_LOWCUT_MIN_HZ, REVERB_LOWCUT_MAX_HZ) as f32;
+                            .clamp(REVERB_LOWCUT_MIN_HZ, REVERB_LOWCUT_MAX_HZ)
+                            as f32;
                         (
                             None,
                             None,
@@ -538,12 +615,15 @@ impl InputFxRuntime {
                                 low_cut_hz,
                             }),
                             None,
+                            None,
                         )
-                    },
+                    }
                     Some(InputFx::MyDelay(delay)) => {
-                        let level = (delay.level.value.min(MYDELAY_LEVEL_MAX) as f32 / 100.0).clamp(0.0, 1.0);
-                        let threshold =
-                            (delay.threshold.value.min(MYDELAY_THRESHOLD_MAX) as f32 / 100.0).clamp(0.0, 1.0);
+                        let level = (delay.level.value.min(MYDELAY_LEVEL_MAX) as f32 / 100.0)
+                            .clamp(0.0, 1.0);
+                        let threshold = (delay.threshold.value.min(MYDELAY_THRESHOLD_MAX) as f32
+                            / 100.0)
+                            .clamp(0.0, 1.0);
                         let note_current = match delay.note.note.value {
                             crate::config::note_configs::Note::N => None,
                             _ => Some(NoteOct {
@@ -561,10 +641,17 @@ impl InputFxRuntime {
                             .map(|(idx, step_len)| *step_len > 0 && delay.note.seq()[idx].is_some())
                             .collect();
                         let audio_env = AhdsrParams {
-                            attack_ms: delay.audio_env.attack_ms.value.min(ENVELOPE_ATTACK_MAX_MS) as f32,
+                            attack_ms: delay.audio_env.attack_ms.value.min(ENVELOPE_ATTACK_MAX_MS)
+                                as f32,
                             hold_ms: delay.audio_env.hold_ms.value.min(ENVELOPE_HOLD_MAX_MS) as f32,
-                            decay_ms: delay.audio_env.decay_ms.value.min(ENVELOPE_DECAY_MAX_MS) as f32,
-                            sustain_level: (delay.audio_env.sustain_pct.value.min(ENVELOPE_SUSTAIN_MAX_PCT) as f32
+                            decay_ms: delay.audio_env.decay_ms.value.min(ENVELOPE_DECAY_MAX_MS)
+                                as f32,
+                            sustain_level: (delay
+                                .audio_env
+                                .sustain_pct
+                                .value
+                                .min(ENVELOPE_SUSTAIN_MAX_PCT)
+                                as f32
                                 / 100.0)
                                 .clamp(0.0, 1.0),
                             release_ms: delay
@@ -573,17 +660,37 @@ impl InputFxRuntime {
                                 .value
                                 .clamp(ENVELOPE_RELEASE_MIN_MS, ENVELOPE_RELEASE_MAX_MS)
                                 as f32,
-                            start_level: (delay.audio_env.start_pct.value.min(ENVELOPE_START_MAX_PCT) as f32 / 100.0)
+                            start_level: (delay
+                                .audio_env
+                                .start_pct
+                                .value
+                                .min(ENVELOPE_START_MAX_PCT)
+                                as f32
+                                / 100.0)
                                 .clamp(0.0, 1.0),
-                            tension_attack: tension_to_exponent(delay.audio_env.tension_a.value.min(ENVELOPE_TENSION_MAX)),
-                            tension_decay: tension_to_exponent(delay.audio_env.tension_d.value.min(ENVELOPE_TENSION_MAX)),
-                            tension_release: tension_to_exponent(delay.audio_env.tension_r.value.min(ENVELOPE_TENSION_MAX)),
+                            tension_attack: tension_to_exponent(
+                                delay.audio_env.tension_a.value.min(ENVELOPE_TENSION_MAX),
+                            ),
+                            tension_decay: tension_to_exponent(
+                                delay.audio_env.tension_d.value.min(ENVELOPE_TENSION_MAX),
+                            ),
+                            tension_release: tension_to_exponent(
+                                delay.audio_env.tension_r.value.min(ENVELOPE_TENSION_MAX),
+                            ),
                         };
                         let filter_env = AhdsrParams {
-                            attack_ms: delay.filter_env.attack_ms.value.min(ENVELOPE_ATTACK_MAX_MS) as f32,
-                            hold_ms: delay.filter_env.hold_ms.value.min(ENVELOPE_HOLD_MAX_MS) as f32,
-                            decay_ms: delay.filter_env.decay_ms.value.min(ENVELOPE_DECAY_MAX_MS) as f32,
-                            sustain_level: (delay.filter_env.sustain_pct.value.min(ENVELOPE_SUSTAIN_MAX_PCT) as f32
+                            attack_ms: delay.filter_env.attack_ms.value.min(ENVELOPE_ATTACK_MAX_MS)
+                                as f32,
+                            hold_ms: delay.filter_env.hold_ms.value.min(ENVELOPE_HOLD_MAX_MS)
+                                as f32,
+                            decay_ms: delay.filter_env.decay_ms.value.min(ENVELOPE_DECAY_MAX_MS)
+                                as f32,
+                            sustain_level: (delay
+                                .filter_env
+                                .sustain_pct
+                                .value
+                                .min(ENVELOPE_SUSTAIN_MAX_PCT)
+                                as f32
                                 / 100.0)
                                 .clamp(0.0, 1.0),
                             release_ms: delay
@@ -592,11 +699,23 @@ impl InputFxRuntime {
                                 .value
                                 .clamp(ENVELOPE_RELEASE_MIN_MS, ENVELOPE_RELEASE_MAX_MS)
                                 as f32,
-                            start_level: (delay.filter_env.start_pct.value.min(ENVELOPE_START_MAX_PCT) as f32 / 100.0)
+                            start_level: (delay
+                                .filter_env
+                                .start_pct
+                                .value
+                                .min(ENVELOPE_START_MAX_PCT)
+                                as f32
+                                / 100.0)
                                 .clamp(0.0, 1.0),
-                            tension_attack: tension_to_exponent(delay.filter_env.tension_a.value.min(ENVELOPE_TENSION_MAX)),
-                            tension_decay: tension_to_exponent(delay.filter_env.tension_d.value.min(ENVELOPE_TENSION_MAX)),
-                            tension_release: tension_to_exponent(delay.filter_env.tension_r.value.min(ENVELOPE_TENSION_MAX)),
+                            tension_attack: tension_to_exponent(
+                                delay.filter_env.tension_a.value.min(ENVELOPE_TENSION_MAX),
+                            ),
+                            tension_decay: tension_to_exponent(
+                                delay.filter_env.tension_d.value.min(ENVELOPE_TENSION_MAX),
+                            ),
+                            tension_release: tension_to_exponent(
+                                delay.filter_env.tension_r.value.min(ENVELOPE_TENSION_MAX),
+                            ),
                         };
                         let filter = FilterRuntime {
                             filter_type: delay.filter.filter_type.value,
@@ -610,11 +729,13 @@ impl InputFxRuntime {
                                 .filter
                                 .resonance_x10
                                 .value
-                                .clamp(FILTER_Q_MIN_X10, FILTER_Q_MAX_X10) as f32)
+                                .clamp(FILTER_Q_MIN_X10, FILTER_Q_MAX_X10)
+                                as f32)
                                 / 10.0,
                             drive: (delay.filter.drive.value.min(FILTER_DRIVE_MAX) as f32 / 100.0)
                                 .clamp(0.0, 1.0),
-                            mix: (delay.filter.mix.value.min(FILTER_MIX_MAX) as f32 / 100.0).clamp(0.0, 1.0),
+                            mix: (delay.filter.mix.value.min(FILTER_MIX_MAX) as f32 / 100.0)
+                                .clamp(0.0, 1.0),
                         };
                         (
                             None,
@@ -631,9 +752,29 @@ impl InputFxRuntime {
                                 filter_env,
                                 filter,
                             }),
+                            None,
                         )
                     }
-                    _ => (None, None, None, None),
+                    Some(InputFx::Vocoder(vocoder)) => (
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(VocoderRuntime {
+                            carrier: vocoder.carrier.value,
+                            bands: vocoder
+                                .bands
+                                .value
+                                .clamp(VOCODER_BANDS_MIN, VOCODER_BANDS_MAX),
+                            attack_ms: vocoder.attack_ms.value.min(VOCODER_ATTACK_MAX_MS) as f32,
+                            release_ms: vocoder.release_ms.value.min(VOCODER_RELEASE_MAX_MS) as f32,
+                            level: (vocoder.level.value.min(VOCODER_LEVEL_MAX) as f32 / 100.0)
+                                .clamp(0.0, 1.0),
+                            mix: (vocoder.mix.value.min(VOCODER_MIX_MAX) as f32 / 100.0)
+                                .clamp(0.0, 1.0),
+                        }),
+                    ),
+                    _ => (None, None, None, None, None),
                 };
                 FxSlotRuntime {
                     enabled: slot.is_enabled,
@@ -641,6 +782,7 @@ impl InputFxRuntime {
                     filter,
                     reverb,
                     my_delay,
+                    vocoder,
                 }
             });
             FxBankRuntime { slots }
@@ -661,6 +803,7 @@ impl FxBankRuntime {
                 filter: None,
                 reverb: None,
                 my_delay: None,
+                vocoder: None,
             }),
         }
     }
@@ -683,6 +826,7 @@ impl FxBankState {
                 filter_r: FilterDspState::new(),
                 reverb: ReverbDspState::new(),
                 my_delay: MyDelayFxDspState::new(),
+                vocoder: VocoderDspState::new(),
             }),
         }
     }

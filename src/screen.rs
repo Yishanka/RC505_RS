@@ -1,6 +1,5 @@
 // src/screen.rs
 
-
 // pub struct Screen {
 //     pub mode: ScreenState,
 //     // brightness etc.

@@ -1,8 +1,9 @@
-pub mod oscillator;
+pub mod delay;
 pub mod envelope;
 pub mod filter;
-pub mod reverb;
 pub mod my_delay;
-pub mod note; 
-pub mod delay;
+pub mod note;
+pub mod oscillator;
+pub mod reverb;
 pub mod roll;
+pub mod vocoder;

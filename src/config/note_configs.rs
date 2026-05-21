@@ -1,11 +1,23 @@
 use crate::config::config_type::EnumConfig;
 
-const MAX_SEQ_LEN: usize = 12 * 32; 
+const MAX_SEQ_LEN: usize = 12 * 32;
 const TICKS_PER_BEAT: usize = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Note {
-    N, C, Cs, D, Ds, E, F, Fs, G, Gs, A, As, B,
+    N,
+    C,
+    Cs,
+    D,
+    Ds,
+    E,
+    F,
+    Fs,
+    G,
+    Gs,
+    A,
+    As,
+    B,
 }
 
 impl std::fmt::Display for Note {
@@ -31,8 +43,8 @@ impl std::fmt::Display for Note {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NoteOct {
-    pub note: Note, 
-    pub octave: usize, 
+    pub note: Note,
+    pub octave: usize,
 }
 
 impl std::fmt::Display for NoteOct {
@@ -42,42 +54,43 @@ impl std::fmt::Display for NoteOct {
 }
 
 pub struct NoteConfigs {
-    note_seq: Vec<Option<NoteOct>>, 
+    note_seq: Vec<Option<NoteOct>>,
     step_len_seq: Vec<usize>,
-    pub sel_idx: Option<usize>, 
-    pub note: EnumConfig<Note>, 
-    pub octave: EnumConfig<usize>, 
-    pub step: EnumConfig<String>, 
+    pub sel_idx: Option<usize>,
+    pub note: EnumConfig<Note>,
+    pub octave: EnumConfig<usize>,
+    pub step: EnumConfig<String>,
     pub edit: EnumConfig<NoteSeqEdit>,
 }
 
 impl NoteConfigs {
     pub fn new() -> Self {
-        Self { 
-            note_seq: vec![], 
+        Self {
+            note_seq: vec![],
             step_len_seq: vec![],
-            sel_idx: None, 
+            sel_idx: None,
             note: EnumConfig::new(
-                "Note", 
-                Note::C, 
+                "Note",
+                Note::C,
                 vec![
-                    Note::N, 
-                    Note::C, Note::Cs, 
-                    Note::D, Note::Ds, 
-                    Note::E, 
-                    Note::F, Note::Fs, 
-                    Note::G, Note::Gs, 
-                    Note::A, Note::As, 
-                    Note::B
-                ]
-            ), 
-            octave: EnumConfig::new(
-                "Octave", 
-                4, 
-                vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+                    Note::N,
+                    Note::C,
+                    Note::Cs,
+                    Note::D,
+                    Note::Ds,
+                    Note::E,
+                    Note::F,
+                    Note::Fs,
+                    Note::G,
+                    Note::Gs,
+                    Note::A,
+                    Note::As,
+                    Note::B,
+                ],
             ),
+            octave: EnumConfig::new("Octave", 4, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
             step: EnumConfig::new(
-                "Step", 
+                "Step",
                 "1/4".to_string(),
                 vec![
                     "1/6".to_string(),
@@ -89,7 +102,7 @@ impl NoteConfigs {
                     "5/6".to_string(),
                     "1".to_string(),
                     "2".to_string(),
-                ] 
+                ],
             ),
             edit: EnumConfig::new(
                 "Seq",
@@ -138,7 +151,10 @@ impl NoteConfigs {
     pub fn current_note_oct(&self) -> Option<NoteOct> {
         match self.note.value {
             Note::N => None,
-            _ => Some(NoteOct { note: self.note.value, octave: self.octave.value }),
+            _ => Some(NoteOct {
+                note: self.note.value,
+                octave: self.octave.value,
+            }),
         }
     }
 
@@ -189,7 +205,6 @@ impl NoteConfigs {
             NoteSeqEdit::Pop => self.pop(),
         }
     }
-
 }
 
 impl NoteConfigs {

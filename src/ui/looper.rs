@@ -1,7 +1,7 @@
-﻿use eframe::egui;
 use crate::app::MyApp;
-use crate::state::{AppState, FxState, ScreenState, TrackState};
 use crate::config::{FxKind, TrackFxKind};
+use crate::state::{AppState, FxState, ScreenState, TrackState};
+use eframe::egui;
 
 use std::f32::consts::PI;
 use std::time::Instant;
@@ -91,54 +91,47 @@ const FX_BANK_ROUNDING: f32 = 12.0;
 
 // 绘制 Looper 主界面
 pub fn draw_loopstation_view(ui: &mut egui::Ui, app: &mut MyApp) {
-    egui::Frame::none()
-        .show(ui, |ui| {
-            ui.add_space(SPACING_LARGE);
-            ui.horizontal(|ui| {
-                let available_width = ui.available_width();
-                let left_space = (available_width - SCREEN_WIDTH) / 2.0;
-                if left_space > 0.0 {
-                    ui.add_space(left_space);
-                }
-                draw_screen(ui, app);
-            });
-
-            ui.add_space(SPACING_LARGE);
-            ui.horizontal(|ui| {
-                let available_width = ui.available_width();
-                let tracks_total_width = TRACK_COUNT as f32 * TRACK_WIDTH;
-                let left_space = (available_width - tracks_total_width) / 2.0;
-                if left_space > 0.0 {
-                    ui.add_space(left_space);
-                }
-                draw_fx_panel(ui, app, tracks_total_width);
-            });
-
-            ui.horizontal(|ui| {
-                let available_width = ui.available_width();
-                let tracks_total_width = TRACK_COUNT as f32 * TRACK_WIDTH;
-                let left_space = (available_width - tracks_total_width) / 2.0;
-                if left_space > 0.0 {
-                    ui.add_space(left_space);
-                }
-                
-                for (idx, t) in app.tracks.iter().enumerate() {
-                    draw_track_slot(
-                        ui, 
-                        &app,
-                        idx, 
-                        t.track_volume,
-                    );
-                }
-            });
-            
-            ui.add_space(SPACING_LARGE);
+    egui::Frame::none().show(ui, |ui| {
+        ui.add_space(SPACING_LARGE);
+        ui.horizontal(|ui| {
+            let available_width = ui.available_width();
+            let left_space = (available_width - SCREEN_WIDTH) / 2.0;
+            if left_space > 0.0 {
+                ui.add_space(left_space);
+            }
+            draw_screen(ui, app);
         });
+
+        ui.add_space(SPACING_LARGE);
+        ui.horizontal(|ui| {
+            let available_width = ui.available_width();
+            let tracks_total_width = TRACK_COUNT as f32 * TRACK_WIDTH;
+            let left_space = (available_width - tracks_total_width) / 2.0;
+            if left_space > 0.0 {
+                ui.add_space(left_space);
+            }
+            draw_fx_panel(ui, app, tracks_total_width);
+        });
+
+        ui.horizontal(|ui| {
+            let available_width = ui.available_width();
+            let tracks_total_width = TRACK_COUNT as f32 * TRACK_WIDTH;
+            let left_space = (available_width - tracks_total_width) / 2.0;
+            if left_space > 0.0 {
+                ui.add_space(left_space);
+            }
+
+            for (idx, t) in app.tracks.iter().enumerate() {
+                draw_track_slot(ui, &app, idx, t.track_volume);
+            }
+        });
+
+        ui.add_space(SPACING_LARGE);
+    });
 }
 
 // 绘制单个轨道卡片
-pub fn draw_track_slot(ui: &mut egui::Ui, app: &MyApp, track_id: usize, track_vol: f32,) {
-    
+pub fn draw_track_slot(ui: &mut egui::Ui, app: &MyApp, track_id: usize, track_vol: f32) {
     fn beat_pulse_red(app: &MyApp, now: Instant) -> bool {
         app.metronome
             .beat_phase(now)
@@ -155,29 +148,42 @@ pub fn draw_track_slot(ui: &mut egui::Ui, app: &MyApp, track_id: usize, track_vo
 
     let track_sel = app.track_sel;
     let (rect, _) = ui.allocate_at_least(
-        egui::Vec2::new(TRACK_WIDTH, TRACK_HEIGHT), egui::Sense::hover()
+        egui::Vec2::new(TRACK_WIDTH, TRACK_HEIGHT),
+        egui::Sense::hover(),
     );
     let painter = ui.painter();
 
-    let bg_color = if Some(track_id) == track_sel { 
-        egui::Color32::from_rgb(TRACK_BG_SELECTED.0, TRACK_BG_SELECTED.1, TRACK_BG_SELECTED.2)
-    } else { 
-        egui::Color32::from_rgb(TRACK_BG_UNSELECTED.0, TRACK_BG_UNSELECTED.1, TRACK_BG_UNSELECTED.2)
+    let bg_color = if Some(track_id) == track_sel {
+        egui::Color32::from_rgb(
+            TRACK_BG_SELECTED.0,
+            TRACK_BG_SELECTED.1,
+            TRACK_BG_SELECTED.2,
+        )
+    } else {
+        egui::Color32::from_rgb(
+            TRACK_BG_UNSELECTED.0,
+            TRACK_BG_UNSELECTED.1,
+            TRACK_BG_UNSELECTED.2,
+        )
     };
     painter.rect_filled(rect, TRACK_ROUNDING, bg_color);
-    
+
     if Some(track_id) == track_sel {
-        painter.rect_stroke(rect, TRACK_ROUNDING, egui::Stroke::new(TRACK_BORDER_WIDTH, egui::Color32::RED));
+        painter.rect_stroke(
+            rect,
+            TRACK_ROUNDING,
+            egui::Stroke::new(TRACK_BORDER_WIDTH, egui::Color32::RED),
+        );
     }
 
     let play_center: egui::Pos2 = rect.center_bottom() - egui::vec2(0.0, PLAY_CENTER_OFFSET_Y);
     painter.circle_filled(play_center, PLAY_RADIUS, egui::Color32::BLACK);
-    
+
     // Circle 1
     let start_angle = PI / 2.0 + PLAY_ARC_START_OFFSET;
     let end_angle = PI / 2.0 - PLAY_ARC_START_OFFSET + 2.0 * PI;
     let now = Instant::now();
-    let track= &app.tracks[track_id]; 
+    let track = &app.tracks[track_id];
     let state = track.track_state;
     let beat_pulse_red = beat_pulse_red(app, now);
     let beat_flash_subtle = beat_flash_subtle(app, now);
@@ -185,7 +191,11 @@ pub fn draw_track_slot(ui: &mut egui::Ui, app: &MyApp, track_id: usize, track_vo
 
     match state {
         TrackState::Record => {
-            let color = if beat_pulse_red { STATE_RED } else { STATE_GRAY };
+            let color = if beat_pulse_red {
+                STATE_RED
+            } else {
+                STATE_GRAY
+            };
             draw_ring_arc(
                 painter,
                 play_center,
@@ -236,26 +246,45 @@ pub fn draw_track_slot(ui: &mut egui::Ui, app: &MyApp, track_id: usize, track_vo
         TrackState::Pause | TrackState::Empty => STATE_GRAY,
     };
 
-    painter.circle_stroke(play_center, PLAY_RADIUS - PLAY_INNER_RING_OFFSET, egui::Stroke::new(PLAY_RING_WIDTH, center_color));
-    
-    painter.circle_filled(play_center + egui::vec2(PLAY_INDICATOR_OFFSET, 0.0), PLAY_INDICATOR_SIZE, center_color);
+    painter.circle_stroke(
+        play_center,
+        PLAY_RADIUS - PLAY_INNER_RING_OFFSET,
+        egui::Stroke::new(PLAY_RING_WIDTH, center_color),
+    );
+
+    painter.circle_filled(
+        play_center + egui::vec2(PLAY_INDICATOR_OFFSET, 0.0),
+        PLAY_INDICATOR_SIZE,
+        center_color,
+    );
     let triangle_points = vec![
         egui::pos2(play_center.x - PLAY_TRIANGLE_OFFSET_X, play_center.y),
-        egui::pos2(play_center.x - PLAY_TRIANGLE_OFFSET_Y, play_center.y - PLAY_TRIANGLE_HEIGHT),
-        egui::pos2(play_center.x - PLAY_TRIANGLE_OFFSET_Y, play_center.y + PLAY_TRIANGLE_HEIGHT),
+        egui::pos2(
+            play_center.x - PLAY_TRIANGLE_OFFSET_Y,
+            play_center.y - PLAY_TRIANGLE_HEIGHT,
+        ),
+        egui::pos2(
+            play_center.x - PLAY_TRIANGLE_OFFSET_Y,
+            play_center.y + PLAY_TRIANGLE_HEIGHT,
+        ),
     ];
-    painter.add(egui::Shape::convex_polygon(triangle_points, center_color, egui::Stroke::NONE));
+    painter.add(egui::Shape::convex_polygon(
+        triangle_points,
+        center_color,
+        egui::Stroke::NONE,
+    ));
 
-    let number_pos = play_center + egui::vec2(
-        TRACK_NUMBER_ANGLE.cos() * (PLAY_RADIUS + TRACK_NUMBER_DISTANCE),
-        - TRACK_NUMBER_ANGLE.sin() * (PLAY_RADIUS + TRACK_NUMBER_DISTANCE),
-    );
+    let number_pos = play_center
+        + egui::vec2(
+            TRACK_NUMBER_ANGLE.cos() * (PLAY_RADIUS + TRACK_NUMBER_DISTANCE),
+            -TRACK_NUMBER_ANGLE.sin() * (PLAY_RADIUS + TRACK_NUMBER_DISTANCE),
+        );
     painter.text(
-        number_pos, 
-        egui::Align2::LEFT_TOP, 
-        format!("{}", track_id + 1), 
-        egui::FontId::proportional(TRACK_NUMBER_SIZE), 
-        egui::Color32::WHITE
+        number_pos,
+        egui::Align2::LEFT_TOP,
+        format!("{}", track_id + 1),
+        egui::FontId::proportional(TRACK_NUMBER_SIZE),
+        egui::Color32::WHITE,
     );
 
     let button_start_y = rect.top() + BUTTON_START_Y;
@@ -263,42 +292,108 @@ pub fn draw_track_slot(ui: &mut egui::Ui, app: &MyApp, track_id: usize, track_vo
 
     let rect1 = egui::Rect::from_min_size(
         egui::pos2(button_x, button_start_y),
-        egui::vec2(BUTTON_WIDTH, BUTTON_HEIGHT)
+        egui::vec2(BUTTON_WIDTH, BUTTON_HEIGHT),
     );
     painter.rect_filled(rect1, BUTTON_ROUNDING, egui::Color32::BLACK);
-    painter.rect_stroke(rect1, BUTTON_ROUNDING, egui::Stroke::new(BUTTON_BORDER_WIDTH, egui::Color32::GRAY));
-    painter.text(rect1.center(), egui::Align2::CENTER_CENTER, "FX", egui::FontId::proportional(BUTTON_TEXT_SIZE), egui::Color32::WHITE);
+    painter.rect_stroke(
+        rect1,
+        BUTTON_ROUNDING,
+        egui::Stroke::new(BUTTON_BORDER_WIDTH, egui::Color32::GRAY),
+    );
+    painter.text(
+        rect1.center(),
+        egui::Align2::CENTER_CENTER,
+        "FX",
+        egui::FontId::proportional(BUTTON_TEXT_SIZE),
+        egui::Color32::WHITE,
+    );
 
     let rect2 = egui::Rect::from_min_size(
         egui::pos2(button_x, button_start_y + BUTTON_HEIGHT + BUTTON_SPACING),
-        egui::vec2(BUTTON_WIDTH, BUTTON_HEIGHT)
+        egui::vec2(BUTTON_WIDTH, BUTTON_HEIGHT),
     );
     painter.rect_filled(rect2, BUTTON_ROUNDING, egui::Color32::BLACK);
-    painter.rect_stroke(rect2, BUTTON_ROUNDING, egui::Stroke::new(BUTTON_BORDER_WIDTH, egui::Color32::GRAY));
-    painter.text(rect2.center(), egui::Align2::CENTER_CENTER, "Track", egui::FontId::proportional(BUTTON_TEXT_SIZE), egui::Color32::WHITE);
+    painter.rect_stroke(
+        rect2,
+        BUTTON_ROUNDING,
+        egui::Stroke::new(BUTTON_BORDER_WIDTH, egui::Color32::GRAY),
+    );
+    painter.text(
+        rect2.center(),
+        egui::Align2::CENTER_CENTER,
+        "Track",
+        egui::FontId::proportional(BUTTON_TEXT_SIZE),
+        egui::Color32::WHITE,
+    );
 
-    let pause_y = button_start_y + BUTTON_HEIGHT + BUTTON_SPACING + BUTTON_HEIGHT + BUTTON_SPACING + PAUSE_OFFSET_Y;
+    let pause_y = button_start_y
+        + BUTTON_HEIGHT
+        + BUTTON_SPACING
+        + BUTTON_HEIGHT
+        + BUTTON_SPACING
+        + PAUSE_OFFSET_Y;
     let pause_center = egui::pos2(button_x + BUTTON_WIDTH / 2.0, pause_y + PAUSE_RADIUS / 2.0);
     painter.circle_filled(pause_center, PAUSE_RADIUS, egui::Color32::BLACK);
-    painter.circle_stroke(pause_center, PAUSE_RADIUS, egui::Stroke::new(PAUSE_BORDER_WIDTH, egui::Color32::from_rgb(PAUSE_INDICATOR_COLOR.0, PAUSE_INDICATOR_COLOR.1, PAUSE_INDICATOR_COLOR.2)));
-    let square_rect = egui::Rect::from_center_size(pause_center, egui::vec2(PAUSE_SQUARE_SIZE, PAUSE_SQUARE_SIZE));
-    painter.rect_filled(square_rect, 0.0, egui::Color32::from_rgb(PAUSE_INDICATOR_COLOR.0, PAUSE_INDICATOR_COLOR.1, PAUSE_INDICATOR_COLOR.2));
+    painter.circle_stroke(
+        pause_center,
+        PAUSE_RADIUS,
+        egui::Stroke::new(
+            PAUSE_BORDER_WIDTH,
+            egui::Color32::from_rgb(
+                PAUSE_INDICATOR_COLOR.0,
+                PAUSE_INDICATOR_COLOR.1,
+                PAUSE_INDICATOR_COLOR.2,
+            ),
+        ),
+    );
+    let square_rect = egui::Rect::from_center_size(
+        pause_center,
+        egui::vec2(PAUSE_SQUARE_SIZE, PAUSE_SQUARE_SIZE),
+    );
+    painter.rect_filled(
+        square_rect,
+        0.0,
+        egui::Color32::from_rgb(
+            PAUSE_INDICATOR_COLOR.0,
+            PAUSE_INDICATOR_COLOR.1,
+            PAUSE_INDICATOR_COLOR.2,
+        ),
+    );
 
     let slider_x = rect.right() - SLIDER_X_OFFSET;
-    let slider_height = (BUTTON_HEIGHT * 2.0) + BUTTON_SPACING + (PAUSE_RADIUS * 2.0) + BUTTON_SPACING;
+    let slider_height =
+        (BUTTON_HEIGHT * 2.0) + BUTTON_SPACING + (PAUSE_RADIUS * 2.0) + BUTTON_SPACING;
     let slider_rect = egui::Rect::from_min_size(
         egui::pos2(slider_x, button_start_y),
-        egui::vec2(SLIDER_WIDTH, slider_height)
+        egui::vec2(SLIDER_WIDTH, slider_height),
     );
-    painter.rect_filled(slider_rect, SLIDER_ROUNDING, egui::Color32::from_rgb(50, 50, 50));
-    painter.rect_stroke(slider_rect, SLIDER_ROUNDING, egui::Stroke::new(SLIDER_BORDER_WIDTH, egui::Color32::GRAY));
-    let knob_y = slider_rect.bottom() - SLIDER_KNOB_HEIGHT - (track_vol * (slider_height - SLIDER_KNOB_HEIGHT));
+    painter.rect_filled(
+        slider_rect,
+        SLIDER_ROUNDING,
+        egui::Color32::from_rgb(50, 50, 50),
+    );
+    painter.rect_stroke(
+        slider_rect,
+        SLIDER_ROUNDING,
+        egui::Stroke::new(SLIDER_BORDER_WIDTH, egui::Color32::GRAY),
+    );
+    let knob_y = slider_rect.bottom()
+        - SLIDER_KNOB_HEIGHT
+        - (track_vol * (slider_height - SLIDER_KNOB_HEIGHT));
     let knob_rect = egui::Rect::from_min_size(
         egui::pos2(slider_x - SLIDER_KNOB_X_OFFSET, knob_y),
-        egui::vec2(SLIDER_KNOB_WIDTH, SLIDER_KNOB_HEIGHT)
+        egui::vec2(SLIDER_KNOB_WIDTH, SLIDER_KNOB_HEIGHT),
     );
-    painter.rect_filled(knob_rect, SLIDER_ROUNDING, egui::Color32::from_rgb(150, 150, 150));
-    painter.rect_stroke(knob_rect, SLIDER_ROUNDING, egui::Stroke::new(SLIDER_KNOB_BORDER_WIDTH, egui::Color32::WHITE));
+    painter.rect_filled(
+        knob_rect,
+        SLIDER_ROUNDING,
+        egui::Color32::from_rgb(150, 150, 150),
+    );
+    painter.rect_stroke(
+        knob_rect,
+        SLIDER_ROUNDING,
+        egui::Stroke::new(SLIDER_KNOB_BORDER_WIDTH, egui::Color32::WHITE),
+    );
 }
 
 // 绘制顶部屏幕区域
@@ -308,7 +403,7 @@ pub fn draw_screen(ui: &mut egui::Ui, app: &mut MyApp) {
     } else {
         egui::Color32::DARK_GRAY
     };
-    
+
     egui::Frame::none()
         .stroke(egui::Stroke::new(SCREEN_STROKE_WIDTH, border_color))
         .inner_margin(5.0)
@@ -332,9 +427,11 @@ pub fn draw_screen(ui: &mut egui::Ui, app: &mut MyApp) {
                 match app.screen_state {
                     ScreenState::Empty => {
                         ui.centered_and_justified(|ui| {
-                            ui.label(egui::RichText::new(
-                                &app.projects[app.sel_project_idx].name
-                            ).size(48.0).color(egui::Color32::WHITE));
+                            ui.label(
+                                egui::RichText::new(&app.projects[app.sel_project_idx].name)
+                                    .size(48.0)
+                                    .color(egui::Color32::WHITE),
+                            );
                         });
                     }
                     ScreenState::Beat => {
@@ -362,7 +459,7 @@ pub fn draw_screen(ui: &mut egui::Ui, app: &mut MyApp) {
                         });
                     }
                     ScreenState::SYS => {
-                        let sys_config:&crate::config::SystemConfigs  = &app.config.system_config;
+                        let sys_config: &crate::config::SystemConfigs = &app.config.system_config;
                         let selected_idx = sys_config.sel_idx.unwrap_or(0);
                         ui.horizontal_centered(|ui| {
                             ui.add_space(20.0);
@@ -389,18 +486,48 @@ pub fn draw_screen(ui: &mut egui::Ui, app: &mut MyApp) {
                         let bank_idx = app.config.input_fx.sel_bank_idx;
                         let slot_idx = app.fx_screen_slot_idx;
                         let selected = app.config.input_fx.slot_kind(bank_idx, slot_idx);
+                        let selected_idx = match selected {
+                            FxKind::Oscillator => 0,
+                            FxKind::Filter => 1,
+                            FxKind::Reverb => 2,
+                            FxKind::MyDelay => 3,
+                            FxKind::Vocoder => 4,
+                            FxKind::None => 0,
+                        };
                         ui.horizontal_centered(|ui| {
                             ui.add_space(20.0);
-                            for idx in page_indices(4, 0) {
+                            for idx in page_indices(5, selected_idx) {
                                 match idx {
-                                    Some(0) => draw_fx_choice_block(ui, "Oscillator", selected == FxKind::Oscillator),
-                                    Some(1) => draw_fx_choice_block(ui, "Filter", selected == FxKind::Filter),
-                                    Some(2) => draw_fx_choice_block(ui, "Reverb", selected == FxKind::Reverb),
-                                    Some(3) => draw_fx_choice_block(ui, "MyDelay", selected == FxKind::MyDelay),
+                                    Some(0) => draw_fx_choice_block(
+                                        ui,
+                                        "Oscillator",
+                                        selected == FxKind::Oscillator,
+                                    ),
+                                    Some(1) => draw_fx_choice_block(
+                                        ui,
+                                        "Filter",
+                                        selected == FxKind::Filter,
+                                    ),
+                                    Some(2) => draw_fx_choice_block(
+                                        ui,
+                                        "Reverb",
+                                        selected == FxKind::Reverb,
+                                    ),
+                                    Some(3) => draw_fx_choice_block(
+                                        ui,
+                                        "MyDelay",
+                                        selected == FxKind::MyDelay,
+                                    ),
+                                    Some(4) => draw_fx_choice_block(
+                                        ui,
+                                        "Vocoder",
+                                        selected == FxKind::Vocoder,
+                                    ),
                                     _ => draw_empty_block(ui),
                                 }
                             }
                         });
+                        draw_page_indicator(ui, 5, selected_idx);
                     }
                     ScreenState::TrackFxSelect => {
                         let bank_idx = app.config.track_fx.sel_bank_idx;
@@ -416,15 +543,21 @@ pub fn draw_screen(ui: &mut egui::Ui, app: &mut MyApp) {
                             ui.add_space(20.0);
                             for idx in page_indices(3, selected_idx) {
                                 match idx {
-                                    Some(0) => {
-                                        draw_fx_choice_block(ui, "Delay", selected == TrackFxKind::Delay)
-                                    }
-                                    Some(1) => {
-                                        draw_fx_choice_block(ui, "Roll", selected == TrackFxKind::Roll)
-                                    }
-                                    Some(2) => {
-                                        draw_fx_choice_block(ui, "Filter", selected == TrackFxKind::Filter)
-                                    }
+                                    Some(0) => draw_fx_choice_block(
+                                        ui,
+                                        "Delay",
+                                        selected == TrackFxKind::Delay,
+                                    ),
+                                    Some(1) => draw_fx_choice_block(
+                                        ui,
+                                        "Roll",
+                                        selected == TrackFxKind::Roll,
+                                    ),
+                                    Some(2) => draw_fx_choice_block(
+                                        ui,
+                                        "Filter",
+                                        selected == TrackFxKind::Filter,
+                                    ),
                                     _ => draw_empty_block(ui),
                                 }
                             }
@@ -433,7 +566,9 @@ pub fn draw_screen(ui: &mut egui::Ui, app: &mut MyApp) {
                     ScreenState::InTrackFxDelay => {
                         let bank_idx = app.config.track_fx.sel_bank_idx;
                         let slot_idx = app.track_fx_screen_slot_idx;
-                        if let Some(crate::config::TrackFx::Delay(delay)) = app.config.track_fx.slot_fx(bank_idx, slot_idx) {
+                        if let Some(crate::config::TrackFx::Delay(delay)) =
+                            app.config.track_fx.slot_fx(bank_idx, slot_idx)
+                        {
                             let selected_idx = app.track_fx_edit_row_idx;
                             ui.horizontal_centered(|ui| {
                                 ui.add_space(20.0);
@@ -472,7 +607,9 @@ pub fn draw_screen(ui: &mut egui::Ui, app: &mut MyApp) {
                     ScreenState::InTrackFxRoll => {
                         let bank_idx = app.config.track_fx.sel_bank_idx;
                         let slot_idx = app.track_fx_screen_slot_idx;
-                        if let Some(crate::config::TrackFx::Roll(roll)) = app.config.track_fx.slot_fx(bank_idx, slot_idx) {
+                        if let Some(crate::config::TrackFx::Roll(roll)) =
+                            app.config.track_fx.slot_fx(bank_idx, slot_idx)
+                        {
                             ui.horizontal_centered(|ui| {
                                 ui.add_space(20.0);
                                 draw_setting_option_block(
@@ -496,7 +633,7 @@ pub fn draw_screen(ui: &mut egui::Ui, app: &mut MyApp) {
                             let selected_idx = filter_cfg.sel_idx.unwrap_or(0);
                             ui.horizontal_centered(|ui| {
                                 ui.add_space(20.0);
-                                for idx in page_indices(7, selected_idx) {
+                                for idx in page_indices(6, selected_idx) {
                                     match idx {
                                         Some(0) => draw_setting_option_block(
                                             ui,
@@ -512,7 +649,10 @@ pub fn draw_screen(ui: &mut egui::Ui, app: &mut MyApp) {
                                         ),
                                         Some(2) => draw_setting_option_block(
                                             ui,
-                                            &format!("{:.1}", filter_cfg.filter.resonance_x10.value as f32 / 10.0),
+                                            &format!(
+                                                "{:.1}",
+                                                filter_cfg.filter.resonance_x10.value as f32 / 10.0
+                                            ),
                                             &filter_cfg.filter.resonance_x10.label,
                                             selected_idx == 2,
                                         ),
@@ -883,7 +1023,10 @@ pub fn draw_screen(ui: &mut egui::Ui, app: &mut MyApp) {
                                                 ),
                                                 Some(2) => draw_setting_option_block(
                                                     ui,
-                                                    &format!("{:.1}", filter.resonance_x10.value as f32 / 10.0),
+                                                    &format!(
+                                                        "{:.1}",
+                                                        filter.resonance_x10.value as f32 / 10.0
+                                                    ),
                                                     "Resonance(Q)",
                                                     osc.osc_filter_sel_idx == Some(2),
                                                 ),
@@ -1018,7 +1161,10 @@ pub fn draw_screen(ui: &mut egui::Ui, app: &mut MyApp) {
                                                 ),
                                                 Some(2) => draw_setting_option_block(
                                                     ui,
-                                                    &format!("{:.1}", filter.resonance_x10.value as f32 / 10.0),
+                                                    &format!(
+                                                        "{:.1}",
+                                                        filter.resonance_x10.value as f32 / 10.0
+                                                    ),
                                                     "Resonance(Q)",
                                                     filter.sel_idx == Some(2),
                                                 ),
@@ -1330,7 +1476,10 @@ pub fn draw_screen(ui: &mut egui::Ui, app: &mut MyApp) {
                                                 ),
                                                 Some(2) => draw_setting_option_block(
                                                     ui,
-                                                    &format!("{:.1}", filter.resonance_x10.value as f32 / 10.0),
+                                                    &format!(
+                                                        "{:.1}",
+                                                        filter.resonance_x10.value as f32 / 10.0
+                                                    ),
                                                     "Resonance(Q)",
                                                     delay.filter_sel_idx == Some(2),
                                                 ),
@@ -1439,6 +1588,59 @@ pub fn draw_screen(ui: &mut egui::Ui, app: &mut MyApp) {
                             }
                         }
                     }
+                    ScreenState::InFxVocoder => {
+                        let bank_idx = app.config.input_fx.sel_bank_idx;
+                        let slot_idx = app.fx_screen_slot_idx;
+                        let slot = &app.config.input_fx.banks[bank_idx].slots[slot_idx];
+                        if let Some(crate::config::InputFx::Vocoder(vocoder)) = slot.fx.as_ref() {
+                            let selected_idx = vocoder.sel_idx.unwrap_or(0);
+                            ui.horizontal_centered(|ui| {
+                                ui.add_space(20.0);
+                                for idx in page_indices(6, selected_idx) {
+                                    match idx {
+                                        Some(0) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{}", vocoder.carrier.value),
+                                            &vocoder.carrier.label,
+                                            selected_idx == 0,
+                                        ),
+                                        Some(1) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{}", vocoder.bands.value),
+                                            &vocoder.bands.label,
+                                            selected_idx == 1,
+                                        ),
+                                        Some(2) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{}", vocoder.attack_ms.value),
+                                            &vocoder.attack_ms.label,
+                                            selected_idx == 2,
+                                        ),
+                                        Some(3) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{}", vocoder.release_ms.value),
+                                            &vocoder.release_ms.label,
+                                            selected_idx == 3,
+                                        ),
+                                        Some(4) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{}", vocoder.level.value),
+                                            &vocoder.level.label,
+                                            selected_idx == 4,
+                                        ),
+                                        Some(5) => draw_setting_option_block(
+                                            ui,
+                                            &format!("{}", vocoder.mix.value),
+                                            &vocoder.mix.label,
+                                            selected_idx == 5,
+                                        ),
+                                        _ => draw_empty_block(ui),
+                                    }
+                                }
+                            });
+                            draw_page_indicator(ui, 6, selected_idx);
+                        }
+                    }
                 }
             });
         });
@@ -1454,7 +1656,13 @@ fn draw_sys_setting_option_block(ui: &mut egui::Ui, value: &str, label: &str, is
     draw_setting_block(ui, value, label, is_selected, true);
 }
 
-fn draw_setting_block(ui: &mut egui::Ui, value: &str, label: &str, is_selected: bool, fit_text: bool) {
+fn draw_setting_block(
+    ui: &mut egui::Ui,
+    value: &str,
+    label: &str,
+    is_selected: bool,
+    fit_text: bool,
+) {
     let block_size = 120.0;
     let border_color = if is_selected {
         egui::Color32::from_rgb(100, 150, 255)
@@ -1486,14 +1694,18 @@ fn draw_setting_block(ui: &mut egui::Ui, value: &str, label: &str, is_selected: 
                             .color(egui::Color32::WHITE),
                     );
                 } else {
-                    ui.label(egui::RichText::new(value)
-                        .size(48.0)
-                        .color(egui::Color32::WHITE));
+                    ui.label(
+                        egui::RichText::new(value)
+                            .size(48.0)
+                            .color(egui::Color32::WHITE),
+                    );
                 }
 
-                ui.label(egui::RichText::new(label)
-                    .size(12.0)
-                    .color(egui::Color32::from_rgb(150, 150, 150)));
+                ui.label(
+                    egui::RichText::new(label)
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(150, 150, 150)),
+                );
             });
         });
 }
@@ -1539,7 +1751,7 @@ fn draw_page_indicator(ui: &mut egui::Ui, total: usize, selected_idx: usize) {
     });
 }
 
-// 绘制 Fx 效果器选择的 block 
+// 绘制 Fx 效果器选择的 block
 fn draw_fx_choice_block(ui: &mut egui::Ui, label: &str, is_selected: bool) {
     let block_size = 120.0;
     let border_color = if is_selected {
@@ -1655,8 +1867,8 @@ fn screen_breadcrumb(app: &MyApp) -> Option<String> {
                 3 => "R",
                 _ => "?",
             };
-            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx]
-                .slots[app.fx_screen_slot_idx]
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx].slots
+                [app.fx_screen_slot_idx]
                 .fx
                 .as_ref()
                 .map(|fx| fx.name())
@@ -1672,13 +1884,16 @@ fn screen_breadcrumb(app: &MyApp) -> Option<String> {
                 3 => "R",
                 _ => "?",
             };
-            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx]
-                .slots[app.fx_screen_slot_idx]
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx].slots
+                [app.fx_screen_slot_idx]
                 .fx
                 .as_ref()
                 .map(|fx| fx.name())
                 .unwrap_or("Empty");
-            Some(format!("Input-Bank{}-Fx{}-{}-OscAudio", bank, slot, fx_name))
+            Some(format!(
+                "Input-Bank{}-Fx{}-{}-OscAudio",
+                bank, slot, fx_name
+            ))
         }
         ScreenState::InFxNote => {
             let bank = app.config.input_fx.sel_bank_idx + 1;
@@ -1689,8 +1904,8 @@ fn screen_breadcrumb(app: &MyApp) -> Option<String> {
                 3 => "R",
                 _ => "?",
             };
-            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx]
-                .slots[app.fx_screen_slot_idx]
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx].slots
+                [app.fx_screen_slot_idx]
                 .fx
                 .as_ref()
                 .map(|fx| fx.name())
@@ -1706,13 +1921,16 @@ fn screen_breadcrumb(app: &MyApp) -> Option<String> {
                 3 => "R",
                 _ => "?",
             };
-            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx]
-                .slots[app.fx_screen_slot_idx]
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx].slots
+                [app.fx_screen_slot_idx]
                 .fx
                 .as_ref()
                 .map(|fx| fx.name())
                 .unwrap_or("Empty");
-            Some(format!("Input-Bank{}-Fx{}-{}-OscAudio-Envelope", bank, slot, fx_name))
+            Some(format!(
+                "Input-Bank{}-Fx{}-{}-OscAudio-Envelope",
+                bank, slot, fx_name
+            ))
         }
         ScreenState::InFxOscFilter => {
             let bank = app.config.input_fx.sel_bank_idx + 1;
@@ -1723,13 +1941,16 @@ fn screen_breadcrumb(app: &MyApp) -> Option<String> {
                 3 => "R",
                 _ => "?",
             };
-            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx]
-                .slots[app.fx_screen_slot_idx]
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx].slots
+                [app.fx_screen_slot_idx]
                 .fx
                 .as_ref()
                 .map(|fx| fx.name())
                 .unwrap_or("Empty");
-            Some(format!("Input-Bank{}-Fx{}-{}-OscFilter", bank, slot, fx_name))
+            Some(format!(
+                "Input-Bank{}-Fx{}-{}-OscFilter",
+                bank, slot, fx_name
+            ))
         }
         ScreenState::InFxOscFilterEnv => {
             let bank = app.config.input_fx.sel_bank_idx + 1;
@@ -1740,13 +1961,16 @@ fn screen_breadcrumb(app: &MyApp) -> Option<String> {
                 3 => "R",
                 _ => "?",
             };
-            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx]
-                .slots[app.fx_screen_slot_idx]
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx].slots
+                [app.fx_screen_slot_idx]
                 .fx
                 .as_ref()
                 .map(|fx| fx.name())
                 .unwrap_or("Empty");
-            Some(format!("Input-Bank{}-Fx{}-{}-OscFilter-Envelope", bank, slot, fx_name))
+            Some(format!(
+                "Input-Bank{}-Fx{}-{}-OscFilter-Envelope",
+                bank, slot, fx_name
+            ))
         }
         ScreenState::InFxFilter => {
             let bank = app.config.input_fx.sel_bank_idx + 1;
@@ -1757,8 +1981,8 @@ fn screen_breadcrumb(app: &MyApp) -> Option<String> {
                 3 => "R",
                 _ => "?",
             };
-            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx]
-                .slots[app.fx_screen_slot_idx]
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx].slots
+                [app.fx_screen_slot_idx]
                 .fx
                 .as_ref()
                 .map(|fx| fx.name())
@@ -1774,8 +1998,8 @@ fn screen_breadcrumb(app: &MyApp) -> Option<String> {
                 3 => "R",
                 _ => "?",
             };
-            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx]
-                .slots[app.fx_screen_slot_idx]
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx].slots
+                [app.fx_screen_slot_idx]
                 .fx
                 .as_ref()
                 .map(|fx| fx.name())
@@ -1791,8 +2015,8 @@ fn screen_breadcrumb(app: &MyApp) -> Option<String> {
                 3 => "R",
                 _ => "?",
             };
-            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx]
-                .slots[app.fx_screen_slot_idx]
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx].slots
+                [app.fx_screen_slot_idx]
                 .fx
                 .as_ref()
                 .map(|fx| fx.name())
@@ -1808,8 +2032,8 @@ fn screen_breadcrumb(app: &MyApp) -> Option<String> {
                 3 => "R",
                 _ => "?",
             };
-            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx]
-                .slots[app.fx_screen_slot_idx]
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx].slots
+                [app.fx_screen_slot_idx]
                 .fx
                 .as_ref()
                 .map(|fx| fx.name())
@@ -1825,13 +2049,16 @@ fn screen_breadcrumb(app: &MyApp) -> Option<String> {
                 3 => "R",
                 _ => "?",
             };
-            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx]
-                .slots[app.fx_screen_slot_idx]
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx].slots
+                [app.fx_screen_slot_idx]
                 .fx
                 .as_ref()
                 .map(|fx| fx.name())
                 .unwrap_or("Empty");
-            Some(format!("Input-Bank{}-Fx{}-{}-Audio-Envelope", bank, slot, fx_name))
+            Some(format!(
+                "Input-Bank{}-Fx{}-{}-Audio-Envelope",
+                bank, slot, fx_name
+            ))
         }
         ScreenState::InFxMyDelayNote => {
             let bank = app.config.input_fx.sel_bank_idx + 1;
@@ -1842,8 +2069,8 @@ fn screen_breadcrumb(app: &MyApp) -> Option<String> {
                 3 => "R",
                 _ => "?",
             };
-            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx]
-                .slots[app.fx_screen_slot_idx]
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx].slots
+                [app.fx_screen_slot_idx]
                 .fx
                 .as_ref()
                 .map(|fx| fx.name())
@@ -1859,8 +2086,8 @@ fn screen_breadcrumb(app: &MyApp) -> Option<String> {
                 3 => "R",
                 _ => "?",
             };
-            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx]
-                .slots[app.fx_screen_slot_idx]
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx].slots
+                [app.fx_screen_slot_idx]
                 .fx
                 .as_ref()
                 .map(|fx| fx.name())
@@ -1876,20 +2103,41 @@ fn screen_breadcrumb(app: &MyApp) -> Option<String> {
                 3 => "R",
                 _ => "?",
             };
-            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx]
-                .slots[app.fx_screen_slot_idx]
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx].slots
+                [app.fx_screen_slot_idx]
                 .fx
                 .as_ref()
                 .map(|fx| fx.name())
                 .unwrap_or("Empty");
-            Some(format!("Input-Bank{}-Fx{}-{}-Filter-Envelope", bank, slot, fx_name))
+            Some(format!(
+                "Input-Bank{}-Fx{}-{}-Filter-Envelope",
+                bank, slot, fx_name
+            ))
+        }
+        ScreenState::InFxVocoder => {
+            let bank = app.config.input_fx.sel_bank_idx + 1;
+            let slot = match app.fx_screen_slot_idx {
+                0 => "Q",
+                1 => "W",
+                2 => "E",
+                3 => "R",
+                _ => "?",
+            };
+            let fx_name = app.config.input_fx.banks[app.config.input_fx.sel_bank_idx].slots
+                [app.fx_screen_slot_idx]
+                .fx
+                .as_ref()
+                .map(|fx| fx.name())
+                .unwrap_or("Empty");
+            Some(format!("Input-Bank{}-Fx{}-{}", bank, slot, fx_name))
         }
     }
 }
 
 fn draw_fx_panel(ui: &mut egui::Ui, app: &MyApp, panel_width: f32) {
     let (rect, _) = ui.allocate_at_least(
-        egui::Vec2::new(panel_width, FX_PANEL_HEIGHT), egui::Sense::hover()
+        egui::Vec2::new(panel_width, FX_PANEL_HEIGHT),
+        egui::Sense::hover(),
     );
     let painter = ui.painter();
 
@@ -1943,11 +2191,11 @@ fn draw_fx_panel(ui: &mut egui::Ui, app: &MyApp, panel_width: f32) {
             }
             FxState::Single => {
                 if let Some(track_idx) = app.track_sel {
-                    if app
-                        .config
-                        .track_fx
-                        .slot_enabled(track_idx, app.config.track_fx.sel_bank_idx, idx)
-                    {
+                    if app.config.track_fx.slot_enabled(
+                        track_idx,
+                        app.config.track_fx.sel_bank_idx,
+                        idx,
+                    ) {
                         fill = STATE_RED;
                     }
                 }
@@ -2086,10 +2334,11 @@ fn draw_ring_arc_progress(
     let mut active_points = Vec::new();
     let mut inactive_points = Vec::new();
     for i in 0..=arc_points {
-        let angle = start_angle + 
-        
-        (end_angle - start_angle) * (i as f32 / arc_points as f32);
-        let point = egui::pos2(center.x + radius * angle.cos(), center.y + radius * angle.sin());
+        let angle = start_angle + (end_angle - start_angle) * (i as f32 / arc_points as f32);
+        let point = egui::pos2(
+            center.x + radius * angle.cos(),
+            center.y + radius * angle.sin(),
+        );
         if i <= split {
             inactive_points.push(point);
         } else {
@@ -2103,7 +2352,7 @@ fn draw_ring_arc_progress(
             egui::Stroke::new(PLAY_RING_WIDTH, inactive_color),
         ));
     }
-    
+
     if active_points.len() > 1 {
         painter.add(egui::epaint::PathShape::line(
             active_points,
@@ -2111,6 +2360,3 @@ fn draw_ring_arc_progress(
         ));
     }
 }
-
-
-

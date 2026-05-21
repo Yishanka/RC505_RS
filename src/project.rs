@@ -3,29 +3,33 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::input_fx_configs::{FX_BANK_COUNT, FX_SLOT_COUNT};
-use crate::config::note_configs::{Note, NoteOct};
-use crate::config::osc_configs::Waveform;
-use crate::config::filter_configs::{
-    FILTER_CUTOFF_MAX_HZ, FILTER_CUTOFF_MIN_HZ, FILTER_DRIVE_MAX, FILTER_MIX_MAX, FILTER_Q_MAX_X10,
-    FILTER_Q_MIN_X10, FilterType,
-};
 use crate::config::delay_configs::{
     TRACK_DELAY_DAMP_MAX_HZ, TRACK_DELAY_DAMP_MIN_HZ, TRACK_DELAY_FEEDBACK_MAX_PCT,
     TRACK_DELAY_MIX_MAX_PCT, TRACK_DELAY_TIME_MAX_MS, TRACK_DELAY_TIME_MIN_MS,
 };
-use crate::config::track_fx_configs::{TRACK_FX_BANK_COUNT, TRACK_FX_SLOT_COUNT};
 use crate::config::envelope_configs::{
-    ENVELOPE_ATTACK_MAX_MS, ENVELOPE_DECAY_MAX_MS, ENVELOPE_HOLD_MAX_MS,
-    ENVELOPE_RELEASE_MAX_MS, ENVELOPE_RELEASE_MIN_MS, ENVELOPE_START_MAX_PCT, ENVELOPE_SUSTAIN_MAX_PCT,
+    ENVELOPE_ATTACK_MAX_MS, ENVELOPE_DECAY_MAX_MS, ENVELOPE_HOLD_MAX_MS, ENVELOPE_RELEASE_MAX_MS,
+    ENVELOPE_RELEASE_MIN_MS, ENVELOPE_START_MAX_PCT, ENVELOPE_SUSTAIN_MAX_PCT,
     ENVELOPE_TENSION_MAX,
 };
+use crate::config::filter_configs::{
+    FILTER_CUTOFF_MAX_HZ, FILTER_CUTOFF_MIN_HZ, FILTER_DRIVE_MAX, FILTER_MIX_MAX, FILTER_Q_MAX_X10,
+    FILTER_Q_MIN_X10, FilterType,
+};
+use crate::config::input_fx_configs::{FX_BANK_COUNT, FX_SLOT_COUNT};
+use crate::config::mydelay_configs::{MYDELAY_LEVEL_MAX, MYDELAY_THRESHOLD_MAX};
+use crate::config::note_configs::{Note, NoteOct};
+use crate::config::osc_configs::Waveform;
 use crate::config::reverb_configs::{
     REVERB_HIGHCUT_MAX, REVERB_LOWCUT_MAX_HZ, REVERB_LOWCUT_MIN_HZ, REVERB_PREDELAY_MAX_MS,
     REVERB_RT60_MAX_MS, REVERB_RT60_MIN_MS, REVERB_SIZE_MAX, REVERB_WIDTH_MAX,
 };
 use crate::config::roll_configs::RollStep;
-use crate::config::mydelay_configs::{MYDELAY_LEVEL_MAX, MYDELAY_THRESHOLD_MAX};
+use crate::config::track_fx_configs::{TRACK_FX_BANK_COUNT, TRACK_FX_SLOT_COUNT};
+use crate::config::vocoder_configs::{
+    VOCODER_ATTACK_MAX_MS, VOCODER_BANDS_MAX, VOCODER_BANDS_MIN, VOCODER_LEVEL_MAX,
+    VOCODER_MIX_MAX, VOCODER_RELEASE_MAX_MS, VocoderCarrier,
+};
 use crate::config::{AppConfig, FxKind, InputFx, TrackFx, TrackFxKind};
 
 const INDEX_FILE: &str = "projects_index.json";
@@ -144,6 +148,8 @@ pub struct FxSlotData {
     pub reverb: Option<ReverbData>,
     #[serde(default)]
     pub my_delay: Option<MyDelayData>,
+    #[serde(default)]
+    pub vocoder: Option<VocoderData>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -220,6 +226,16 @@ pub struct ReverbData {
     pub width: usize,
     pub high_cut: usize,
     pub low_cut: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct VocoderData {
+    pub carrier: String,
+    pub bands: usize,
+    pub attack_ms: usize,
+    pub release_ms: usize,
+    pub level: usize,
+    pub mix: usize,
 }
 
 impl Default for EnvelopeData {
@@ -324,6 +340,7 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                 filter: None,
                 reverb: None,
                 my_delay: None,
+                vocoder: None,
             };
             if let Some(fx) = slot.fx.as_ref() {
                 match fx {
@@ -361,7 +378,10 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                                 tension_r: osc.envelope.tension_r.value,
                             },
                             osc_filter: FilterData {
-                                filter_type: filter_type_to_string(osc.osc_filter.filter_type.value).to_string(),
+                                filter_type: filter_type_to_string(
+                                    osc.osc_filter.filter_type.value,
+                                )
+                                .to_string(),
                                 cutoff_hz: osc.osc_filter.cutoff_hz.value,
                                 resonance_x10: osc.osc_filter.resonance_x10.value,
                                 drive: osc.osc_filter.drive.value,
@@ -383,7 +403,8 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                     InputFx::Filter(filter) => {
                         slot_data.kind = "Filter".to_string();
                         slot_data.filter = Some(FilterData {
-                            filter_type: filter_type_to_string(filter.filter_type.value).to_string(),
+                            filter_type: filter_type_to_string(filter.filter_type.value)
+                                .to_string(),
                             cutoff_hz: filter.cutoff_hz.value,
                             resonance_x10: filter.resonance_x10.value,
                             drive: filter.drive.value,
@@ -423,7 +444,8 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                             note_seq: seq,
                             note_step_len_seq: delay.note.step_len_seq().to_vec(),
                             filter: FilterData {
-                                filter_type: filter_type_to_string(delay.filter.filter_type.value).to_string(),
+                                filter_type: filter_type_to_string(delay.filter.filter_type.value)
+                                    .to_string(),
                                 cutoff_hz: delay.filter.cutoff_hz.value,
                                 resonance_x10: delay.filter.resonance_x10.value,
                                 drive: delay.filter.drive.value,
@@ -451,6 +473,17 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                                 tension_d: delay.filter_env.tension_d.value,
                                 tension_r: delay.filter_env.tension_r.value,
                             },
+                        });
+                    }
+                    InputFx::Vocoder(vocoder) => {
+                        slot_data.kind = "Vocoder".to_string();
+                        slot_data.vocoder = Some(VocoderData {
+                            carrier: vocoder_carrier_to_string(vocoder.carrier.value).to_string(),
+                            bands: vocoder.bands.value,
+                            attack_ms: vocoder.attack_ms.value,
+                            release_ms: vocoder.release_ms.value,
+                            level: vocoder.level.value,
+                            mix: vocoder.mix.value,
                         });
                     }
                 }
@@ -492,7 +525,8 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                         slot_data.kind = "Filter".to_string();
                         slot_data.filter = Some(TrackFilterData {
                             filter: FilterData {
-                                filter_type: filter_type_to_string(filter.filter.filter_type.value).to_string(),
+                                filter_type: filter_type_to_string(filter.filter.filter_type.value)
+                                    .to_string(),
                                 cutoff_hz: filter.filter.cutoff_hz.value,
                                 resonance_x10: filter.filter.resonance_x10.value,
                                 drive: filter.filter.drive.value,
@@ -552,7 +586,9 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
 }
 
 pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
-    config.beat_config.set_values(data.beat.bpm, data.beat.latency);
+    config
+        .beat_config
+        .set_values(data.beat.bpm, data.beat.latency);
     config.system_config.input_device.value = data.system.input_device;
     config.system_config.output_device.value = data.system.output_device;
     config.input_fx.sel_bank_idx = data.input_fx.selected_bank_idx.min(FX_BANK_COUNT - 1);
@@ -608,7 +644,8 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                                 osc_data.envelope.tension_d.min(ENVELOPE_TENSION_MAX);
                             osc.envelope.tension_r.value =
                                 osc_data.envelope.tension_r.min(ENVELOPE_TENSION_MAX);
-                            if let Some(t) = string_to_filter_type(&osc_data.osc_filter.filter_type) {
+                            if let Some(t) = string_to_filter_type(&osc_data.osc_filter.filter_type)
+                            {
                                 osc.osc_filter.filter_type.value = t;
                             }
                             osc.osc_filter.cutoff_hz.value =
@@ -617,14 +654,22 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                                 osc_data.osc_filter.resonance_x10.clamp(1, 100);
                             osc.osc_filter.drive.value = osc_data.osc_filter.drive.min(100);
                             osc.osc_filter.mix.value = osc_data.osc_filter.mix.min(100);
-                            osc.osc_filter_env.attack_ms.value =
-                                osc_data.osc_filter_envelope.attack_ms.min(ENVELOPE_ATTACK_MAX_MS);
-                            osc.osc_filter_env.hold_ms.value =
-                                osc_data.osc_filter_envelope.hold_ms.min(ENVELOPE_HOLD_MAX_MS);
-                            osc.osc_filter_env.decay_ms.value =
-                                osc_data.osc_filter_envelope.decay_ms.min(ENVELOPE_DECAY_MAX_MS);
-                            osc.osc_filter_env.sustain_pct.value =
-                                osc_data.osc_filter_envelope.sustain_pct.min(ENVELOPE_SUSTAIN_MAX_PCT);
+                            osc.osc_filter_env.attack_ms.value = osc_data
+                                .osc_filter_envelope
+                                .attack_ms
+                                .min(ENVELOPE_ATTACK_MAX_MS);
+                            osc.osc_filter_env.hold_ms.value = osc_data
+                                .osc_filter_envelope
+                                .hold_ms
+                                .min(ENVELOPE_HOLD_MAX_MS);
+                            osc.osc_filter_env.decay_ms.value = osc_data
+                                .osc_filter_envelope
+                                .decay_ms
+                                .min(ENVELOPE_DECAY_MAX_MS);
+                            osc.osc_filter_env.sustain_pct.value = osc_data
+                                .osc_filter_envelope
+                                .sustain_pct
+                                .min(ENVELOPE_SUSTAIN_MAX_PCT);
                             osc.osc_filter_env.release_ms.value = osc_data
                                 .osc_filter_envelope
                                 .release_ms
@@ -667,13 +712,16 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                     if let Some(InputFx::Reverb(reverb)) = slot.fx.as_mut() {
                         if let Some(reverb_data) = &slot_data.reverb {
                             reverb.size.value = reverb_data.size.min(REVERB_SIZE_MAX);
-                            reverb.decay_ms.value =
-                                reverb_data.decay_ms.clamp(REVERB_RT60_MIN_MS, REVERB_RT60_MAX_MS);
-                            reverb.predelay_ms.value = reverb_data.predelay_ms.min(REVERB_PREDELAY_MAX_MS);
+                            reverb.decay_ms.value = reverb_data
+                                .decay_ms
+                                .clamp(REVERB_RT60_MIN_MS, REVERB_RT60_MAX_MS);
+                            reverb.predelay_ms.value =
+                                reverb_data.predelay_ms.min(REVERB_PREDELAY_MAX_MS);
                             reverb.width.value = reverb_data.width.min(REVERB_WIDTH_MAX);
                             reverb.high_cut.value = reverb_data.high_cut.min(REVERB_HIGHCUT_MAX);
-                            reverb.low_cut.value =
-                                reverb_data.low_cut.clamp(REVERB_LOWCUT_MIN_HZ, REVERB_LOWCUT_MAX_HZ);
+                            reverb.low_cut.value = reverb_data
+                                .low_cut
+                                .clamp(REVERB_LOWCUT_MIN_HZ, REVERB_LOWCUT_MAX_HZ);
                         }
                     }
                 }
@@ -698,13 +746,16 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                                     })
                                 })
                                 .collect();
-                            delay.note
+                            delay
+                                .note
                                 .set_seq_with_steps(seq, delay_data.note_step_len_seq.clone());
                             if let Some(t) = string_to_filter_type(&delay_data.filter.filter_type) {
                                 delay.filter.filter_type.value = t;
                             }
-                            delay.filter.cutoff_hz.value = delay_data.filter.cutoff_hz.clamp(20, 20_000);
-                            delay.filter.resonance_x10.value = delay_data.filter.resonance_x10.clamp(1, 100);
+                            delay.filter.cutoff_hz.value =
+                                delay_data.filter.cutoff_hz.clamp(20, 20_000);
+                            delay.filter.resonance_x10.value =
+                                delay_data.filter.resonance_x10.clamp(1, 100);
                             delay.filter.drive.value = delay_data.filter.drive.min(100);
                             delay.filter.mix.value = delay_data.filter.mix.min(100);
                             delay.audio_env.attack_ms.value =
@@ -713,8 +764,10 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                                 delay_data.audio_env.hold_ms.min(ENVELOPE_HOLD_MAX_MS);
                             delay.audio_env.decay_ms.value =
                                 delay_data.audio_env.decay_ms.min(ENVELOPE_DECAY_MAX_MS);
-                            delay.audio_env.sustain_pct.value =
-                                delay_data.audio_env.sustain_pct.min(ENVELOPE_SUSTAIN_MAX_PCT);
+                            delay.audio_env.sustain_pct.value = delay_data
+                                .audio_env
+                                .sustain_pct
+                                .min(ENVELOPE_SUSTAIN_MAX_PCT);
                             delay.audio_env.release_ms.value = delay_data
                                 .audio_env
                                 .release_ms
@@ -733,8 +786,10 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                                 delay_data.filter_env.hold_ms.min(ENVELOPE_HOLD_MAX_MS);
                             delay.filter_env.decay_ms.value =
                                 delay_data.filter_env.decay_ms.min(ENVELOPE_DECAY_MAX_MS);
-                            delay.filter_env.sustain_pct.value =
-                                delay_data.filter_env.sustain_pct.min(ENVELOPE_SUSTAIN_MAX_PCT);
+                            delay.filter_env.sustain_pct.value = delay_data
+                                .filter_env
+                                .sustain_pct
+                                .min(ENVELOPE_SUSTAIN_MAX_PCT);
                             delay.filter_env.release_ms.value = delay_data
                                 .filter_env
                                 .release_ms
@@ -747,6 +802,26 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                                 delay_data.filter_env.tension_d.min(ENVELOPE_TENSION_MAX);
                             delay.filter_env.tension_r.value =
                                 delay_data.filter_env.tension_r.min(ENVELOPE_TENSION_MAX);
+                        }
+                    }
+                }
+                "Vocoder" => {
+                    slot.set_kind(FxKind::Vocoder);
+                    if let Some(InputFx::Vocoder(vocoder)) = slot.fx.as_mut() {
+                        if let Some(vocoder_data) = &slot_data.vocoder {
+                            if let Some(carrier) = string_to_vocoder_carrier(&vocoder_data.carrier)
+                            {
+                                vocoder.carrier.value = carrier;
+                            }
+                            vocoder.bands.value = vocoder_data
+                                .bands
+                                .clamp(VOCODER_BANDS_MIN, VOCODER_BANDS_MAX);
+                            vocoder.attack_ms.value =
+                                vocoder_data.attack_ms.min(VOCODER_ATTACK_MAX_MS);
+                            vocoder.release_ms.value =
+                                vocoder_data.release_ms.min(VOCODER_RELEASE_MAX_MS);
+                            vocoder.level.value = vocoder_data.level.min(VOCODER_LEVEL_MAX);
+                            vocoder.mix.value = vocoder_data.mix.min(VOCODER_MIX_MAX);
                         }
                     }
                 }
@@ -781,13 +856,18 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
         for (slot_idx, slot_data) in bank_data.slots.iter().take(TRACK_FX_SLOT_COUNT).enumerate() {
             match slot_data.kind.as_str() {
                 "Delay" => {
-                    config.track_fx.set_slot_kind(bank_idx, slot_idx, TrackFxKind::Delay);
-                    if let Some(TrackFx::Delay(delay)) = config.track_fx.slot_fx_mut(bank_idx, slot_idx) {
+                    config
+                        .track_fx
+                        .set_slot_kind(bank_idx, slot_idx, TrackFxKind::Delay);
+                    if let Some(TrackFx::Delay(delay)) =
+                        config.track_fx.slot_fx_mut(bank_idx, slot_idx)
+                    {
                         if let Some(delay_data) = &slot_data.delay {
                             delay.time_ms.value = delay_data
                                 .time_ms
                                 .clamp(TRACK_DELAY_TIME_MIN_MS, TRACK_DELAY_TIME_MAX_MS);
-                            delay.feedback_pct.value = delay_data.feedback_pct.min(TRACK_DELAY_FEEDBACK_MAX_PCT);
+                            delay.feedback_pct.value =
+                                delay_data.feedback_pct.min(TRACK_DELAY_FEEDBACK_MAX_PCT);
                             delay.high_damp_hz.value = delay_data
                                 .high_damp_hz
                                 .clamp(TRACK_DELAY_DAMP_MIN_HZ, TRACK_DELAY_DAMP_MAX_HZ);
@@ -796,8 +876,12 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                     }
                 }
                 "Roll" => {
-                    config.track_fx.set_slot_kind(bank_idx, slot_idx, TrackFxKind::Roll);
-                    if let Some(TrackFx::Roll(roll)) = config.track_fx.slot_fx_mut(bank_idx, slot_idx) {
+                    config
+                        .track_fx
+                        .set_slot_kind(bank_idx, slot_idx, TrackFxKind::Roll);
+                    if let Some(TrackFx::Roll(roll)) =
+                        config.track_fx.slot_fx_mut(bank_idx, slot_idx)
+                    {
                         if let Some(roll_data) = &slot_data.roll {
                             roll.step.value = match roll_data.step {
                                 2 => RollStep::Two,
@@ -808,10 +892,15 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                     }
                 }
                 "Filter" => {
-                    config.track_fx.set_slot_kind(bank_idx, slot_idx, TrackFxKind::Filter);
-                    if let Some(TrackFx::Filter(filter_cfg)) = config.track_fx.slot_fx_mut(bank_idx, slot_idx) {
+                    config
+                        .track_fx
+                        .set_slot_kind(bank_idx, slot_idx, TrackFxKind::Filter);
+                    if let Some(TrackFx::Filter(filter_cfg)) =
+                        config.track_fx.slot_fx_mut(bank_idx, slot_idx)
+                    {
                         if let Some(filter_data) = &slot_data.filter {
-                            if let Some(ft) = string_to_filter_type(&filter_data.filter.filter_type) {
+                            if let Some(ft) = string_to_filter_type(&filter_data.filter.filter_type)
+                            {
                                 filter_cfg.filter.filter_type.value = ft;
                             }
                             filter_cfg.filter.cutoff_hz.value = filter_data
@@ -822,8 +911,10 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                                 .filter
                                 .resonance_x10
                                 .clamp(FILTER_Q_MIN_X10, FILTER_Q_MAX_X10);
-                            filter_cfg.filter.drive.value = filter_data.filter.drive.min(FILTER_DRIVE_MAX);
-                            filter_cfg.filter.mix.value = filter_data.filter.mix.min(FILTER_MIX_MAX);
+                            filter_cfg.filter.drive.value =
+                                filter_data.filter.drive.min(FILTER_DRIVE_MAX);
+                            filter_cfg.filter.mix.value =
+                                filter_data.filter.mix.min(FILTER_MIX_MAX);
 
                             if !filter_data.seq_step.is_empty() {
                                 filter_cfg.seq.step.value = filter_data.seq_step.clone();
@@ -857,7 +948,9 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                     }
                 }
                 _ => {
-                    config.track_fx.set_slot_kind(bank_idx, slot_idx, TrackFxKind::None);
+                    config
+                        .track_fx
+                        .set_slot_kind(bank_idx, slot_idx, TrackFxKind::None);
                 }
             }
         }
@@ -872,15 +965,28 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
     {
         let track = &mut config.track_fx.tracks[track_idx];
         if !track_data.enabled.is_empty() {
-            for (bank_idx, bank_enabled) in track_data.enabled.iter().take(TRACK_FX_BANK_COUNT).enumerate() {
-                for (slot_idx, enabled) in bank_enabled.iter().take(TRACK_FX_SLOT_COUNT).enumerate() {
+            for (bank_idx, bank_enabled) in track_data
+                .enabled
+                .iter()
+                .take(TRACK_FX_BANK_COUNT)
+                .enumerate()
+            {
+                for (slot_idx, enabled) in bank_enabled.iter().take(TRACK_FX_SLOT_COUNT).enumerate()
+                {
                     track.enabled[bank_idx][slot_idx] = *enabled;
                 }
             }
         } else {
             // Backward compatibility: old schema stored per-track `is_enabled` in `banks.slots`.
-            for (bank_idx, bank_data) in track_data.banks.iter().take(TRACK_FX_BANK_COUNT).enumerate() {
-                for (slot_idx, slot_data) in bank_data.slots.iter().take(TRACK_FX_SLOT_COUNT).enumerate() {
+            for (bank_idx, bank_data) in track_data
+                .banks
+                .iter()
+                .take(TRACK_FX_BANK_COUNT)
+                .enumerate()
+            {
+                for (slot_idx, slot_data) in
+                    bank_data.slots.iter().take(TRACK_FX_SLOT_COUNT).enumerate()
+                {
                     track.enabled[bank_idx][slot_idx] = slot_data.is_enabled;
                 }
             }
@@ -943,6 +1049,27 @@ fn string_to_waveform(s: &str) -> Option<Waveform> {
         "Saw" => Some(Waveform::Saw),
         "Square" => Some(Waveform::Square),
         "Triangle" => Some(Waveform::Triangle),
+        _ => None,
+    }
+}
+
+fn vocoder_carrier_to_string(carrier: VocoderCarrier) -> &'static str {
+    match carrier {
+        VocoderCarrier::Track1 => "Track1",
+        VocoderCarrier::Track2 => "Track2",
+        VocoderCarrier::Track3 => "Track3",
+        VocoderCarrier::Track4 => "Track4",
+        VocoderCarrier::Track5 => "Track5",
+    }
+}
+
+fn string_to_vocoder_carrier(s: &str) -> Option<VocoderCarrier> {
+    match s {
+        "Track1" | "Tr1" => Some(VocoderCarrier::Track1),
+        "Track2" | "Tr2" => Some(VocoderCarrier::Track2),
+        "Track3" | "Tr3" => Some(VocoderCarrier::Track3),
+        "Track4" | "Tr4" => Some(VocoderCarrier::Track4),
+        "Track5" | "Tr5" => Some(VocoderCarrier::Track5),
         _ => None,
     }
 }

@@ -43,7 +43,12 @@ impl FilterConfigs {
             filter_type: EnumConfig::new(
                 "Type",
                 FilterType::Lpf,
-                vec![FilterType::Lpf, FilterType::Hpf, FilterType::Bpf, FilterType::Notch],
+                vec![
+                    FilterType::Lpf,
+                    FilterType::Hpf,
+                    FilterType::Bpf,
+                    FilterType::Notch,
+                ],
             ),
             cutoff_hz: NumericConfig::new("Cutoff(Hz)", 1000),
             resonance_x10: NumericConfig::new("Q(x0.1)", 7),

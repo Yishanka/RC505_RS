@@ -87,7 +87,10 @@ struct OnePoleHp {
 
 impl OnePoleHp {
     fn new() -> Self {
-        Self { y: 0.0, x_prev: 0.0 }
+        Self {
+            y: 0.0,
+            x_prev: 0.0,
+        }
     }
 
     fn process(&mut self, x: f32, cutoff_hz: f32, sample_rate: f32) -> f32 {
@@ -158,7 +161,9 @@ pub fn process_sample(
     let sr = sample_rate.max(1.0);
     state.ensure_sample_rate(sr);
 
-    let target_size = p.size_ms.clamp(REVERB_SIZE_MIN_MS as f32, REVERB_SIZE_MAX_MS as f32);
+    let target_size = p
+        .size_ms
+        .clamp(REVERB_SIZE_MIN_MS as f32, REVERB_SIZE_MAX_MS as f32);
     let target_rt60 = p.rt60_ms.max(50.0);
     let alpha = 1.0 - (-1.0 / (0.05 * sr)).exp();
     if !state.inited {

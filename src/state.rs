@@ -21,7 +21,7 @@ pub enum TrackState {
 pub enum ScreenState {
     Empty,
     Beat,
-    SYS, 
+    SYS,
     FxSelect,
     InFxOsc,
     InFxOscAudio,
@@ -37,6 +37,7 @@ pub enum ScreenState {
     InFxMyDelayNote,
     InFxMyDelayFilter,
     InFxMyDelayFilterEnv,
+    InFxVocoder,
     TrackFxSelect,
     InTrackFxDelay,
     InTrackFxRoll,
@@ -48,9 +49,8 @@ pub enum ScreenState {
 #[derive(PartialEq, Clone, Copy)]
 pub enum FxState {
     Bank,
-    Single, 
+    Single,
 }
-
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum ProjectNameMode {

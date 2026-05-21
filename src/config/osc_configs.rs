@@ -15,12 +15,16 @@ pub enum Waveform {
 
 impl std::fmt::Display for Waveform {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            Waveform::Sine => "Sin",
-            Waveform::Saw => "Saw",
-            Waveform::Square => "Sqr",
-            Waveform::Triangle => "Tri",
-        })
+        write!(
+            f,
+            "{}",
+            match self {
+                Waveform::Sine => "Sin",
+                Waveform::Saw => "Saw",
+                Waveform::Square => "Sqr",
+                Waveform::Triangle => "Tri",
+            }
+        )
     }
 }
 
@@ -46,7 +50,8 @@ impl OscillatorConfigs {
             waveform: EnumConfig::new(
                 "Waveform",
                 Waveform::Sine,
-                vec![Waveform::Sine,
+                vec![
+                    Waveform::Sine,
                     Waveform::Saw,
                     Waveform::Square,
                     Waveform::Triangle,

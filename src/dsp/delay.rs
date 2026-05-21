@@ -69,7 +69,8 @@ pub fn process_sample(
     let sr = state.sample_rate;
     let max_delay_samples = (state.buffer_l.len().saturating_sub(2)).max(1);
 
-    let target_time_samples = ((p.time_ms.clamp(DELAY_TIME_MIN_MS, DELAY_TIME_MAX_MS) / 1000.0) * sr)
+    let target_time_samples = ((p.time_ms.clamp(DELAY_TIME_MIN_MS, DELAY_TIME_MAX_MS) / 1000.0)
+        * sr)
         .clamp(1.0, max_delay_samples as f32);
     let target_feedback = p.feedback.clamp(0.0, FEEDBACK_MAX);
     let target_damp_hz = p.high_damp_hz.clamp(200.0, 20_000.0);
@@ -81,7 +82,9 @@ pub fn process_sample(
     state.smooth_damp_hz += (target_damp_hz - state.smooth_damp_hz) * smooth_coeff;
     state.smooth_mix += (target_mix - state.smooth_mix) * smooth_coeff;
 
-    let delay_samples = state.smooth_time_samples.clamp(1.0, max_delay_samples as f32);
+    let delay_samples = state
+        .smooth_time_samples
+        .clamp(1.0, max_delay_samples as f32);
     let delayed_l = read_interp(&state.buffer_l, state.write_idx as f32 - delay_samples);
     let delayed_r = read_interp(&state.buffer_r, state.write_idx as f32 - delay_samples);
 

@@ -10,7 +10,7 @@ pub trait ConfigSet {
 }
 
 // Struct for a single config, define different types, like enum, numeric...
-/// Configs with Numeric Input 
+/// Configs with Numeric Input
 pub struct NumericConfig {
     /// 设置的显示标签
     pub label: String,
@@ -56,7 +56,7 @@ impl NumericConfig {
                 buffer_changed = true;
             }
         }
-        
+
         // Backspace 删除最后一个字符
         if i.key_pressed(egui::Key::Backspace) {
             self.buffer.pop();
@@ -91,7 +91,7 @@ impl<T: PartialEq + Clone> EnumConfig<T> {
         }
     }
 
-    pub fn confirm(& self) -> T {
+    pub fn confirm(&self) -> T {
         self.value.clone()
     }
 
@@ -107,4 +107,3 @@ impl<T: PartialEq + Clone> EnumConfig<T> {
         }
     }
 }
-

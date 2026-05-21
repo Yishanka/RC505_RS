@@ -1,2 +1,2 @@
-pub mod looper;
 pub mod init;
+pub mod looper;
