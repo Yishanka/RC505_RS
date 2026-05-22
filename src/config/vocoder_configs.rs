@@ -66,10 +66,10 @@ impl VocoderConfigs {
                     VocoderCarrier::Track5,
                 ],
             ),
-            bands: NumericConfig::new("Bands", 8),
-            attack_ms: NumericConfig::new("Attack(ms)", 12),
-            release_ms: NumericConfig::new("Release(ms)", 120),
-            level: NumericConfig::new("Level", 90),
+            bands: NumericConfig::new("Bands", 16),
+            attack_ms: NumericConfig::new("Attack(ms)", 6),
+            release_ms: NumericConfig::new("Release(ms)", 80),
+            level: NumericConfig::new("Level", 100),
             mix: NumericConfig::new("Mix(%)", 100),
         }
     }
