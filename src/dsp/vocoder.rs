@@ -2,6 +2,9 @@ use crate::config::filter_configs::FilterType;
 use crate::dsp::filter::{FilterDspState, FilterParams, process_sample as process_filter_sample};
 
 pub const VOCODER_MAX_BANDS: usize = 16;
+// Bandpass voice envelopes are much smaller than full-scale input; lift them
+// before they drive the carrier bands.
+const MODULATOR_ENV_GAIN: f32 = 24.0;
 
 #[derive(Clone, Copy)]
 pub struct VocoderParams {
@@ -67,7 +70,7 @@ pub fn process_frame(
         };
         let mod_band =
             process_filter_sample(&mut state.mod_filters[idx], filter_params, sr, modulator);
-        let target = mod_band.abs();
+        let target = (mod_band.abs() * MODULATOR_ENV_GAIN).min(1.0);
         let env_coeff = if target > state.env[idx] {
             attack
         } else {
