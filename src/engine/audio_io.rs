@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -12,6 +13,8 @@ use ringbuf::HeapRb;
 // 128 在 48kHz 下约 2.6ms，在 96kHz 下约 1.3ms
 // 如果报错，可以尝试 256
 const BUFFER_SIZE: u32 = 256;
+type CarrierFrame = Option<(f32, f32)>;
+type CarrierQueues = Vec<VecDeque<CarrierFrame>>;
 
 #[cfg(all(target_os = "windows", feature = "asio"))]
 fn device_exists_in_host(host: &cpal::Host, input_name: &str, output_name: &str) -> Result<bool> {
@@ -205,7 +208,7 @@ pub struct AudioIO {
     latency_comp: usize, // Input latency compensation (in milliseconds).
     fx_engine: Arc<Mutex<InputFxEngine>>,
     track_fx_engine: Arc<Mutex<TrackFxEngine>>,
-    track_carriers: Arc<Mutex<Vec<Option<(f32, f32)>>>>,
+    track_carriers: Arc<Mutex<CarrierQueues>>,
     realtime_enabled: Arc<AtomicBool>,
 }
 
@@ -219,7 +222,9 @@ impl AudioIO {
         let state = Arc::new(Mutex::new(EngineState::new(track_count)));
         let fx_engine = Arc::new(Mutex::new(InputFxEngine::new(48_000.0)));
         let track_fx_engine = Arc::new(Mutex::new(TrackFxEngine::new(48_000.0, track_count)));
-        let track_carriers = Arc::new(Mutex::new(vec![None; track_count]));
+        let track_carriers = Arc::new(Mutex::new(
+            (0..track_count).map(|_| VecDeque::new()).collect(),
+        ));
         let realtime_enabled = Arc::new(AtomicBool::new(true));
         let (input_stream, output_stream, config) = Self::build_streams(
             input_name,
@@ -253,7 +258,7 @@ impl AudioIO {
         state: Arc<Mutex<EngineState>>,
         fx_engine: Arc<Mutex<InputFxEngine>>,
         track_fx_engine: Arc<Mutex<TrackFxEngine>>,
-        track_carriers: Arc<Mutex<Vec<Option<(f32, f32)>>>>,
+        track_carriers: Arc<Mutex<CarrierQueues>>,
         realtime_enabled: Arc<AtomicBool>,
         latency_comp: usize,
     ) -> Result<(cpal::Stream, cpal::Stream, cpal::StreamConfig)> {
@@ -308,10 +313,6 @@ impl AudioIO {
                 }
                 let now = Instant::now();
                 let mut fx_guard = input_fx.lock().ok();
-                let carrier_snapshot = input_carriers
-                    .lock()
-                    .map(|carriers| carriers.clone())
-                    .unwrap_or_default();
                 let (base_elapsed, sample_rate) = if let Some(fx) = fx_guard.as_ref() {
                     let elapsed = fx
                         .metronome_start()
@@ -324,13 +325,31 @@ impl AudioIO {
                 let channels = config.channels as usize;
                 let sec_per_frame = 1.0 / sample_rate as f64;
                 let mut processed_block: Vec<f32> = Vec::with_capacity(data.len());
+                let frame_count = data.len() / channels.max(1);
+                let carrier_block = input_carriers
+                    .lock()
+                    .map(|mut carrier_queues| {
+                        (0..frame_count)
+                            .map(|_| {
+                                carrier_queues
+                                    .iter_mut()
+                                    .map(|queue| queue.pop_front().flatten())
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
 
                 for (frame_idx, frame) in data.chunks(channels).enumerate() {
                     let input_l = frame[0];
                     let input_r = if channels > 1 { frame[1] } else { frame[0] };
                     let elapsed = base_elapsed + frame_idx as f64 * sec_per_frame;
                     let (processed_l, processed_r) = if let Some(fx) = fx_guard.as_mut() {
-                        fx.process_frame(elapsed, input_l, input_r, &carrier_snapshot)
+                        if let Some(carriers) = carrier_block.get(frame_idx) {
+                            fx.process_frame(elapsed, input_l, input_r, carriers)
+                        } else {
+                            fx.process_frame(elapsed, input_l, input_r, &[])
+                        }
                     } else {
                         (input_l, input_r)
                     };
@@ -397,7 +416,8 @@ impl AudioIO {
                     .as_ref()
                     .map(|engine| engine.tracks.len())
                     .unwrap_or(0);
-                let mut latest_carriers = vec![None; track_count];
+                let mut carrier_block: Vec<Vec<CarrierFrame>> =
+                    Vec::with_capacity(data.len() / channels.max(1));
                 let sample_rate = if let Some(track_fx) = track_fx_guard.as_ref() {
                     track_fx.sample_rate()
                 } else {
@@ -420,6 +440,7 @@ impl AudioIO {
                     }
                     let mut mixed_l = 0.0f32;
                     let mut mixed_r = 0.0f32;
+                    let mut frame_carriers = vec![None; track_count];
 
                     if let Some(engine) = guard.as_mut() {
                         for (track_idx, track) in engine.tracks.iter_mut().enumerate() {
@@ -490,7 +511,7 @@ impl AudioIO {
                                 mixed_l += wet_l;
                                 mixed_r += wet_r;
                             }
-                            if let Some(carrier) = latest_carriers.get_mut(track_idx) {
+                            if let Some(carrier) = frame_carriers.get_mut(track_idx) {
                                 *carrier = Some((wet_l, wet_r));
                             }
 
@@ -512,9 +533,23 @@ impl AudioIO {
                     for ch in 2..channels {
                         frame[ch] = ((out_l + out_r) * 0.5).clamp(-1.0, 1.0);
                     }
+                    carrier_block.push(frame_carriers);
                 }
-                if let Ok(mut carriers) = output_carriers.lock() {
-                    *carriers = latest_carriers;
+                if let Ok(mut carrier_queues) = output_carriers.lock() {
+                    if carrier_queues.len() != track_count {
+                        *carrier_queues = (0..track_count).map(|_| VecDeque::new()).collect();
+                    }
+                    let max_carrier_frames = frame_size as usize * 8;
+                    for frame_carriers in carrier_block {
+                        for (track_idx, carrier) in frame_carriers.into_iter().enumerate() {
+                            if let Some(queue) = carrier_queues.get_mut(track_idx) {
+                                queue.push_back(carrier);
+                                while queue.len() > max_carrier_frames {
+                                    let _ = queue.pop_front();
+                                }
+                            }
+                        }
+                    }
                 }
             },
             err_fn,

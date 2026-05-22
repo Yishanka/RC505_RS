@@ -5,8 +5,9 @@ pub const VOCODER_MAX_BANDS: usize = 16;
 // Bandpass voice envelopes are much smaller than full-scale input; lift them
 // before they drive the carrier bands.
 const MODULATOR_ENV_GAIN: f32 = 18.0;
-const VOCODER_BODY_GAIN: f32 = 0.24;
-const SIBILANCE_GAIN: f32 = 0.12;
+const MODULATION_CONTRAST: f32 = 1.45;
+const VOCODER_BODY_GAIN: f32 = 0.12;
+const SIBILANCE_GAIN: f32 = 0.2;
 
 #[derive(Clone, Copy)]
 pub struct VocoderParams {
@@ -71,6 +72,7 @@ pub fn process_frame(
     let mut wet_r = 0.0f32;
     let q = 2.4;
     let mut env_sum = 0.0f32;
+    let mut band_env = [0.0f32; VOCODER_MAX_BANDS];
 
     for idx in 0..band_count {
         let center_hz = band_center_hz(idx, band_count);
@@ -91,7 +93,20 @@ pub fn process_frame(
         };
         state.env[idx] += (target - state.env[idx]) * env_coeff;
         env_sum += state.env[idx];
+        band_env[idx] = state.env[idx];
+    }
 
+    let voice_env = (env_sum / band_count as f32).clamp(0.0, 1.0);
+
+    for (idx, env) in band_env.iter().take(band_count).copied().enumerate() {
+        let center_hz = band_center_hz(idx, band_count);
+        let filter_params = FilterParams {
+            filter_type: FilterType::Bpf,
+            cutoff_hz: center_hz,
+            q,
+            drive: 0.0,
+            mix: 1.0,
+        };
         let car_l = process_filter_sample(
             &mut state.carrier_filters_l[idx],
             filter_params,
@@ -104,11 +119,11 @@ pub fn process_frame(
             sr,
             carrier_r,
         );
-        wet_l += car_l * state.env[idx];
-        wet_r += car_r * state.env[idx];
+        let shaped_env = emphasize_env(env, voice_env);
+        wet_l += car_l * shaped_env;
+        wet_r += car_r * shaped_env;
     }
 
-    let voice_env = (env_sum / band_count as f32).clamp(0.0, 1.0);
     let body_params = FilterParams {
         filter_type: FilterType::Lpf,
         cutoff_hz: 2600.0,
@@ -157,6 +172,14 @@ fn coeff(ms: f32, sample_rate: f32) -> f32 {
 
 fn soft_env(x: f32) -> f32 {
     1.0 - (-x.max(0.0)).exp()
+}
+
+fn emphasize_env(env: f32, avg: f32) -> f32 {
+    if avg <= 0.0001 {
+        return 0.0;
+    }
+    let contrast = (env / avg).max(0.0).powf(MODULATION_CONTRAST);
+    (avg * contrast * 1.15).clamp(0.0, 1.0)
 }
 
 fn band_center_hz(idx: usize, bands: usize) -> f32 {
