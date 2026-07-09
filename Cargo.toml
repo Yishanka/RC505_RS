@@ -7,6 +7,14 @@ edition = "2024"
 default = []
 asio = ["cpal/asio"]
 
+[[bin]]
+name = "rc505_rs"
+path = "src/main.rs"
+
+[[bin]]
+name = "rc505_launcher"
+path = "src/bin/launcher.rs"
+
 [dependencies]
 cpal = "0.15"
 ringbuf = "0.3"

@@ -34,6 +34,8 @@ src/
     metronome.rs        beat timing
   dsp/                  envelope/filter/osc/reverb/delay/roll/my_delay/note
   project.rs            save/load project index and per-project JSON
+  bin/
+    launcher.rs         desktop launcher with audio device setup and project management
 ```
 
 ## 4. How To Run and Play
@@ -101,6 +103,33 @@ Projects are stored under `%APPDATA%/rc505_rs/projects` (fallback to local `proj
 When exiting from loop/screen to init (or closing window), the app asks whether to save: `Y` save, `N` discard, `Esc` cancel exit. Beat/system/fx settings are persisted. Audio track waveform buffers are not persisted yet; this version stores configuration state, not recorded audio clips.
 
 Known limitation for now: if you change an FX slot type (for example Oscillator -> Filter), that slot is reinitialized and its previous parameter set is lost.
+
+### RC505 Launcher
+
+The project also includes a companion launcher (`rc505_launcher.exe`) that helps you configure audio settings and manage projects before starting the main app.
+
+**Features:**
+- **Audio Device Setup** — scan and select input/output devices before launch
+- **Project Manager** — create, rename, and delete projects from a GUI
+- **Session Presets** — pre-configure BPM (30-300) and latency compensation (0-500 ms)
+- **One-Click Launch** — launches `rc505_rs.exe` with your saved preferences
+
+**Usage:**
+
+Place `rc505_launcher.exe` in the same directory as `rc505_rs.exe`, then double-click the launcher. Select your audio devices and project, then click **Launch RC505** to start.
+
+You can also build both binaries from source:
+
+```powershell
+cargo build --release
+# produces:
+#   target/release/rc505_rs.exe        (main looper app)
+#   target/release/rc505_launcher.exe  (launcher)
+```
+
+### Pre-built Releases
+
+Download the latest `rc505_rs.exe` and `rc505_launcher.exe` from the [Releases](https://github.com/Yishanka/RC505_RS/releases) page. No installation required — just extract and run.
 
 ## 5. Future Development
 

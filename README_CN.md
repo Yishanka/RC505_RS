@@ -34,6 +34,8 @@ src/
     metronome.rs        节拍时钟
   dsp/                  envelope/filter/osc/reverb/delay/roll/my_delay/note
   project.rs            工程索引和 JSON 存取
+  bin/
+    launcher.rs         桌面启动器（音频设备选择 + 工程管理）
 ```
 
 ## 4. 运行与使用
@@ -99,6 +101,33 @@ Windows 音频链路通常会有明显往返延迟。Beat 设置里的 `Latency 
 从 Loop/Screen 退出到初始页，或者关闭窗口时，会弹出保存确认：`Y` 保存，`N` 不保存，`Esc` 取消退出。当前版本保存的是配置状态（beat/system/fx），不保存已经录进轨道的音频波形数据。
 
 当前已知限制：如果你切换某个槽位的效果类型（例如从 Oscillator 改成 Filter），该槽位参数会被重新初始化，旧参数会丢失。
+
+### RC505 启动器
+
+项目还包含一个桌面启动器（`rc505_launcher.exe`），可在启动主程序前配置音频设备和工程。
+
+**功能：**
+- **音频设备选择** — 启动前扫描并选择输入/输出设备
+- **工程管理** — 在图形界面中创建、重命名、删除工程
+- **会话预设** — 预先配置 BPM（30-300）和延迟补偿（0-500ms）
+- **一键启动** — 点击按钮启动 `rc505_rs.exe`，自动加载配置
+
+**使用方法：**
+
+将 `rc505_launcher.exe` 和 `rc505_rs.exe` 放在同一目录下，双击启动器运行。选择音频设备和工程后，点击 **Launch RC505** 启动主程序。
+
+也可以从源码编译：
+
+```powershell
+cargo build --release
+# 输出：
+#   target/release/rc505_rs.exe        （主程序）
+#   target/release/rc505_launcher.exe  （启动器）
+```
+
+### 预编译版本
+
+从 [Releases](https://github.com/Yishanka/RC505_RS/releases) 页面下载最新的 `rc505_rs.exe` 和 `rc505_launcher.exe`，无需安装，解压即用。
 
 ## 5. 后续计划
 
