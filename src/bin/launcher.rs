@@ -3,7 +3,7 @@
 //! This launcher provides:
 //! - Audio device discovery and selection
 //! - Project management (create, browse, delete)
-//! - Quick-launch configuration (BPM, latency compensation)
+//! - Quick-launch hardware configuration (devices, latency compensation)
 //! - One-click launch into the main RC505_RS looper app
 
 use std::fs;
@@ -61,7 +61,6 @@ struct Rc505Launcher {
 
     // Config
     config: LauncherConfig,
-    bpm_input: String,
     latency_input: String,
 
     // Projects
@@ -105,7 +104,6 @@ impl Rc505Launcher {
             scan_done: false,
 
             config,
-            bpm_input: String::new(),
             latency_input: String::new(),
 
             projects,
@@ -359,7 +357,6 @@ impl eframe::App for Rc505Launcher {
         // Scan audio on first frame.
         if !self.scan_done {
             self.scan_audio_devices();
-            self.bpm_input = self.config.default_bpm.to_string();
             self.latency_input = self.config.latency_comp_ms.to_string();
         }
 
@@ -491,30 +488,7 @@ impl Rc505Launcher {
 
         ui.add_space(20.0);
         ui.separator();
-        ui.heading("Default Session Settings");
-
-        ui.horizontal(|ui| {
-            ui.label("BPM:");
-            if ui
-                .add_sized(
-                    [60.0, 20.0],
-                    egui::TextEdit::singleline(&mut self.bpm_input),
-                )
-                .lost_focus()
-            {
-                if let Ok(v) = self.bpm_input.trim().parse::<usize>() {
-                    self.config.default_bpm = v;
-                    self.config.default_bpm = self.config.bpm();
-                    self.bpm_input = self.config.default_bpm.to_string();
-                    self.save_current_config();
-                }
-            }
-            if ui.button("Reset").clicked() {
-                self.config.default_bpm = 120;
-                self.bpm_input = "120".to_string();
-                self.save_current_config();
-            }
-        });
+        ui.heading("Hardware Settings");
 
         ui.horizontal(|ui| {
             ui.label("Latency Comp (ms):");
@@ -541,7 +515,7 @@ impl Rc505Launcher {
         });
 
         ui.add_space(16.0);
-        ui.label("Tip: The main RC505_RS app reads these launch defaults before opening the selected project.");
+        ui.label("Tip: BPM is saved with each project. The launcher only applies hardware-related startup settings.");
     }
 
     fn draw_projects_tab(&mut self, ui: &mut egui::Ui) {

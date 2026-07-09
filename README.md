@@ -112,7 +112,7 @@ The project also includes a companion launcher (`rc505_launcher.exe`) that helps
 **Features:**
 - **Audio Device Setup** — scan and select input/output devices before launch
 - **Project Manager** — create, rename, and delete projects from a GUI
-- **Session Presets** — pre-configure BPM (30-300) and latency compensation (0-500 ms)
+- **Hardware Settings** — pre-configure latency compensation (0-500 ms)
 - **One-Click Launch** — launches `rc505_rs.exe`, applies saved preferences, and opens the selected project
 
 **Usage:**

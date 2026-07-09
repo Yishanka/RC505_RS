@@ -14,7 +14,7 @@ PR 原始实现中，`src/bin/launcher.rs` 自己定义路径和 `LauncherConfig
 
 1. Windows `%APPDATA%` 路径与主程序一致。
 2. 无 `%APPDATA%` 时回退到 `rc505_data/projects`，而主程序回退到 `projects/`。
-3. 主程序没有读取 `launcher_config.json`，导致启动器保存的设备/BPM/latency/工程选择不会生效。
+3. 主程序没有读取 `launcher_config.json`，导致启动器保存的设备、latency 和工程选择不会生效。
 
 ## 新结构说明
 
@@ -27,7 +27,7 @@ PR 原始实现中，`src/bin/launcher.rs` 自己定义路径和 `LauncherConfig
    - `LauncherConfig`
    - `load()`
    - `save()`
-   - BPM / latency 边界保护
+   - latency 边界保护
 3. `src/app_support/mod.rs`
    - 对外暴露 `paths` 和 `launcher_config`
 

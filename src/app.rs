@@ -76,10 +76,7 @@ impl MyApp {
     pub fn new() -> Self {
         let launch_config = launcher_config::load();
         let mut config = AppConfig::new(
-            launch_config
-                .as_ref()
-                .map(LauncherConfig::bpm)
-                .unwrap_or(DEFAULT_BPM),
+            DEFAULT_BPM,
             launch_config
                 .as_ref()
                 .map(LauncherConfig::latency_comp_ms)
@@ -87,7 +84,7 @@ impl MyApp {
             TRACK_COUNT,
         );
         if let Some(launch_config) = launch_config.as_ref() {
-            Self::apply_launcher_config(&mut config, launch_config);
+            Self::apply_launcher_hardware_config(&mut config, launch_config);
         }
         let audio_io: Result<AudioIO, anyhow::Error> = AudioIO::new(
             &config.system_config.input_device.value,
@@ -145,10 +142,10 @@ impl MyApp {
         }
     }
 
-    fn apply_launcher_config(config: &mut AppConfig, launch_config: &LauncherConfig) {
+    fn apply_launcher_hardware_config(config: &mut AppConfig, launch_config: &LauncherConfig) {
         config
             .beat_config
-            .set_values(launch_config.bpm(), launch_config.latency_comp_ms());
+            .set_latency(launch_config.latency_comp_ms());
         if !launch_config.input_device.is_empty() {
             config.system_config.input_device.value = launch_config.input_device.clone();
         }
@@ -188,7 +185,7 @@ impl MyApp {
             project::apply_data_to_config(&mut self.config, data);
         }
         if let Some(launch_config) = launch_config {
-            Self::apply_launcher_config(&mut self.config, launch_config);
+            Self::apply_launcher_hardware_config(&mut self.config, launch_config);
         }
         self.active_project_idx = Some(self.sel_project_idx);
         self.app_state = AppState::MainLoop;

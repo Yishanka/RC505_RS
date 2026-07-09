@@ -11,15 +11,14 @@
 1. `rc505_rs.exe`：主 loopstation 程序
 2. `rc505_launcher.exe`：启动前配置与工程管理 GUI
 
-启动器保存的音频设备、BPM、延迟补偿和最近工程现在会被主程序读取，点击启动后主程序会直接打开启动器中选中的工程。
+启动器保存的音频设备、延迟补偿和最近工程现在会被主程序读取，点击启动后主程序会直接打开启动器中选中的工程。BPM 仍然属于工程数据，不由启动器覆盖。
 
 ## 子功能与参数
 
 1. Audio Setup
    - `input_device: String`
    - `output_device: String`
-2. Session Presets
-   - `default_bpm: usize`，范围 `30..=300`
+2. Hardware Settings
    - `latency_comp_ms: usize`，范围 `0..=500`
 3. Project Manager
    - 复用 `projects_index.json`
@@ -41,7 +40,7 @@
    - 无改动。
 4. Engine
    - 主程序启动时把 launcher 的设备和 latency 传入 `AudioIO::new()`。
-   - 打开启动器选中工程时，launcher 的设备/BPM/latency 会作为启动会话覆盖值。
+   - 打开启动器选中工程时，launcher 的设备和 latency 会作为启动会话覆盖值。
 5. Project
    - 启动器和主程序共用同一个工程索引目录。
    - 当工程列表为空时，启动器和主程序都会保证存在 `DEFAULT` 工程项。
@@ -64,10 +63,10 @@
 人工验证建议：
 
 1. 打开 `target/release/rc505_launcher.exe`
-2. 在 Audio tab 选择输入/输出设备，设置 BPM 与 Latency Comp
+2. 在 Audio tab 选择输入/输出设备，设置 Latency Comp
 3. 在 Projects tab 创建或选择一个工程
 4. 点击 `Launch RC505`
-5. 预期主程序打开后直接进入选中的工程，并使用启动器中的设备、BPM、latency
+5. 预期主程序打开后直接进入选中的工程，BPM 来自工程，设备和 latency 来自启动器
 
 ## 已知限制
 

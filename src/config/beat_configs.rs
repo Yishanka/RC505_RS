@@ -83,6 +83,11 @@ impl BeatConfigs {
         self.input_latency.value = latency;
         self.input_latency.buffer = latency.to_string();
     }
+
+    pub fn set_latency(&mut self, latency: usize) {
+        self.input_latency.value = latency;
+        self.input_latency.buffer = latency.to_string();
+    }
 }
 
 impl ConfigSet for BeatConfigs {

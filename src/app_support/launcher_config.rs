@@ -2,24 +2,18 @@ use std::fs;
 
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_BPM: usize = 120;
 const DEFAULT_LATENCY_COMP_MS: usize = 85;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LauncherConfig {
     pub input_device: String,
     pub output_device: String,
-    pub default_bpm: usize,
     pub latency_comp_ms: usize,
     #[serde(default)]
     pub last_project: String,
 }
 
 impl LauncherConfig {
-    pub fn bpm(&self) -> usize {
-        self.default_bpm.clamp(30, 300)
-    }
-
     pub fn latency_comp_ms(&self) -> usize {
         self.latency_comp_ms.min(500)
     }
@@ -30,7 +24,6 @@ impl Default for LauncherConfig {
         Self {
             input_device: String::new(),
             output_device: String::new(),
-            default_bpm: DEFAULT_BPM,
             latency_comp_ms: DEFAULT_LATENCY_COMP_MS,
             last_project: String::new(),
         }
