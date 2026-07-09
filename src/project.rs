@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -999,10 +999,7 @@ fn default_tension_value() -> usize {
 }
 
 fn projects_root() -> PathBuf {
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        return Path::new(&appdata).join("rc505_rs").join("projects");
-    }
-    PathBuf::from("projects")
+    crate::app_support::paths::projects_dir()
 }
 
 fn ensure_project_dir() -> anyhow::Result<()> {

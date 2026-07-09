@@ -32,6 +32,7 @@ src/
     input_fx.rs         Input FX 运行时与处理
     track_fx.rs         Track FX 运行时与处理
     metronome.rs        节拍时钟
+  app_support/          主程序/启动器共享路径与启动配置
   dsp/                  envelope/filter/osc/reverb/delay/roll/my_delay/note
   project.rs            工程索引和 JSON 存取
   bin/
@@ -110,11 +111,11 @@ Windows 音频链路通常会有明显往返延迟。Beat 设置里的 `Latency 
 - **音频设备选择** — 启动前扫描并选择输入/输出设备
 - **工程管理** — 在图形界面中创建、重命名、删除工程
 - **会话预设** — 预先配置 BPM（30-300）和延迟补偿（0-500ms）
-- **一键启动** — 点击按钮启动 `rc505_rs.exe`，自动加载配置
+- **一键启动** — 点击按钮启动 `rc505_rs.exe`，应用启动配置并打开选中的工程
 
 **使用方法：**
 
-将 `rc505_launcher.exe` 和 `rc505_rs.exe` 放在同一目录下，双击启动器运行。选择音频设备和工程后，点击 **Launch RC505** 启动主程序。
+将 `rc505_launcher.exe` 和 `rc505_rs.exe` 放在同一目录下，双击启动器运行。选择音频设备和工程后，点击 **Launch RC505**，主程序会直接打开该工程。
 
 也可以从源码编译：
 

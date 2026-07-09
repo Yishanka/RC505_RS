@@ -14,50 +14,14 @@ use cpal::traits::{DeviceTrait, HostTrait};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
-// ---------------------------------------------------------------------------
-// Data paths — mirrors the conventions in `src/project.rs`.
-// ---------------------------------------------------------------------------
+#[path = "../app_support/mod.rs"]
+mod app_support;
 
-fn appdata_root() -> PathBuf {
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        PathBuf::from(appdata).join("rc505_rs")
-    } else {
-        PathBuf::from("rc505_data")
-    }
-}
+use app_support::launcher_config::{self, LauncherConfig};
+use app_support::paths;
 
 fn projects_dir() -> PathBuf {
-    appdata_root().join("projects")
-}
-
-fn launcher_config_path() -> PathBuf {
-    appdata_root().join("launcher_config.json")
-}
-
-// ---------------------------------------------------------------------------
-// Launcher configuration (persisted between sessions).
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Serialize, Deserialize)]
-struct LauncherConfig {
-    input_device: String,
-    output_device: String,
-    default_bpm: usize,
-    latency_comp_ms: usize,
-    #[serde(default)]
-    last_project: String,
-}
-
-impl Default for LauncherConfig {
-    fn default() -> Self {
-        Self {
-            input_device: String::new(),
-            output_device: String::new(),
-            default_bpm: 120,
-            latency_comp_ms: 85,
-            last_project: String::new(),
-        }
-    }
+    paths::projects_dir()
 }
 
 // ---------------------------------------------------------------------------
@@ -118,17 +82,18 @@ struct Rc505Launcher {
 
 impl Rc505Launcher {
     fn new() -> Self {
-        let config = load_launcher_config().unwrap_or_default();
-        let projects = load_project_list();
+        let config = launcher_config::load().unwrap_or_default();
+        let mut projects = load_project_list();
+        ensure_default_project(&mut projects);
 
         // Pre-select the last-used project if it still exists.
         let selected_project = if config.last_project.is_empty() {
-            projects.len() // "NEW PROJECT" row
+            0
         } else {
             projects
                 .iter()
                 .position(|p| p.name == config.last_project)
-                .unwrap_or(projects.len())
+                .unwrap_or(0)
         };
 
         Self {
@@ -165,18 +130,12 @@ impl Rc505Launcher {
 
         let inputs: Vec<String> = host
             .input_devices()
-            .map(|iter| {
-                iter.filter_map(|d| d.name().ok())
-                    .collect::<Vec<_>>()
-            })
+            .map(|iter| iter.filter_map(|d| d.name().ok()).collect::<Vec<_>>())
             .unwrap_or_default();
 
         let outputs: Vec<String> = host
             .output_devices()
-            .map(|iter| {
-                iter.filter_map(|d| d.name().ok())
-                    .collect::<Vec<_>>()
-            })
+            .map(|iter| iter.filter_map(|d| d.name().ok()).collect::<Vec<_>>())
             .unwrap_or_default();
 
         if inputs.is_empty() && outputs.is_empty() {
@@ -188,16 +147,20 @@ impl Rc505Launcher {
 
         // If the previously-configured device is still present,
         // keep it selected; otherwise pick the first available.
-        if !self.config.input_device.is_empty() {
-            if let Some(pos) = inputs.iter().position(|n| *n == self.config.input_device) {
-                self.selected_input = pos;
-            }
-        }
-        if !self.config.output_device.is_empty() {
-            if let Some(pos) = outputs.iter().position(|n| *n == self.config.output_device) {
-                self.selected_output = pos;
-            }
-        }
+        self.selected_input = self
+            .config
+            .input_device
+            .is_empty()
+            .then_some(0)
+            .or_else(|| inputs.iter().position(|n| *n == self.config.input_device))
+            .unwrap_or(0);
+        self.selected_output = self
+            .config
+            .output_device
+            .is_empty()
+            .then_some(0)
+            .or_else(|| outputs.iter().position(|n| *n == self.config.output_device))
+            .unwrap_or(0);
 
         self.input_devices = inputs;
         self.output_devices = outputs;
@@ -220,7 +183,7 @@ impl Rc505Launcher {
     fn save_current_config(&mut self) {
         self.config.input_device = self.get_selected_input();
         self.config.output_device = self.get_selected_output();
-        let _ = save_launcher_config(&self.config);
+        let _ = launcher_config::save(&self.config);
     }
 
     // ------------------------------------------------------------------
@@ -249,7 +212,12 @@ impl Rc505Launcher {
         }
         let entry = self.projects.remove(self.selected_project);
         let _ = fs::remove_file(projects_dir().join(&entry.file));
+        if self.config.last_project == entry.name {
+            self.config.last_project.clear();
+            let _ = launcher_config::save(&self.config);
+        }
         let _ = save_project_list(&self.projects);
+        ensure_default_project(&mut self.projects);
         if self.selected_project > 0 && self.selected_project >= self.projects.len() {
             self.selected_project = self.projects.len().saturating_sub(1);
         }
@@ -267,7 +235,12 @@ impl Rc505Launcher {
         if let Some(idx) = self.renaming_idx {
             let new_name = self.rename_input.trim().to_string();
             if !new_name.is_empty() && idx < self.projects.len() {
+                let old_name = self.projects[idx].name.clone();
                 self.projects[idx].name = new_name;
+                if self.config.last_project == old_name {
+                    self.config.last_project = self.projects[idx].name.clone();
+                    let _ = launcher_config::save(&self.config);
+                }
                 let _ = save_project_list(&self.projects);
             }
         }
@@ -280,6 +253,11 @@ impl Rc505Launcher {
     // ------------------------------------------------------------------
 
     fn launch_app(&mut self) {
+        ensure_default_project(&mut self.projects);
+        self.selected_project = self
+            .selected_project
+            .min(self.projects.len().saturating_sub(1));
+
         // Persist current selections.
         self.save_current_config();
 
@@ -289,7 +267,7 @@ impl Rc505Launcher {
             .and_then(|p| p.parent().map(|p| p.to_path_buf()))
             .unwrap_or_else(|| PathBuf::from("."));
 
-        let main_exe = exe_dir.join("rc505_rs.exe");
+        let main_exe = exe_dir.join(format!("rc505_rs{}", std::env::consts::EXE_SUFFIX));
 
         if !main_exe.exists() {
             self.set_status(
@@ -305,7 +283,7 @@ impl Rc505Launcher {
         // Save the selected project as "last project" for next time.
         if self.selected_project < self.projects.len() {
             self.config.last_project = self.projects[self.selected_project].name.clone();
-            let _ = save_launcher_config(&self.config);
+            let _ = launcher_config::save(&self.config);
         }
 
         self.set_status("Launching RC505_RS...", false);
@@ -347,9 +325,10 @@ impl Rc505Launcher {
         for path in candidates {
             if let Ok(bytes) = std::fs::read(path) {
                 let mut fonts = egui::FontDefinitions::default();
-                fonts
-                    .font_data
-                    .insert("cjk_fallback".to_owned(), egui::FontData::from_owned(bytes).into());
+                fonts.font_data.insert(
+                    "cjk_fallback".to_owned(),
+                    egui::FontData::from_owned(bytes).into(),
+                );
                 fonts
                     .families
                     .entry(egui::FontFamily::Proportional)
@@ -471,7 +450,10 @@ impl Rc505Launcher {
                 )
                 .show_ui(ui, |ui| {
                     for (i, name) in self.input_devices.iter().enumerate() {
-                        if ui.selectable_value(&mut self.selected_input, i, name).clicked() {
+                        if ui
+                            .selectable_value(&mut self.selected_input, i, name)
+                            .clicked()
+                        {
                             config_changed = true;
                         }
                     }
@@ -493,7 +475,10 @@ impl Rc505Launcher {
                 )
                 .show_ui(ui, |ui| {
                     for (i, name) in self.output_devices.iter().enumerate() {
-                        if ui.selectable_value(&mut self.selected_output, i, name).clicked() {
+                        if ui
+                            .selectable_value(&mut self.selected_output, i, name)
+                            .clicked()
+                        {
                             config_changed = true;
                         }
                     }
@@ -511,11 +496,15 @@ impl Rc505Launcher {
         ui.horizontal(|ui| {
             ui.label("BPM:");
             if ui
-                .add_sized([60.0, 20.0], egui::TextEdit::singleline(&mut self.bpm_input))
+                .add_sized(
+                    [60.0, 20.0],
+                    egui::TextEdit::singleline(&mut self.bpm_input),
+                )
                 .lost_focus()
             {
                 if let Ok(v) = self.bpm_input.trim().parse::<usize>() {
-                    self.config.default_bpm = v.clamp(30, 300);
+                    self.config.default_bpm = v;
+                    self.config.default_bpm = self.config.bpm();
                     self.bpm_input = self.config.default_bpm.to_string();
                     self.save_current_config();
                 }
@@ -530,11 +519,15 @@ impl Rc505Launcher {
         ui.horizontal(|ui| {
             ui.label("Latency Comp (ms):");
             if ui
-                .add_sized([60.0, 20.0], egui::TextEdit::singleline(&mut self.latency_input))
+                .add_sized(
+                    [60.0, 20.0],
+                    egui::TextEdit::singleline(&mut self.latency_input),
+                )
                 .lost_focus()
             {
                 if let Ok(v) = self.latency_input.trim().parse::<usize>() {
-                    self.config.latency_comp_ms = v.clamp(0, 500);
+                    self.config.latency_comp_ms = v;
+                    self.config.latency_comp_ms = self.config.latency_comp_ms();
                     self.latency_input = self.config.latency_comp_ms.to_string();
                     self.save_current_config();
                 }
@@ -548,7 +541,7 @@ impl Rc505Launcher {
         });
 
         ui.add_space(16.0);
-        ui.label("Tip: The main RC505_RS app will use the devices configured in its own System settings. Use this launcher to pre-configure your defaults.");
+        ui.label("Tip: The main RC505_RS app reads these launch defaults before opening the selected project.");
     }
 
     fn draw_projects_tab(&mut self, ui: &mut egui::Ui) {
@@ -560,8 +553,7 @@ impl Rc505Launcher {
             ui.label("New Project:");
             ui.add_sized(
                 [200.0, 20.0],
-                egui::TextEdit::singleline(&mut self.new_project_name)
-                    .hint_text("project name..."),
+                egui::TextEdit::singleline(&mut self.new_project_name).hint_text("project name..."),
             );
             if ui.button("Create").clicked() {
                 self.create_project();
@@ -600,10 +592,7 @@ impl Rc505Launcher {
                             }
                         } else {
                             let label = format!("{}  [{}]", proj.name, proj.file);
-                            if ui
-                                .selectable_label(is_selected, &label)
-                                .clicked()
-                            {
+                            if ui.selectable_label(is_selected, &label).clicked() {
                                 self.selected_project = i;
                             }
                             if is_selected {
@@ -616,12 +605,6 @@ impl Rc505Launcher {
                             }
                         }
                     });
-                }
-
-                // "[ NEW PROJECT ]" row.
-                let is_new = self.selected_project >= self.projects.len();
-                if ui.selectable_label(is_new, "[ + NEW PROJECT ]").clicked() {
-                    self.selected_project = self.projects.len();
                 }
             });
 
@@ -638,11 +621,11 @@ impl Rc505Launcher {
         ui.add_space(12.0);
         ui.separator();
 
-        if self.selected_project < self.projects.len() {
-            let name = &self.projects[self.selected_project].name;
+        if let Some(project) = self.projects.get(self.selected_project) {
+            let name = &project.name;
             ui.label(format!("Will launch into project: {}", name));
         } else {
-            ui.label("Will launch with a new DEFAULT project.");
+            ui.label("Create a project to launch.");
         }
     }
 
@@ -684,22 +667,6 @@ impl Rc505Launcher {
 // Persistence helpers
 // ---------------------------------------------------------------------------
 
-fn load_launcher_config() -> Option<LauncherConfig> {
-    let path = launcher_config_path();
-    if !path.exists() {
-        return None;
-    }
-    let raw = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&raw).ok()
-}
-
-fn save_launcher_config(config: &LauncherConfig) -> anyhow::Result<()> {
-    let _ = fs::create_dir_all(appdata_root());
-    let raw = serde_json::to_string_pretty(config)?;
-    fs::write(launcher_config_path(), raw)?;
-    Ok(())
-}
-
 fn load_project_list() -> Vec<ProjectEntry> {
     let path = projects_dir().join("projects_index.json");
     if !path.exists() {
@@ -724,6 +691,16 @@ fn save_project_list(entries: &[ProjectEntry]) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn ensure_default_project(entries: &mut Vec<ProjectEntry>) {
+    if entries.is_empty() {
+        entries.push(ProjectEntry {
+            name: "DEFAULT".to_string(),
+            file: make_project_file_name("DEFAULT", 0),
+        });
+        let _ = save_project_list(entries);
+    }
+}
+
 fn make_project_file_name(name: &str, idx: usize) -> String {
     let safe: String = name
         .chars()
@@ -737,7 +714,11 @@ fn make_project_file_name(name: &str, idx: usize) -> String {
             }
         })
         .collect();
-    let safe = if safe.is_empty() { "project".to_string() } else { safe };
+    let safe = if safe.is_empty() {
+        "project".to_string()
+    } else {
+        safe
+    };
     format!("{}_{}.json", safe, idx)
 }
 

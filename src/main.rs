@@ -1,5 +1,6 @@
 // src/main.rs
 mod app;
+mod app_support;
 mod config;
 mod dsp;
 mod engine;

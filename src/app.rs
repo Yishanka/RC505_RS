@@ -1,6 +1,7 @@
 use eframe::egui;
 use std::time::{Duration, Instant};
 
+use crate::app_support::launcher_config::{self, LauncherConfig};
 use crate::config::delay_configs::{
     TRACK_DELAY_DAMP_MAX_HZ, TRACK_DELAY_DAMP_MIN_HZ, TRACK_DELAY_FEEDBACK_MAX_PCT,
     TRACK_DELAY_MIX_MAX_PCT, TRACK_DELAY_TIME_MAX_MS, TRACK_DELAY_TIME_MIN_MS,
@@ -73,7 +74,21 @@ pub struct MyApp {
 
 impl MyApp {
     pub fn new() -> Self {
-        let config = AppConfig::new(DEFAULT_BPM, DEFAULT_LATENCY_COMP, TRACK_COUNT);
+        let launch_config = launcher_config::load();
+        let mut config = AppConfig::new(
+            launch_config
+                .as_ref()
+                .map(LauncherConfig::bpm)
+                .unwrap_or(DEFAULT_BPM),
+            launch_config
+                .as_ref()
+                .map(LauncherConfig::latency_comp_ms)
+                .unwrap_or(DEFAULT_LATENCY_COMP),
+            TRACK_COUNT,
+        );
+        if let Some(launch_config) = launch_config.as_ref() {
+            Self::apply_launcher_config(&mut config, launch_config);
+        }
         let audio_io: Result<AudioIO, anyhow::Error> = AudioIO::new(
             &config.system_config.input_device.value,
             &config.system_config.output_device.value,
@@ -81,16 +96,14 @@ impl MyApp {
             config.beat_config.current_latency(),
         );
         let mut projects = project::load_index();
-        if projects.is_empty() {
-            projects.push(ProjectEntry {
-                name: "DEFAULT".to_string(),
-                file: project::make_project_file_name("DEFAULT", 0),
-            });
-            let _ = project::save_index(&projects);
-        }
+        Self::ensure_default_project(&mut projects);
+        let launch_project_idx = launch_config
+            .as_ref()
+            .filter(|config| !config.last_project.is_empty())
+            .and_then(|config| projects.iter().position(|p| p.name == config.last_project));
 
-        Self {
-            metronome: Metronome::new(DEFAULT_BPM),
+        let mut app = Self {
+            metronome: Metronome::new(config.beat_config.current_bpm()),
             audio_io,
             app_state: AppState::Init,
             tracks: vec![Track::new(); TRACK_COUNT],
@@ -104,7 +117,7 @@ impl MyApp {
             // tracks: (0..TRACK_COUNT).map(Track::new).collect(),
             config,
             projects,
-            sel_project_idx: 0,
+            sel_project_idx: launch_project_idx.unwrap_or(0),
             project_name_input: String::new(),
             project_name_mode: None,
             active_project_idx: None,
@@ -113,6 +126,34 @@ impl MyApp {
             allow_window_close: false,
             close_window_queued: false,
             fonts_initialized: false,
+        };
+
+        if launch_project_idx.is_some() {
+            app.load_selected_project_with_launcher(launch_config.as_ref());
+        }
+
+        app
+    }
+
+    fn ensure_default_project(projects: &mut Vec<ProjectEntry>) {
+        if projects.is_empty() {
+            projects.push(ProjectEntry {
+                name: "DEFAULT".to_string(),
+                file: project::make_project_file_name("DEFAULT", 0),
+            });
+            let _ = project::save_index(projects);
+        }
+    }
+
+    fn apply_launcher_config(config: &mut AppConfig, launch_config: &LauncherConfig) {
+        config
+            .beat_config
+            .set_values(launch_config.bpm(), launch_config.latency_comp_ms());
+        if !launch_config.input_device.is_empty() {
+            config.system_config.input_device.value = launch_config.input_device.clone();
+        }
+        if !launch_config.output_device.is_empty() {
+            config.system_config.output_device.value = launch_config.output_device.clone();
         }
     }
 
@@ -124,6 +165,10 @@ impl MyApp {
     }
 
     fn load_selected_project(&mut self) {
+        self.load_selected_project_with_launcher(None);
+    }
+
+    fn load_selected_project_with_launcher(&mut self, launch_config: Option<&LauncherConfig>) {
         if self.sel_project_idx >= self.projects.len() {
             return;
         }
@@ -141,6 +186,9 @@ impl MyApp {
         let entry = self.projects[self.sel_project_idx].clone();
         if let Some(data) = project::load_project(&entry) {
             project::apply_data_to_config(&mut self.config, data);
+        }
+        if let Some(launch_config) = launch_config {
+            Self::apply_launcher_config(&mut self.config, launch_config);
         }
         self.active_project_idx = Some(self.sel_project_idx);
         self.app_state = AppState::MainLoop;

@@ -32,6 +32,7 @@ src/
     input_fx.rs         Input FX runtime and processing
     track_fx.rs         Track FX runtime and processing
     metronome.rs        beat timing
+  app_support/          shared app paths and launcher startup config
   dsp/                  envelope/filter/osc/reverb/delay/roll/my_delay/note
   project.rs            save/load project index and per-project JSON
   bin/
@@ -112,11 +113,11 @@ The project also includes a companion launcher (`rc505_launcher.exe`) that helps
 - **Audio Device Setup** — scan and select input/output devices before launch
 - **Project Manager** — create, rename, and delete projects from a GUI
 - **Session Presets** — pre-configure BPM (30-300) and latency compensation (0-500 ms)
-- **One-Click Launch** — launches `rc505_rs.exe` with your saved preferences
+- **One-Click Launch** — launches `rc505_rs.exe`, applies saved preferences, and opens the selected project
 
 **Usage:**
 
-Place `rc505_launcher.exe` in the same directory as `rc505_rs.exe`, then double-click the launcher. Select your audio devices and project, then click **Launch RC505** to start.
+Place `rc505_launcher.exe` in the same directory as `rc505_rs.exe`, then double-click the launcher. Select your audio devices and project, then click **Launch RC505** to open that project in the main app.
 
 You can also build both binaries from source:
 
