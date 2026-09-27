@@ -22,7 +22,8 @@ Windows x64 安装包可以分别选择程序、数据、下载目录。数据�
 | 五轨推子下/上 | `Z X`、`C V`、`B N`、`M ,`、`. /` |
 | 逐轨调整推子变化速度 | `Shift` + 对应推子键 |
 | 顶部 / 左面板 / 右面板 | `F6` / `A或F7` / `D或F8` |
-| 返回演奏 / 帮助 / 录制回放 | `Esc` / `F12` / `F9` |
+| 返回演奏，再返回工程 / 帮助 / 录制回放 | `Esc` / `F12` / `F9` |
+| 清空所选轨 | 长按 `Delete` 0.75 秒，或 350 ms 内双击 |
 
 推子短按0.5 dB，长按180 ms后逐渐加速；每轨速度1–60 dB/s。支持多键独立控制。参数/文本编辑与演奏键隔离，完整快捷键见内置帮助。
 
@@ -53,3 +54,5 @@ cargo run --bin rc505_rs -- --offline --data-dir=var/development
 修改版本号、推送main和对应 `v版本` tag 后，GitHub Actions验证并发布安装包、ZIP、SHA-256与更新清单。安装版 **F12 → Updates** 检查更新，保存音频快照后正常退出再安装。详见[发布通路](docs/INSTALL_UPDATE_CN.md)。FFmpeg不是本版依赖。
 
 [架构](docs/ARCHITECTURE.md) · [验证](docs/VALIDATION.md) · [硬件对照](docs/RC505_REFERENCE.md) · [开发约定](AGENTS.md)
+
+顶部 **中文 / EN** 可即时切换语言并记住设置。灰底键帽表示快捷键；`F6` 进入顶部栏。返回工程会先提示保存。

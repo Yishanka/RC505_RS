@@ -55,12 +55,15 @@ impl EditorState {
 }
 
 pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
     let Some(target) = app.editor.target else {
         theme::card().show(ui, |ui| {
-            ui.heading("Shape your next loop");
+            ui.heading(lang.text("Shape your next loop"));
             theme::caption(
                 ui,
-                "Select an FX slot below to edit. Expand opens a full sound-design workspace.",
+                lang.text(
+                    "Select an FX slot below to edit. Expand opens a full sound-design workspace.",
+                ),
             );
         });
         return;
@@ -68,36 +71,38 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
     let beats = app.beats();
     theme::card().show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new(target.label()).color(theme::ACCENT).strong());
+            let (bank,slot) = match target { FxTarget::Input{bank,slot}|FxTarget::Track{bank,slot}=>(bank,slot) };
+            let target_text=format!("{} / {} / {}",lang.text(if matches!(target,FxTarget::Input{..}) {"INPUT FX"} else {"TRACK FX"}),bank+1,['A','B','C','D'][slot]);
+            ui.label(egui::RichText::new(target_text).color(theme::ACCENT).strong());
             match target {
-                FxTarget::Input {bank,slot} => { super::navigation::register(ui.checkbox(&mut app.config.input_fx.banks[bank].slots[slot].is_enabled,"Enabled")); }
+                FxTarget::Input {bank,slot} => { super::navigation::register(ui.checkbox(&mut app.config.input_fx.banks[bank].slots[slot].is_enabled,lang.text("Enabled"))); }
                 FxTarget::Track {bank,slot} => {
                     let index = app.track_sel.unwrap_or(0);
-                    super::navigation::register(ui.checkbox(&mut app.config.track_fx.tracks[index].enabled[bank][slot],format!("Track {} enabled",index+1)));
+                    super::navigation::register(ui.checkbox(&mut app.config.track_fx.tracks[index].enabled[bank][slot],format!("{} {} · {}",lang.text("Track"),index+1,lang.text("Enabled"))));
                 }
             }
             if full {
-                if ui.button("Back to performance   Esc").clicked() { app.editor.expanded = false; }
-            } else if super::navigation::button(ui,"Expand  Enter").clicked() { app.editor.expanded = true; }
-            if super::navigation::register(ui.selectable_label(app.previewing, "Sequence preview")).on_hover_text("Run the sequencer clock without recording. Oscillator threshold still applies; use 0 for ungated preview.").clicked() { app.toggle_preview(); }
+                if theme::action(ui, theme::Icon::Back, lang.text("Back to performance"), "Esc").clicked() { app.editor.expanded = false; }
+            } else if super::navigation::register(theme::action(ui, theme::Icon::Expand, lang.text("Expand"), "")).clicked() { app.editor.expanded = true; }
+            if super::navigation::register(ui.selectable_label(app.previewing, lang.text("Sequence preview"))).on_hover_text(lang.text("Run the sequencer clock without recording. Oscillator threshold still applies; use 0 for ungated preview.")).clicked() { app.toggle_preview(); }
         });
         let active = match target { FxTarget::Input{bank,..}=>bank==app.config.input_fx.sel_bank_idx, FxTarget::Track{bank,..}=>bank==app.config.track_fx.sel_bank_idx };
         if !active {
             ui.horizontal(|ui| {
-                theme::caption(ui,"Editing an inactive bank.");
-                if ui.button("Activate this bank").clicked() { match target {FxTarget::Input{bank,..}=>app.config.input_fx.select_bank(bank),FxTarget::Track{bank,..}=>app.config.track_fx.select_bank(bank)} }
+                theme::caption(ui,lang.text("Editing an inactive bank."));
+                if ui.button(lang.text("Activate this bank")).clicked() { match target {FxTarget::Input{bank,..}=>app.config.input_fx.select_bank(bank),FxTarget::Track{bank,..}=>app.config.track_fx.select_bank(bank)} }
             });
         }
         if full {
             ui.horizontal_wrapped(|ui| {
-                ui.label("Preset");
-                ui.add(egui::TextEdit::singleline(&mut app.editor.preset_name).hint_text("Name for a new preset").desired_width(180.0));
-                if ui.button("Save as new").clicked() {
+                ui.label(lang.text("Preset"));
+                ui.add(egui::TextEdit::singleline(&mut app.editor.preset_name).hint_text(lang.text("Name for a new preset")).desired_width(180.0));
+                if ui.button(lang.text("Save as new")).clicked() {
                     app.editor.message = match presets::save(&app.config, target, &app.editor.preset_name) {
-                        Ok(()) => { app.editor.presets = presets::list(); "Preset saved".into() }, Err(e) => e.to_string()
+                        Ok(()) => { app.editor.presets = presets::list(); lang.text("Preset saved").into() }, Err(e) => e.to_string()
                     };
                 }
-                egui::ComboBox::from_id_source("load_preset").selected_text("Load preset…").show_ui(ui, |ui| {
+                egui::ComboBox::from_id_source("load_preset").selected_text(lang.text("Load preset…")).show_ui(ui, |ui| {
                     for name in app.editor.presets.clone() {
                         if ui.selectable_label(false, &name).clicked() {
                             app.editor.message = match presets::load(&mut app.config, target, &name) {
@@ -116,13 +121,13 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
             let synth = matches!(target, FxTarget::Input { bank, slot } if matches!(app.config.input_fx.banks[bank].slots[slot].fx, Some(InputFx::Oscillator(_)|InputFx::MyDelay(_))));
             if full && synth {
                 ui.horizontal_wrapped(|ui| {
-                    for (page,label) in [(EditorPage::Sound,"Sound"),(EditorPage::Sequence,"Piano roll"),(EditorPage::Envelope,"Amp envelope"),(EditorPage::Filter,"Filter"),(EditorPage::FilterEnvelope,"Filter envelope")] {
+                    for (page,label) in [(EditorPage::Sound,lang.text("Sound")),(EditorPage::Sequence,lang.text("Piano roll")),(EditorPage::Envelope,lang.text("Amp envelope")),(EditorPage::Filter,lang.text("Filter")),(EditorPage::FilterEnvelope,lang.text("Filter envelope"))] {
                         ui.selectable_value(&mut app.editor.page,page,label);
                     }
                 });
                 ui.separator();
             }
-            if !full && synth && super::navigation::button(ui,"Open piano roll").clicked() {
+            if !full && synth && super::navigation::button(ui,lang.text("Open piano roll")).clicked() {
                 app.editor.page = EditorPage::Sequence; app.editor.expanded = true;
             }
             let page = if full { app.editor.page } else { EditorPage::Sound };
@@ -130,11 +135,11 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
                 FxTarget::Input { bank, slot } => {
                     if let Some(fx) = app.config.input_fx.banks[bank].slots[slot].fx.as_mut() {
                         input_parameters(ui, fx, page, &mut app.editor.piano, beats, full);
-                    } else { theme::caption(ui, "Choose an effect type, then enable the slot in the rack."); }
+                    } else { theme::caption(ui, lang.text("Choose an effect type, then enable the slot in the rack.")); }
                 }
                 FxTarget::Track { bank, slot } => {
                     if let Some(fx) = app.config.track_fx.banks[bank].slots[slot].fx.as_mut() { track_parameters(ui,fx,full); }
-                    else { theme::caption(ui, "Choose a playback effect. Enable it independently for each track."); }
+                    else { theme::caption(ui, lang.text("Choose a playback effect. Enable it independently for each track.")); }
                 }
             }
         });
@@ -142,6 +147,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
 }
 
 fn kind_picker(ui: &mut egui::Ui, config: &mut AppConfig, target: FxTarget) -> bool {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
     match target {
         FxTarget::Input { bank, slot } => {
             let previous = config.input_fx.slot_kind(bank, slot);
@@ -151,12 +157,12 @@ fn kind_picker(ui: &mut egui::Ui, config: &mut AppConfig, target: FxTarget) -> b
                 "kind",
                 &mut kind,
                 &[
-                    (FxKind::None, "Empty"),
-                    (FxKind::Oscillator, "Oscillator"),
-                    (FxKind::Filter, "Filter"),
-                    (FxKind::Reverb, "Reverb"),
-                    (FxKind::MyDelay, "MyDelay"),
-                    (FxKind::Vocoder, "Vocoder"),
+                    (FxKind::None, lang.text("Empty")),
+                    (FxKind::Oscillator, lang.text("Oscillator")),
+                    (FxKind::Filter, lang.text("Filter")),
+                    (FxKind::Reverb, lang.text("Reverb")),
+                    (FxKind::MyDelay, lang.text("MyDelay")),
+                    (FxKind::Vocoder, lang.text("Vocoder")),
                 ],
             );
             if kind != previous {
@@ -172,10 +178,10 @@ fn kind_picker(ui: &mut egui::Ui, config: &mut AppConfig, target: FxTarget) -> b
                 "kind",
                 &mut kind,
                 &[
-                    (TrackFxKind::None, "Empty"),
-                    (TrackFxKind::Delay, "Delay"),
-                    (TrackFxKind::Roll, "Roll"),
-                    (TrackFxKind::Filter, "Filter"),
+                    (TrackFxKind::None, lang.text("Empty")),
+                    (TrackFxKind::Delay, lang.text("Delay")),
+                    (TrackFxKind::Roll, lang.text("Roll")),
+                    (TrackFxKind::Filter, lang.text("Filter")),
                 ],
             );
             if kind != previous {
@@ -214,6 +220,7 @@ fn input_parameters(
     beats: Option<f64>,
     full: bool,
 ) {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
     match fx {
         InputFx::Oscillator(osc) => match page {
             EditorPage::Sequence => piano_roll::draw(ui, &mut osc.note, piano, beats),
@@ -248,7 +255,7 @@ fn input_parameters(
                     choice(ui, &mut delay.note.octave);
                     theme::caption(
                         ui,
-                        "Captures a short input fragment and repeats it at the selected pitch. This custom effect needs incoming audio.",
+                        lang.text("Captures a short input fragment and repeats it at the selected pitch. This custom effect needs incoming audio."),
                     );
                 }
             }
@@ -286,7 +293,7 @@ fn input_parameters(
                 );
                 theme::caption(
                     ui,
-                    "Diffusion + FDN reverb / HighCut is damping %, LowCut is Hz / Decay is RT60.",
+                    lang.text("Diffusion + FDN reverb / High cut in Hz / Decay is RT60."),
                 );
             }
         }
@@ -311,31 +318,34 @@ fn input_parameters(
                     VOCODER_RELEASE_MAX_MS,
                     false,
                 );
-                ui.add(egui::Slider::new(&mut vocoder.tone, -50..=50).text("Tone"));
-                ui.add(egui::Slider::new(&mut vocoder.mod_sens, -50..=50).text("Mod sensitivity"));
+                ui.add(egui::Slider::new(&mut vocoder.tone, -50..=50).text(lang.text("Tone")));
+                ui.add(
+                    egui::Slider::new(&mut vocoder.mod_sens, -50..=50)
+                        .text(lang.text("Mod sensitivity")),
+                );
                 ui.add(
                     egui::Slider::new(&mut vocoder.formant_semitones, -12..=12)
-                        .text("Formant (semitones)"),
+                        .text(lang.text("Formant (semitones)")),
                 );
                 number(ui, &mut vocoder.sibilance, 0, 100, false);
                 if vocoder.carrier.value.track_idx().is_none() {
                     ui.checkbox(
                         &mut vocoder.carrier_thru,
-                        "Carrier thru (dry carrier channel)",
+                        lang.text("Carrier thru (dry carrier channel)"),
                     );
                     theme::caption(
                         ui,
-                        "Stereo input: carrier on selected channel, voice on the other. One stereo device, not two independent devices.",
+                        lang.text("Stereo input: carrier on selected channel, voice on the other. One stereo device, not two independent devices."),
                     );
                 } else {
                     theme::caption(
                         ui,
-                        "Record a harmonically rich carrier to the selected track. A paused carrier follows the running timeline without playing dry.",
+                        lang.text("Record a harmonically rich carrier to the selected track. A paused carrier follows the running timeline without playing dry."),
                     );
                 }
                 theme::caption(
                     ui,
-                    "Formant moves the spectral envelope; carrier pitch is preserved. Sibilance emphasizes upper analysis bands.",
+                    lang.text("Formant moves the spectral envelope; carrier pitch is preserved. Sibilance emphasizes upper analysis bands."),
                 );
             }
         }
@@ -343,6 +353,7 @@ fn input_parameters(
 }
 
 fn track_parameters(ui: &mut egui::Ui, fx: &mut TrackFx, full: bool) {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
     match fx {
         TrackFx::Delay(delay) => {
             use crate::config::delay_configs::*;
@@ -396,28 +407,28 @@ fn track_parameters(ui: &mut egui::Ui, fx: &mut TrackFx, full: bool) {
                 });
                 theme::caption(
                     ui,
-                    "Captures recent audio including preceding Track FX. Division shortens the frozen slice; Off repeats the full cycle using Feedback / Repeat. Repeat 0 = infinite.",
+                    lang.text("Captures recent audio including preceding Track FX. Division shortens the frozen slice; Off repeats the full cycle using Feedback / Repeat. Repeat 0 = infinite."),
                 );
                 theme::caption(
                     ui,
-                    "With no recent history, capture waits for one slice. Toggle the slot off/on to capture again. Sync time is limited to the 2 s capture buffer.",
+                    lang.text("With no recent history, capture waits for one slice. Toggle the slot off/on to capture again. Sync time is limited to the 2 s capture buffer."),
                 );
             }
         }
         TrackFx::Filter(filter) => {
             parameters::filter(ui, &mut filter.filter, full);
             if full {
-                egui::CollapsingHeader::new("Step gate sequencer")
+                egui::CollapsingHeader::new(lang.text("Step gate sequencer"))
                     .default_open(true)
                     .show(ui, |ui| {
                         choice(ui, &mut filter.seq.step);
                         ui.horizontal(|ui| {
-                            if ui.button("Append step").clicked() {
+                            if ui.button(lang.text("Append step")).clicked() {
                                 filter.seq.edit.value =
                                     crate::config::seq_configs::TrackSeqEdit::Push;
                                 filter.seq.apply_edit();
                             }
-                            if ui.button("Remove last").clicked() {
+                            if ui.button(lang.text("Remove last")).clicked() {
                                 filter.seq.edit.value =
                                     crate::config::seq_configs::TrackSeqEdit::Pop;
                                 filter.seq.apply_edit();

@@ -1,4 +1,4 @@
-// src/main.rs
+#![cfg_attr(windows, windows_subsystem = "windows")]
 mod app;
 mod app_support;
 mod config;
@@ -26,7 +26,7 @@ fn main() -> eframe::Result<()> {
         }
         return Ok(());
     }
-    let small = std::env::args().any(|arg| arg == "--ui-preview=performance-small");
+    let small = std::env::args().any(|arg| arg.starts_with("--ui-preview=performance-small"));
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_icon(ui::theme::window_icon())

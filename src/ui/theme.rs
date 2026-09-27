@@ -11,6 +11,7 @@ pub fn apply(ctx: &egui::Context) {
     style.visuals = egui::Visuals::dark();
     style.visuals.panel_fill = BACKGROUND;
     style.visuals.window_fill = PANEL;
+    style.visuals.override_text_color = Some(Color32::from_rgb(215, 224, 236));
     style.visuals.extreme_bg_color = BACKGROUND;
     style.visuals.selection.bg_fill = Color32::from_rgb(37, 94, 86);
     style.visuals.selection.stroke = egui::Stroke::new(1.0, ACCENT);
@@ -99,4 +100,270 @@ pub fn brand(ui: &mut egui::Ui) {
 pub fn window_icon() -> egui::IconData {
     eframe::icon_data::from_png_bytes(include_bytes!("../../assets/rc505-rs-icon-v1-256.png"))
         .expect("Bundled RC505 RS icon is invalid")
+}
+
+pub fn language_switch(
+    ui: &mut egui::Ui,
+    language: &mut crate::app_support::language::Language,
+) -> egui::Response {
+    use crate::app_support::language::Language;
+    let label = if *language == Language::Chinese {
+        "中文 / EN"
+    } else {
+        "EN / 中文"
+    };
+    let mut response = ui
+        .button(label)
+        .on_hover_text("切换界面语言 / Switch interface language");
+    if response.clicked() {
+        *language = if *language == Language::Chinese {
+            Language::English
+        } else {
+            Language::Chinese
+        };
+        language.apply(ui.ctx());
+        response.mark_changed();
+    }
+    response
+}
+
+/// Keycaps are hints, not additional clickable controls.
+pub fn keycap(ui: &mut egui::Ui, key: &str) {
+    egui::Frame::none()
+        .fill(Color32::from_rgb(53, 61, 74))
+        .rounding(4.0)
+        .inner_margin(egui::vec2(5.0, 2.0))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(key)
+                    .monospace()
+                    .size(12.0)
+                    .color(Color32::from_gray(220)),
+            );
+        });
+}
+
+#[derive(Clone, Copy)]
+pub enum Icon {
+    Play,
+    Stop,
+    Record,
+    Back,
+    Undo,
+    Redo,
+    Trash,
+    Save,
+    Expand,
+    Help,
+    None,
+}
+
+/// Standard egui button behavior (mouse, Enter, focus, accessibility) with
+/// separate action and shortcut paint; icons never depend on a symbol font.
+pub fn action(ui: &mut egui::Ui, icon: Icon, label: &str, key: &str) -> egui::Response {
+    let text = ui.painter().layout_no_wrap(
+        label.into(),
+        egui::FontId::proportional(15.0),
+        ui.visuals().text_color(),
+    );
+    let cap = ui.painter().layout_no_wrap(
+        key.into(),
+        egui::FontId::monospace(12.0),
+        Color32::from_gray(224),
+    );
+    let icon_width = if matches!(icon, Icon::None) {
+        0.0
+    } else {
+        22.0
+    };
+    let key_width = if key.is_empty() {
+        0.0
+    } else {
+        cap.size().x + 18.0
+    };
+    let width = text.size().x + icon_width + key_width + 20.0;
+    let response = ui.add(egui::Button::new("").min_size(egui::vec2(width, 34.0)));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, label));
+    if ui.is_rect_visible(response.rect) {
+        let color = if ui.is_enabled() {
+            ui.visuals().text_color()
+        } else {
+            MUTED
+        };
+        let center = egui::pos2(response.rect.left() + 17.0, response.rect.center().y);
+        let stroke = egui::Stroke::new(1.5, color);
+        let p = ui.painter();
+        match icon {
+            Icon::Undo | Icon::Redo => {
+                let direction = if matches!(icon, Icon::Redo) {
+                    -1.0
+                } else {
+                    1.0
+                };
+                let point = |x: f32, y: f32| center + egui::vec2(x * direction, y);
+                p.add(egui::Shape::line(
+                    vec![
+                        point(-5.0, -2.0),
+                        point(0.0, -5.0),
+                        point(5.0, -2.0),
+                        point(5.0, 3.0),
+                        point(1.0, 6.0),
+                        point(-2.0, 5.0),
+                    ],
+                    stroke,
+                ));
+                p.add(egui::Shape::line(
+                    vec![point(-5.0, -6.0), point(-5.0, -2.0), point(-1.0, -2.0)],
+                    stroke,
+                ));
+            }
+            Icon::Play => {
+                p.add(egui::Shape::convex_polygon(
+                    vec![
+                        center + egui::vec2(-5.0, -6.0),
+                        center + egui::vec2(6.0, 0.0),
+                        center + egui::vec2(-5.0, 6.0),
+                    ],
+                    ACCENT,
+                    egui::Stroke::NONE,
+                ));
+            }
+            Icon::Stop => {
+                p.rect_filled(
+                    egui::Rect::from_center_size(center, egui::vec2(10.0, 10.0)),
+                    1.0,
+                    color,
+                );
+            }
+            Icon::Record => {
+                p.circle_filled(center, 5.0, Color32::from_rgb(255, 109, 118));
+            }
+            Icon::Back => {
+                p.line_segment(
+                    [
+                        center + egui::vec2(-6.0, 0.0),
+                        center + egui::vec2(6.0, 0.0),
+                    ],
+                    stroke,
+                );
+                p.add(egui::Shape::line(
+                    vec![
+                        center + egui::vec2(-1.0, -5.0),
+                        center + egui::vec2(-6.0, 0.0),
+                        center + egui::vec2(-1.0, 5.0),
+                    ],
+                    stroke,
+                ));
+            }
+            Icon::Trash => {
+                p.rect_stroke(
+                    egui::Rect::from_center_size(
+                        center + egui::vec2(0.0, 2.0),
+                        egui::vec2(9.0, 10.0),
+                    ),
+                    1.0,
+                    stroke,
+                );
+                p.line_segment(
+                    [
+                        center + egui::vec2(-7.0, -5.0),
+                        center + egui::vec2(7.0, -5.0),
+                    ],
+                    stroke,
+                );
+                p.line_segment(
+                    [
+                        center + egui::vec2(-2.0, -7.0),
+                        center + egui::vec2(2.0, -7.0),
+                    ],
+                    stroke,
+                );
+            }
+            Icon::Save => {
+                p.rect_stroke(
+                    egui::Rect::from_center_size(center, egui::vec2(12.0, 14.0)),
+                    1.0,
+                    stroke,
+                );
+                p.line_segment(
+                    [
+                        center + egui::vec2(-3.0, 2.0),
+                        center + egui::vec2(3.0, 2.0),
+                    ],
+                    stroke,
+                );
+            }
+            Icon::Expand => {
+                p.rect_stroke(
+                    egui::Rect::from_center_size(center, egui::vec2(13.0, 11.0)),
+                    1.0,
+                    stroke,
+                );
+            }
+            Icon::Help => {
+                p.circle_stroke(center, 7.0, stroke);
+                p.text(
+                    center,
+                    egui::Align2::CENTER_CENTER,
+                    "?",
+                    egui::FontId::proportional(13.0),
+                    color,
+                );
+            }
+            Icon::None => {}
+        }
+        p.galley(
+            egui::pos2(
+                response.rect.left() + 10.0 + icon_width,
+                response.rect.center().y - text.size().y / 2.0,
+            ),
+            text,
+            color,
+        );
+        if !key.is_empty() {
+            let rect = egui::Rect::from_center_size(
+                egui::pos2(
+                    response.rect.right() - 10.0 - (cap.size().x + 10.0) / 2.0,
+                    response.rect.center().y,
+                ),
+                cap.size() + egui::vec2(10.0, 5.0),
+            );
+            p.rect_filled(rect, 4.0, Color32::from_rgb(53, 61, 74));
+            p.galley(rect.min + egui::vec2(5.0, 2.5), cap, color);
+        }
+    }
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn action_button_accepts_enter_with_separate_keycap() {
+        let ctx = egui::Context::default();
+        let mut clicked = false;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                action(ui, Icon::Back, "Projects", "Esc").request_focus();
+            });
+        });
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    clicked = action(ui, Icon::Back, "Projects", "Esc").clicked();
+                });
+            },
+        );
+        assert!(clicked);
+    }
 }

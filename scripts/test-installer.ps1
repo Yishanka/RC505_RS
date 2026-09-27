@@ -19,6 +19,11 @@ foreach ($attempt in 1..2) {
     $setup.WaitForExit()
     if ($setup.ExitCode -ne 0) {throw "Silent install without import failed (attempt $attempt); see $testRoot"}
     if ((Get-FileHash -LiteralPath $marker -Algorithm SHA256).Hash -ne $before) {throw 'Installer changed user data.'}
+    foreach ($binary in @('rc505_rs.exe','rc505_launcher.exe')) {
+        $bytes=[IO.File]::ReadAllBytes((Join-Path $program $binary))
+        $peOffset=[BitConverter]::ToInt32($bytes,0x3c)
+        if ([BitConverter]::ToUInt16($bytes,$peOffset+24+68) -ne 2) {throw "$binary must use the Windows GUI subsystem, without a startup console."}
+    }
     $info=& (Join-Path $program 'rc505_rs.exe') --installation-info | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0 -or $info.version -ne $Version -or $info.data_dir -ne $data -or $info.download_dir -ne $downloads) {throw 'Installed version or data paths do not match.'}
 }
@@ -35,7 +40,7 @@ $previousModulePath=$env:PSModulePath
 try {
     # Reproduce launching from a shell with an incompatible module environment.
     $env:PSModulePath=Join-Path $testRoot 'foreign-shell-modules'
-    & (Join-Path $program 'rc505_rs.exe') ("--cleanup-update-cache="+$candidate)
+    & (Join-Path $program 'rc505_rs.exe') ("--cleanup-update-cache="+$candidate) | Out-Null
     if ($LASTEXITCODE -ne 0) {throw 'Installer cache finalization failed.'}
 } finally {$env:PSModulePath=$previousModulePath}
 $latest=Join-Path $downloads 'RC505-RS-setup.exe'

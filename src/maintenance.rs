@@ -3,6 +3,24 @@ use anyhow::{Context, Result, ensure};
 use std::{fs, path::Path};
 pub fn cli() -> Option<Result<()>> {
     let args: Vec<_> = std::env::args().collect();
+    if args.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "--version"
+                | "--installation-info"
+                | "--verify-data"
+                | "--check-update"
+                | "--download-update"
+        ) || [
+            "--migrate-data=",
+            "--install-update=",
+            "--cleanup-update-cache=",
+        ]
+        .iter()
+        .any(|prefix| a.starts_with(prefix))
+    }) {
+        attach_parent_console();
+    }
     if args.iter().any(|a| a == "--version") {
         println!("RC505 RS {}", env!("CARGO_PKG_VERSION"));
         return Some(Ok(()));
@@ -85,6 +103,23 @@ pub fn cli() -> Option<Result<()>> {
         )));
     }
     None
+}
+
+/// GUI launches never allocate a console. Explicit maintenance commands may
+/// reuse the calling terminal; redirected installer/CI pipes remain untouched.
+fn attach_parent_console() {
+    #[cfg(windows)]
+    unsafe {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetStdHandle(kind: u32) -> *mut std::ffi::c_void;
+            fn AttachConsole(pid: u32) -> i32;
+        }
+        let stdout = GetStdHandle(-11i32 as u32);
+        if stdout.is_null() || stdout as isize == -1 {
+            AttachConsole(u32::MAX);
+        }
+    }
 }
 pub fn migrate(source: &Path, destination: &Path) -> Result<usize> {
     let source = source.canonicalize()?;

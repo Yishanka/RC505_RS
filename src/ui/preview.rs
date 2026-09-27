@@ -9,6 +9,10 @@ use crate::{
 };
 
 pub fn configure(app: &mut MyApp, mode: &str) {
+    let mode = mode.strip_suffix("-en").unwrap_or(mode);
+    if std::env::args().any(|a| a.ends_with("-en")) {
+        app.language = crate::app_support::language::Language::English;
+    }
     if mode == "projects" {
         return;
     }
@@ -38,7 +42,11 @@ pub fn configure(app: &mut MyApp, mode: &str) {
         osc.envelope.release_ms.value = 300;
     }
     app.editor.select(FxTarget::Input { bank: 0, slot: 0 });
-    app.editor.expanded = !mode.starts_with("performance");
+    app.editor.expanded = !mode.starts_with("performance") && mode != "help";
+    if mode == "help" {
+        app.help_open = true;
+        app.help_tab = 2;
+    }
     if mode == "vocoder" {
         app.editor.select(FxTarget::Input { bank: 0, slot: 2 });
     }

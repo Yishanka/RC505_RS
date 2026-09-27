@@ -6,6 +6,8 @@ const DEFAULT_LATENCY_COMP_MS: usize = 85;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LauncherConfig {
+    #[serde(default)]
+    pub language: super::language::Language,
     #[serde(default = "default_buffer")]
     pub buffer_frames: u32,
     pub input_device: String,
@@ -31,6 +33,7 @@ impl LauncherConfig {
 impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
+            language: super::language::Language::default(),
             buffer_frames: 128,
             input_device: String::new(),
             output_device: String::new(),

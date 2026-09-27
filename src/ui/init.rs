@@ -3,6 +3,7 @@ use crate::{app::MyApp, state::ProjectNameMode};
 use eframe::egui;
 
 pub fn draw_init(ui: &mut egui::Ui, app: &mut MyApp) {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
     let width = ui.available_width().min(760.0);
     let margin = ((ui.available_width() - width) * 0.5).max(0.0);
     ui.add_space((ui.available_height() * 0.08).min(65.0));
@@ -13,14 +14,15 @@ pub fn draw_init(ui: &mut egui::Ui, app: &mut MyApp) {
             ui.horizontal(|ui| {
                 theme::brand(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Help  F12").clicked() {
+                    app.language_switch(ui);
+                    if theme::action(ui, theme::Icon::Help, lang.text("Help"), "F12").clicked() {
                         app.help_open = true;
                     }
                 });
             });
             ui.add_space(16.0);
-            ui.heading("Choose your project");
-            theme::caption(ui, "↑ ↓ select · Enter opens · N creates");
+            ui.heading(lang.text("Choose your project"));
+            theme::caption(ui, lang.text("↑ ↓ select · Enter opens · N creates"));
             ui.add_space(12.0);
             theme::card().show(ui, |ui| {
                 egui::ScrollArea::vertical()
@@ -49,28 +51,28 @@ pub fn draw_init(ui: &mut egui::Ui, app: &mut MyApp) {
                     if ui
                         .add_enabled(
                             !app.busy() && !app.projects.is_empty(),
-                            egui::Button::new("Open project  Enter"),
+                            egui::Button::new(lang.text("Open project")).shortcut_text("Enter"),
                         )
                         .clicked()
                     {
                         app.open_project(app.sel_project_idx);
                     }
-                    if ui.button("+ New").clicked() {
+                    if theme::action(ui, theme::Icon::None, lang.text("New"), "N").clicked() {
                         app.project_name_mode = Some(ProjectNameMode::Add);
                         app.project_name_input.clear();
                     }
-                    if ui.button("Rename").clicked() {
+                    if ui.button(lang.text("Rename")).clicked() {
                         if let Some(entry) = app.projects.get(app.sel_project_idx) {
                             app.project_name_input = entry.name.clone();
                             app.project_name_mode = Some(ProjectNameMode::Rename);
                         }
                     }
-                    ui.menu_button("Manage", |ui| {
-                        if ui.button("Move selected to Trash").clicked() {
+                    ui.menu_button(lang.text("Manage"), |ui| {
+                        if ui.button(lang.text("Move selected to Trash")).clicked() {
                             app.trash_project();
                             ui.close_menu();
                         }
-                        if ui.button("Restore last deleted").clicked() {
+                        if ui.button(lang.text("Restore last deleted")).clicked() {
                             app.restore_project();
                             ui.close_menu();
                         }
@@ -78,13 +80,13 @@ pub fn draw_init(ui: &mut egui::Ui, app: &mut MyApp) {
                 });
             });
             ui.add_space(12.0);
-            ui.add(egui::Label::new(&app.status).wrap(true));
+            ui.add(egui::Label::new(lang.text(&app.status)).wrap(true));
             theme::caption(ui, app.audio_status());
             if let Some(mode) = app.project_name_mode {
                 egui::Window::new(if mode == ProjectNameMode::Add {
-                    "New project"
+                    lang.text("New project")
                 } else {
-                    "Rename project"
+                    lang.text("Rename project")
                 })
                 .collapsible(false)
                 .resizable(false)
@@ -92,19 +94,19 @@ pub fn draw_init(ui: &mut egui::Ui, app: &mut MyApp) {
                 .show(ui.ctx(), |ui| {
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut app.project_name_input)
-                            .hint_text("Project name")
+                            .hint_text(lang.text("Project name"))
                             .desired_width(340.0),
                     );
                     if !response.has_focus() {
                         response.request_focus();
                     }
                     ui.horizontal(|ui| {
-                        if ui.button("Confirm").clicked()
+                        if ui.button(lang.text("Confirm")).clicked()
                             || ui.input(|i| i.key_pressed(egui::Key::Enter))
                         {
                             app.create_project();
                         }
-                        if ui.button("Cancel").clicked()
+                        if ui.button(lang.text("Cancel")).clicked()
                             || ui.input(|i| i.key_pressed(egui::Key::Escape))
                         {
                             app.project_name_mode = None;

@@ -196,40 +196,43 @@ pub fn draw(
     state: &mut PianoRollState,
     elapsed_beats: Option<f64>,
 ) {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
     let before = Snapshot::capture(config);
     let mut history_action = false;
     ui.horizontal_wrapped(|ui| {
-        ui.strong("PIANO ROLL");
+        ui.strong(lang.text("PIANO ROLL"));
         let snap_name = match state.snap {
             1 => "1/48",
-            2 => "1/24 triplet",
+            2 => lang.text("1/24 triplet"),
             3 => "1/16",
-            4 => "1/12 triplet",
+            4 => lang.text("1/12 triplet"),
             6 => "1/8",
             _ => "1/4",
         };
         egui::ComboBox::from_id_source("snap")
-            .selected_text(format!("Snap: {snap_name}"))
+            .selected_text(format!("{}: {snap_name}", lang.text("Snap")))
             .show_ui(ui, |ui| {
                 for (ticks, name) in [
                     (1, "1/48"),
-                    (2, "1/24 triplet"),
+                    (2, lang.text("1/24 triplet")),
                     (3, "1/16"),
-                    (4, "1/12 triplet"),
+                    (4, lang.text("1/12 triplet")),
                     (6, "1/8"),
                     (12, "1/4"),
                 ] {
                     ui.selectable_value(&mut state.snap, ticks, name);
                 }
             });
-        ui.label("View octave");
+        ui.label(lang.text("View octave"));
         ui.add(egui::DragValue::new(&mut state.octave).clamp_range(0..=7));
-        ui.add(egui::Slider::new(&mut state.zoom, 4.0..=24.0).text("Zoom"));
+        ui.add(egui::Slider::new(&mut state.zoom, 4.0..=24.0).text(lang.text("Zoom")));
         let mut bars = config.seq().len().max(1).div_ceil(TICKS_PER_BAR);
-        ui.label("Bars");
+        ui.label(lang.text("Bars"));
         if ui
             .add(egui::DragValue::new(&mut bars).clamp_range(1..=8))
-            .on_hover_text("Resize the loop; shortening trims notes. Undo restores them.")
+            .on_hover_text(
+                lang.text("Resize the loop; shortening trims notes. Undo restores them."),
+            )
             .changed()
         {
             config.replace_events(bars * TICKS_PER_BAR, &config.events());
@@ -237,24 +240,27 @@ pub fn draw(
     });
     ui.horizontal_wrapped(|ui| {
         if ui
-            .add_enabled(!state.undo.is_empty(), egui::Button::new("Undo"))
+            .add_enabled(!state.undo.is_empty(), egui::Button::new(lang.text("Undo")))
             .clicked()
         {
             state.undo(config);
             history_action = true;
         }
         if ui
-            .add_enabled(!state.redo.is_empty(), egui::Button::new("Redo"))
+            .add_enabled(!state.redo.is_empty(), egui::Button::new(lang.text("Redo")))
             .clicked()
         {
             state.redo(config);
             history_action = true;
         }
-        if ui.button("Copy pattern").clicked() {
+        if ui.button(lang.text("Copy pattern")).clicked() {
             state.clipboard = Some(Snapshot::capture(config));
         }
         if ui
-            .add_enabled(state.clipboard.is_some(), egui::Button::new("Paste"))
+            .add_enabled(
+                state.clipboard.is_some(),
+                egui::Button::new(lang.text("Paste")),
+            )
             .clicked()
         {
             state.clipboard.as_ref().unwrap().restore(config);
@@ -262,7 +268,7 @@ pub fn draw(
         if ui
             .add_enabled(
                 !config.seq().is_empty() && config.seq().len() * 2 <= MAX_TICKS,
-                egui::Button::new("Duplicate"),
+                egui::Button::new(lang.text("Duplicate")),
             )
             .clicked()
         {
@@ -271,20 +277,22 @@ pub fn draw(
         for (label, amount) in [("−12", -12), ("−1", -1), ("+1", 1), ("+12", 12)] {
             if ui
                 .button(label)
-                .on_hover_text("Transpose the entire pattern in semitones")
+                .on_hover_text(lang.text("Transpose the entire pattern in semitones"))
                 .clicked()
             {
                 config.transpose(amount);
             }
         }
-        if ui.button("Clear notes").clicked() {
+        if ui.button(lang.text("Clear notes")).clicked() {
             config.replace_events(config.seq().len(), &[]);
             state.selected = None;
         }
         if ui
-            .button("Starter melody")
+            .button(lang.text("Starter melody"))
             .on_hover_text(
-                "Replace with a one-bar C-minor phrase; Undo restores the previous pattern",
+                lang.text(
+                    "Replace with a one-bar C-minor phrase; Undo restores the previous pattern",
+                ),
             )
             .clicked()
         {
@@ -326,11 +334,11 @@ pub fn draw(
     {
         ui.horizontal(|ui| {
             ui.set_min_height(24.0);
-            ui.label(format!("Selected {}", event.pitch));
+            ui.label(format!("{} {}", lang.text("Selected"), event.pitch));
             let old = event;
-            ui.label("Start tick");
+            ui.label(lang.text("Start tick"));
             ui.add(egui::DragValue::new(&mut event.start).clamp_range(0..=MAX_TICKS - 1));
-            ui.label("Length");
+            ui.label(lang.text("Length"));
             ui.add(egui::DragValue::new(&mut event.len).clamp_range(1..=MAX_TICKS - event.start));
             if event != old {
                 let before = Snapshot::capture(config);
@@ -343,12 +351,12 @@ pub fn draw(
     } else {
         ui.horizontal(|ui| {
             ui.set_min_height(24.0);
-            theme::caption(ui, "Select a note to edit its start and length.");
+            theme::caption(ui, lang.text("Select a note to edit its start and length."));
         });
     }
     theme::caption(
         ui,
-        "Left click: draw / select  •  Drag: move  •  Drag right edge: resize  •  Right click / Delete: erase  •  Ctrl+Z / Ctrl+Y  •  Monophonic",
+        lang.text("Left click: draw / select  •  Drag: move  •  Drag right edge: resize  •  Right click / Delete: erase  •  Ctrl+Z / Ctrl+Y  •  Monophonic"),
     );
     let length = config.seq().len().max(TICKS_PER_BAR);
     let row_height = 18.0;

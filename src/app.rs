@@ -1,4 +1,5 @@
 mod actions;
+pub(crate) mod clear_gesture;
 pub mod faders;
 mod keyboard;
 mod performance_keys;
@@ -108,7 +109,8 @@ pub struct MyApp {
     _editor_lock: Option<File>,
     pub read_only: bool,
     pub held_fx: [Option<HeldFx>; 8],
-    pub clear_held: f32,
+    pub clear_gesture: clear_gesture::ClearGesture,
+    pub language: crate::app_support::language::Language,
     pub update: Option<crate::updater::Release>,
     pub update_installer: Option<PathBuf>,
     update_after_save: bool,
@@ -119,6 +121,7 @@ pub struct MyApp {
 impl MyApp {
     pub fn new() -> Self {
         let launch = crate::app_support::launcher_config::load();
+        let language = launch.as_ref().map(|v| v.language).unwrap_or_default();
         let buffer_frames = launch.as_ref().map(|v| v.buffer_frames()).unwrap_or(128);
         let mut config = AppConfig::new(120, 85, 5);
         if !std::env::args().any(|v| v == "--offline") {
@@ -216,7 +219,8 @@ impl MyApp {
             _editor_lock: lock,
             read_only,
             held_fx: [None; 8],
-            clear_held: 0.0,
+            clear_gesture: clear_gesture::ClearGesture::default(),
+            language,
             update: None,
             update_installer: None,
             update_after_save: false,
@@ -230,6 +234,17 @@ impl MyApp {
             || self.take_pending
             || self.reconnecting
             || self.audio.diagnostics.calibrating.load(Ordering::Relaxed)
+    }
+    pub fn language_switch(&mut self, ui: &mut egui::Ui) {
+        if ui::navigation::register(ui::theme::language_switch(ui, &mut self.language)).changed()
+            && !self.read_only
+        {
+            let mut preferences = crate::app_support::launcher_config::load().unwrap_or_default();
+            preferences.language = self.language;
+            if let Err(error) = crate::app_support::launcher_config::save(&preferences) {
+                self.status = format!("Cannot save language preference: {error}");
+            }
+        }
     }
     pub fn performance_locked(&self) -> bool {
         self.engine_transition
@@ -460,6 +475,8 @@ impl eframe::App for MyApp {
         }
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let lang = self.language;
+        self.language.apply(ctx);
         #[cfg(debug_assertions)]
         if let Some(mode) =
             std::env::args().find_map(|a| a.strip_prefix("--ui-preview=").map(str::to_owned))
@@ -490,15 +507,15 @@ impl eframe::App for MyApp {
         ui::help::draw(ctx, self);
         ui::replays::draw(ctx, self);
         if self.show_save_prompt {
-            egui::Window::new("Save before leaving").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER,egui::Vec2::ZERO).show(ctx,|ui|{
-                ui.label("Choose what to keep in this project.");
+            egui::Window::new(lang.text("Save before leaving")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER,egui::Vec2::ZERO).show(ctx,|ui|{
+                ui.label(lang.text("Choose what to keep in this project."));
                 ui.add_enabled_ui(!self.busy(),|ui|{
-                    if ui.button("Save configuration and audio snapshot").clicked(){self.exit_after_save=true;self.save_snapshot();}
-                    if ui.button("Save configuration only").clicked(){self.exit_after_save=true;self.save_now();}
-                    ui.label("Configuration only keeps the previous saved audio, not the current loops.");
+                    if ui.button(lang.text("Save configuration and audio snapshot")).clicked(){self.exit_after_save=true;self.save_snapshot();}
+                    if ui.button(lang.text("Save configuration only")).clicked(){self.exit_after_save=true;self.save_now();}
+                    ui.label(lang.text("Configuration only keeps the previous saved audio, not the current loops."));
                     ui.horizontal(|ui|{
-                        if ui.button("Discard session changes").clicked(){self.finish_exit();}
-                        if ui.button("Cancel  Esc").clicked(){self.show_save_prompt=false;self.pending_exit=None;}
+                        if ui.button(lang.text("Discard session changes")).clicked(){self.finish_exit();}
+                        if ui::theme::action(ui, ui::theme::Icon::Back, lang.text("Cancel"), "Esc").clicked(){self.show_save_prompt=false;self.pending_exit=None;}
                     });
                 });ui.label(&self.status);
             });

@@ -9,6 +9,7 @@ use eframe::egui::{self, Color32, Stroke};
 use std::sync::atomic::Ordering;
 
 pub fn draw(ui: &mut egui::Ui, app: &mut MyApp) {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
     transport(ui, app);
     ui.add_space(6.0);
     if app.editor.expanded {
@@ -25,8 +26,8 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp) {
                 fixed_panel(&mut columns[0], app, Focus::Left, |ui, app| left(ui, app));
                 fixed_panel(&mut columns[1], app, Focus::Right, |ui, app| {
                     ui.horizontal(|ui| {
-                        ui.strong("FX EDITOR");
-                        theme::caption(ui, "D / F8");
+                        ui.strong(lang.text("FX EDITOR"));
+                        theme::keycap(ui, "D / F8");
                     });
                     editor::draw(ui, app, false);
                 });
@@ -84,14 +85,34 @@ fn fixed_panel(
     });
 }
 fn transport(ui: &mut egui::Ui, app: &mut MyApp) {
+    use theme::Icon;
+    let lang = crate::app_support::language::Language::current(ui.ctx());
     let request = app.focus == Focus::Transport && app.focus_request;
     nav::begin(ui, Focus::Transport, request);
     if request {
         app.focus_request = false;
     }
-    ui.horizontal_wrapped(|ui| {
+    ui.horizontal(|ui| {
         theme::brand(ui);
         ui.separator();
+        theme::caption(ui, lang.text("Top controls"));
+        theme::keycap(ui, "F6");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            app.language_switch(ui);
+            if nav::register(theme::action(ui, Icon::Help, lang.text("Help"), "F12")).clicked() {
+                app.help_open = true;
+            }
+            if nav::register(theme::action(ui, Icon::Back, lang.text("Projects"), "Esc"))
+                .on_hover_text(
+                    lang.text("Esc: editor → performance → project browser (save prompt)."),
+                )
+                .clicked()
+            {
+                app.back_to_projects();
+            }
+        });
+    });
+    ui.horizontal_wrapped(|ui| {
         ui.label("BPM");
         nav::register(
             ui.add_enabled(
@@ -101,53 +122,57 @@ fn transport(ui: &mut egui::Ui, app: &mut MyApp) {
                     .speed(0.2),
             ),
         );
-        if nav::register(ui.add_enabled(app.stopped(), egui::Button::new("Tap T"))).clicked() {
-            app.config.beat_config.tap_calc.calculate_avg_bpm();
-            app.config.beat_config.input_bpm.value = app.config.beat_config.tap_calc.value;
-        }
-        if nav::button(ui, "All  Space").clicked() {
+        ui.add_enabled_ui(app.stopped(), |ui| {
+            if nav::register(theme::action(ui, Icon::None, lang.text("Tap tempo"), "T")).clicked() {
+                app.config.beat_config.tap_calc.calculate_avg_bpm();
+                app.config.beat_config.input_bpm.value = app.config.beat_config.tap_calc.value;
+            }
+        });
+        if nav::register(theme::action(
+            ui,
+            Icon::Play,
+            lang.text("Start / stop all"),
+            "Space",
+        ))
+        .clicked()
+        {
             app.toggle_all();
         }
-        ui.menu_button("Save", |ui| {
-            if ui.button("Configuration  Ctrl+S").clicked() {
+        let menu = ui.menu_button(lang.text("Save"), |ui| {
+            if theme::action(ui, Icon::Save, lang.text("Configuration"), "Ctrl+S").clicked() {
                 app.save_now();
                 ui.close_menu();
             }
-            if ui.button("Configuration + audio  Ctrl+Shift+S").clicked() {
+            if theme::action(
+                ui,
+                Icon::Save,
+                lang.text("Configuration + audio"),
+                "Ctrl+Shift+S",
+            )
+            .clicked()
+            {
                 app.save_snapshot();
                 ui.close_menu();
             }
         });
+        nav::register(menu.response);
         let taking = app.taking();
-        if nav::register(
-            ui.add_enabled(
-                !app.busy(),
-                egui::Button::new(if taking {
-                    "End take  F9"
+        ui.add_enabled_ui(!app.busy(), |ui| {
+            if nav::register(theme::action(
+                ui,
+                if taking { Icon::Stop } else { Icon::Record },
+                lang.text(if taking { "End take" } else { "Record take" }),
+                "F9",
+            ))
+            .clicked()
+            {
+                if taking {
+                    app.finish_take();
                 } else {
-                    "Record take  F9"
-                })
-                .fill(if taking {
-                    Color32::from_rgb(132, 43, 61)
-                } else {
-                    Color32::from_rgb(37, 45, 58)
-                }),
-            ),
-        )
-        .clicked()
-        {
-            if taking {
-                app.finish_take();
-            } else {
-                app.start_take();
+                    app.start_take();
+                }
             }
-        }
-        if nav::button(ui, "Projects").clicked() {
-            app.back_to_projects();
-        }
-        if nav::button(ui, "Help  F12").clicked() {
-            app.help_open = true;
-        }
+        });
     });
     nav::end(ui);
     ui.allocate_ui_with_layout(
@@ -156,62 +181,70 @@ fn transport(ui: &mut egui::Ui, app: &mut MyApp) {
         |ui| {
             theme::caption(ui, app.project_name());
             ui.separator();
-            let mode = match app.focus {
-                Focus::Performance => "Performance",
-                Focus::Transport => "Top controls · F6",
-                Focus::Left => "Left controls · A / F7",
-                Focus::Right => "FX controls · D / F8",
-            };
-            theme::caption(ui, mode);
+            theme::caption(
+                ui,
+                match app.focus {
+                    Focus::Performance => lang.text("Performance"),
+                    Focus::Transport => lang.text("Top controls"),
+                    Focus::Left => lang.text("Left controls"),
+                    Focus::Right => lang.text("FX controls"),
+                },
+            );
             let message = if app.status.is_empty() {
                 app.audio_status()
             } else {
                 app.status.clone()
             };
             ui.add(
-                egui::Label::new(egui::RichText::new(&message).size(13.0).color(theme::MUTED))
-                    .truncate(true),
+                egui::Label::new(
+                    egui::RichText::new(lang.text(&message))
+                        .size(13.0)
+                        .color(theme::MUTED),
+                )
+                .truncate(true),
             )
-            .on_hover_text(message);
+            .on_hover_text(lang.text(&message));
         },
     );
 }
+
 fn left(ui: &mut egui::Ui, app: &mut MyApp) {
-    ui.horizontal(|ui| {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
+    ui.horizontal_wrapped(|ui| {
         for (page, label) in [
-            (LeftPage::Track, "Track"),
-            (LeftPage::Audio, "Audio"),
-            (LeftPage::Session, "Session"),
+            (LeftPage::Track, lang.text("Track")),
+            (LeftPage::Audio, lang.text("Audio")),
+            (LeftPage::Session, lang.text("Session")),
         ] {
             nav::register(ui.selectable_value(&mut app.left_page, page, label));
         }
-        theme::caption(ui, "A / F7");
+        theme::keycap(ui, "A / F7");
     });
     ui.separator();
     match app.left_page {
         LeftPage::Track => {
             let index = app.track_sel.unwrap_or(0);
-            ui.strong(format!("TRACK {}", index + 1));
+            ui.strong(format!("{} {}", lang.text("Track"), index + 1));
             let options = &mut app.config.track_options[index];
             ui.add_enabled_ui(
                 !matches!(app.view.tracks[index].mode, Mode::Recording | Mode::Overdub),
                 |ui| {
-                    ui.horizontal(|ui| {
-                        nav::register(ui.checkbox(&mut options.reverse, "Reverse"));
-                        nav::register(ui.checkbox(&mut options.one_shot, "One shot"));
+                    ui.horizontal_wrapped(|ui| {
+                        nav::register(ui.checkbox(&mut options.reverse, lang.text("Reverse")));
+                        nav::register(ui.checkbox(&mut options.one_shot, lang.text("One shot")));
                     });
                 },
             );
-            ui.horizontal(|ui| {
-                ui.label("Stop");
+            ui.horizontal_wrapped(|ui| {
+                ui.label(lang.text("Stop"));
                 parameters::selector(
                     ui,
                     "stop-mode",
                     &mut options.stop_mode,
                     &[
-                        (StopMode::Immediate, "Immediate"),
-                        (StopMode::LoopEnd, "Loop end"),
-                        (StopMode::Fade, "Fade out"),
+                        (StopMode::Immediate, lang.text("Immediate")),
+                        (StopMode::LoopEnd, lang.text("Loop end")),
+                        (StopMode::Fade, lang.text("Fade out")),
                     ],
                 );
                 nav::register(
@@ -223,28 +256,30 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
                     ),
                 );
             });
-            ui.horizontal(|ui|{
-                ui.label("Quantize");parameters::selector(ui,"quantize",&mut options.quantize,&[(Quantize::Off,"Off"),(Quantize::Beat,"Beat"),(Quantize::Measure,"Measure"),(Quantize::Loop,"Loop")]);
-                ui.label("Length");nav::register(ui.add(egui::DragValue::new(&mut options.measures).clamp_range(0..=128).suffix(" bars"))).on_hover_text("0 = finish manually; 1–128 = fixed length in 4/4. Maximum audio length is five minutes.");
+            ui.horizontal_wrapped(|ui|{
+                ui.label(lang.text("Quantize"));parameters::selector(ui,"quantize",&mut options.quantize,&[(Quantize::Off,lang.text("Off")),(Quantize::Beat,lang.text("Beat")),(Quantize::Measure,lang.text("Measure")),(Quantize::Loop,lang.text("Loop"))]);
+                ui.label(lang.text("Length"));nav::register(ui.add(egui::DragValue::new(&mut options.measures).clamp_range(0..=128).suffix(" bars"))).on_hover_text(lang.text("0 = finish manually; 1–128 = fixed length in 4/4. Maximum audio length is five minutes."));
             });
             theme::caption(
                 ui,
-                "0 bars = manual finish · Reverse / One shot disable overdub",
+                lang.text("0 bars = manual finish · Reverse / One shot disable overdub"),
             );
-            ui.horizontal(|ui| {
-                if nav::register(ui.add_enabled(
-                    app.view.tracks[index].undo || app.view.tracks[index].redo,
-                    egui::Button::new(if app.view.tracks[index].redo {
-                        "Redo  Ctrl+Y"
-                    } else {
-                        "Undo  Ctrl+Z"
-                    }),
-                ))
-                .clicked()
-                {
-                    app.undo_track(index);
-                }
-                if nav::button(ui, "Expand selected FX").clicked() {
+            ui.horizontal_wrapped(|ui| {
+                let redo = app.view.tracks[index].redo;
+                ui.add_enabled_ui(app.view.tracks[index].undo || redo, |ui| {
+                    if nav::register(theme::action(
+                        ui,
+                        theme::Icon::None,
+                        lang.text(if redo { "Redo" } else { "Undo" }),
+                        if redo { "Ctrl+Y" } else { "Ctrl+Z" },
+                    ))
+                    .clicked()
+                    {
+                        app.undo_track(index);
+                    }
+                });
+                clear_button(ui, app, index);
+                if nav::button(ui, lang.text("Expand selected FX")).clicked() {
                     app.editor.expanded = true;
                 }
             });
@@ -252,8 +287,8 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
         LeftPage::Audio => {
             parameters::choice(ui, &mut app.config.system_config.input_device);
             parameters::choice(ui, &mut app.config.system_config.output_device);
-            ui.horizontal(|ui| {
-                ui.label("Buffer");
+            ui.horizontal_wrapped(|ui| {
+                ui.label(lang.text("Buffer"));
                 nav::register(
                     egui::ComboBox::from_id_source("buffer-frames")
                         .selected_text(format!("{} frames", app.buffer_frames))
@@ -270,7 +305,7 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
                 );
                 if nav::register(ui.add_enabled(
                     app.stopped() && !app.busy() && !app.taking(),
-                    egui::Button::new("Reconnect"),
+                    egui::Button::new(lang.text("Reconnect")),
                 ))
                 .clicked()
                 {
@@ -293,12 +328,12 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
             );
             theme::caption(
                 ui,
-                "Loopback: connect output L to input L; disconnect speakers. Monitoring is muted during probes.",
+                lang.text("Loopback: connect output L to input L; disconnect speakers. Monitoring is muted during probes."),
             );
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if nav::register(ui.add_enabled(
                     app.stopped() && app.audio.online && !app.taking(),
-                    egui::Button::new("Measure loopback"),
+                    egui::Button::new(lang.text("Measure loopback")),
                 ))
                 .clicked()
                 {
@@ -321,41 +356,41 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
         }
         LeftPage::Session => {
             ui.strong(app.project_name());
-            ui.horizontal(|ui| {
-                if nav::button(ui, "Save configuration").clicked() {
+            ui.horizontal_wrapped(|ui| {
+                if nav::button(ui, lang.text("Save configuration")).clicked() {
                     app.save_now();
                 }
-                if nav::button(ui, "Save audio snapshot").clicked() {
+                if nav::button(ui, lang.text("Save audio snapshot")).clicked() {
                     app.save_snapshot();
                 }
             });
-            ui.horizontal(|ui| {
-                ui.label("Input FX order");
+            ui.horizontal_wrapped(|ui| {
+                ui.label(lang.text("Input FX order"));
                 nav::register(
                     egui::ComboBox::from_id_source("routing")
                         .selected_text(match app.config.input_routing {
-                            InputRouting::Legacy => "Legacy groups",
-                            InputRouting::Serial => "Slot A → D",
+                            InputRouting::Legacy => lang.text("Legacy groups"),
+                            InputRouting::Serial => lang.text("Slot A → D"),
                         })
                         .show_ui(ui, |ui| {
                             ui.selectable_value(
                                 &mut app.config.input_routing,
                                 InputRouting::Legacy,
-                                "Legacy groups",
+                                lang.text("Legacy groups"),
                             );
                             ui.selectable_value(
                                 &mut app.config.input_routing,
                                 InputRouting::Serial,
-                                "Slot A → D",
+                                lang.text("Slot A → D"),
                             );
                         })
                         .response,
                 );
             });
-            if nav::button(ui, "Replay library & import").clicked() {
+            if nav::button(ui, lang.text("Replay library & import")).clicked() {
                 app.replay_browser = true;
             }
-            if nav::button(ui, "Signal flow and operation guide").clicked() {
+            if nav::button(ui, lang.text("Signal flow and operation guide")).clicked() {
                 app.help_open = true;
                 app.help_tab = 1;
             }
@@ -384,6 +419,7 @@ fn db(value: f32) -> f32 {
     20.0 * value.max(1e-5).log10()
 }
 fn rack(ui: &mut egui::Ui, app: &mut MyApp, track_fx: bool) {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
     theme::card().inner_margin(10.0).show(ui, |ui| {
         let mut bank = if track_fx {
             app.config.track_fx.sel_bank_idx
@@ -397,12 +433,15 @@ fn rack(ui: &mut egui::Ui, app: &mut MyApp, track_fx: bool) {
                 } else {
                     theme::ACCENT
                 },
-                if track_fx { "TRACK FX" } else { "INPUT FX" },
+                if track_fx {
+                    lang.text("TRACK FX")
+                } else {
+                    lang.text("INPUT FX")
+                },
             );
             for i in 0..4 {
                 ui.selectable_value(&mut bank, i, format!("{}", i + 1));
             }
-            theme::caption(ui, if track_fx { "U I O P" } else { "Q W E R" });
         });
         if track_fx {
             app.config.track_fx.select_bank(bank);
@@ -426,7 +465,7 @@ fn rack(ui: &mut egui::Ui, app: &mut MyApp, track_fx: bool) {
                         [column.available_width(), 29.0],
                         egui::SelectableLabel::new(
                             app.editor.target == Some(target),
-                            format!("{} {name}", ['A', 'B', 'C', 'D'][slot]),
+                            format!("{} {}", ['A', 'B', 'C', 'D'][slot], lang.text(name)),
                         ),
                     )
                     .clicked()
@@ -439,21 +478,35 @@ fn rack(ui: &mut egui::Ui, app: &mut MyApp, track_fx: bool) {
                 } else {
                     &mut app.config.input_fx.banks[bank].slots[slot].is_enabled
                 };
-                column.add_enabled(name != "Empty", egui::Checkbox::new(enabled, "On"));
+                column.horizontal(|ui| {
+                    ui.add_enabled(
+                        name != "Empty",
+                        egui::Checkbox::new(enabled, lang.text("On")),
+                    );
+                    theme::keycap(
+                        ui,
+                        if track_fx {
+                            ["U", "I", "O", "P"][slot]
+                        } else {
+                            ["Q", "W", "E", "R"][slot]
+                        },
+                    );
+                });
             }
         });
-        theme::caption(ui, "Shift: hold effect · Alt: bank · Ctrl: edit");
+        theme::caption(ui, lang.text("Shift: hold effect · Alt: bank · Ctrl: edit"));
     });
 }
 fn track(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
     let view = app.view.tracks[index];
     let selected = app.track_sel == Some(index);
     let (state, color) = match view.mode {
-        Mode::Empty => ("EMPTY", theme::MUTED),
-        Mode::Recording => ("RECORDING", Color32::from_rgb(255, 109, 118)),
-        Mode::Overdub => ("OVERDUB", Color32::from_rgb(255, 196, 106)),
-        Mode::Playing => ("PLAYING", theme::ACCENT),
-        Mode::Stopped => ("STOPPED", theme::MUTED),
+        Mode::Empty => (lang.text("EMPTY"), theme::MUTED),
+        Mode::Recording => (lang.text("RECORDING"), Color32::from_rgb(255, 109, 118)),
+        Mode::Overdub => (lang.text("OVERDUB"), Color32::from_rgb(255, 196, 106)),
+        Mode::Playing => (lang.text("PLAYING"), theme::ACCENT),
+        Mode::Stopped => (lang.text("STOPPED"), theme::MUTED),
     };
     theme::card()
         .inner_margin(10.0)
@@ -466,25 +519,29 @@ fn track(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
             },
         ))
         .show(ui, |ui| {
-            if ui.ctx().screen_rect().height() < 800.0 {
-                ui.spacing_mut().item_spacing.y = 4.0;
-            }
+            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.spacing_mut().button_padding.x = 6.0;
             if ui
                 .selectable_label(
                     selected,
-                    egui::RichText::new(format!("TRACK {}", index + 1)).strong(),
+                    egui::RichText::new(format!("{} {}", lang.text("Track"), index + 1)).strong(),
                 )
                 .clicked()
             {
                 app.track_sel = Some(index);
             }
             ui.label(
-                egui::RichText::new(if view.pending { "QUEUED" } else { state })
-                    .size(13.0)
-                    .color(color),
+                egui::RichText::new(if view.pending {
+                    lang.text("QUEUED")
+                } else {
+                    state
+                })
+                .size(13.0)
+                .color(color),
             );
             let (rect, _) = ui
-                .allocate_exact_size(egui::vec2(ui.available_width(), 48.0), egui::Sense::hover());
+                .allocate_exact_size(egui::vec2(ui.available_width(), 36.0), egui::Sense::hover());
             ui.painter().rect_filled(rect, 5.0, theme::BACKGROUND);
             for (bin, amplitude) in view.wave.iter().enumerate() {
                 let x = rect.left() + bin as f32 / 24.0 * rect.width();
@@ -515,9 +572,12 @@ fn track(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
                 app.config.track_levels[index] = crate::app::faders::gain(level);
             }
             let keys = ["Z / X", "C / V", "B / N", "M / ,", ". / /"][index];
-            ui.label(format!("{level:.1} dB   {keys}"));
             ui.horizontal(|ui| {
-                ui.label("Speed");
+                ui.label(format!("{level:.1} dB"));
+                theme::keycap(ui, keys);
+            });
+            ui.horizontal(|ui| {
+                ui.label(lang.text("Speed"));
                 ui.add(
                     egui::DragValue::new(&mut app.config.track_options[index].fader_speed)
                         .clamp_range(1.0..=60.0)
@@ -525,40 +585,110 @@ fn track(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
                         .suffix(" dB/s"),
                 );
             });
-            theme::caption(ui, format!("Shift + {keys}: speed"));
+            theme::keycap(ui, &format!("Shift + {keys}"));
             let action = match view.mode {
-                Mode::Empty => "Record",
-                Mode::Stopped => "Play",
-                Mode::Recording | Mode::Overdub => "Finish",
-                Mode::Playing if app.config.track_options[index].one_shot => "Retrigger",
-                _ => "Overdub",
+                Mode::Empty => lang.text("Record"),
+                Mode::Stopped => lang.text("Play"),
+                Mode::Recording | Mode::Overdub => lang.text("Finish"),
+                Mode::Playing if app.config.track_options[index].one_shot => lang.text("Retrigger"),
+                _ => lang.text("Overdub"),
             };
-            if ui
-                .add_sized(
-                    [ui.available_width(), 34.0],
-                    egui::Button::new(format!("{action}  {}", index + 1)),
-                )
-                .clicked()
-            {
+            let icon = match view.mode {
+                Mode::Empty | Mode::Playing => theme::Icon::Record,
+                Mode::Stopped => theme::Icon::Play,
+                _ => theme::Icon::Stop,
+            };
+            if theme::action(ui, icon, lang.text(action), &format!("{}", index + 1)).clicked() {
                 app.trigger_track(index);
             }
             ui.horizontal(|ui| {
-                if ui.button(format!("Stop  F{}", index + 1)).clicked() {
+                if theme::action(
+                    ui,
+                    theme::Icon::None,
+                    lang.text("Stop"),
+                    &format!("F{}", index + 1),
+                )
+                .on_hover_text(format!("Shift+{}", index + 1))
+                .clicked()
+                {
                     app.pause_track(index);
                 }
-                if ui
-                    .add_enabled(
-                        view.undo || view.redo,
-                        egui::Button::new(if view.redo { "Redo" } else { "Undo" }),
+                ui.add_enabled_ui(view.undo || view.redo, |ui| {
+                    if theme::action(
+                        ui,
+                        if view.redo {
+                            theme::Icon::Redo
+                        } else {
+                            theme::Icon::Undo
+                        },
+                        "",
+                        "",
                     )
+                    .on_hover_text(format!(
+                        "{} · Alt+{}",
+                        lang.text(if view.redo { "Redo" } else { "Undo" }),
+                        index + 1
+                    ))
                     .clicked()
-                {
-                    app.undo_track(index);
-                }
+                    {
+                        app.undo_track(index);
+                    }
+                });
             });
-            if selected && app.clear_held > 0.0 && app.clear_held < 1.0 {
-                ui.painter()
-                    .rect_stroke(rect, 5.0, Stroke::new(2.0, Color32::LIGHT_RED));
+            if selected {
+                ui.add(
+                    egui::ProgressBar::new(app.clear_gesture.progress)
+                        .desired_height(4.0)
+                        .fill(Color32::LIGHT_RED),
+                );
+            } else {
+                ui.add_space(8.0);
             }
         });
+}
+
+fn clear_button(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
+    let response = nav::register(theme::action(ui, theme::Icon::Trash, lang.text("Clear audio"), "Del"))
+        .on_hover_text(format!("{}\n{}", lang.text("Hold Delete for 0.75 s or double-press within 350 ms. Clears the selected track and its undo audio."), lang.text("Click twice within 350 ms, or hold for 0.75 s. Release to cancel a hold.")));
+    let id = response.id.with("clear-gesture");
+    let mut gesture = ui
+        .ctx()
+        .data(|d| d.get_temp::<crate::app::clear_gesture::ClearGesture>(id))
+        .unwrap_or_default();
+    let button_focused = response.has_focus();
+    let (now, down, pressed, focused) = ui.input(|i| {
+        (
+            i.time,
+            response.is_pointer_button_down_on() || button_focused && i.key_down(egui::Key::Enter),
+            response.contains_pointer() && i.pointer.button_pressed(egui::PointerButton::Primary)
+                || button_focused
+                    && i.events.iter().any(|e| {
+                        matches!(
+                            e,
+                            egui::Event::Key {
+                                key: egui::Key::Enter,
+                                pressed: true,
+                                repeat: false,
+                                ..
+                            }
+                        )
+                    }),
+            i.focused,
+        )
+    });
+    if focused {
+        if gesture.update(index, down, pressed, now) {
+            app.clear_track(index);
+        }
+    } else {
+        gesture.cancel();
+    }
+    if gesture.progress > 0.0 {
+        let mut rect = response.rect;
+        rect.set_width(rect.width() * gesture.progress);
+        ui.painter()
+            .rect_stroke(rect, 4.0, Stroke::new(2.0, Color32::LIGHT_RED));
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(id, gesture));
 }

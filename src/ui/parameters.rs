@@ -7,10 +7,11 @@ use crate::dsp::envelope::{AhdsrParams, AhdsrState};
 use eframe::egui::{self, Color32, Stroke, pos2};
 
 pub fn number(ui: &mut egui::Ui, config: &mut NumericConfig, min: usize, max: usize, log: bool) {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
     if super::navigation::register(
         ui.add(
             egui::Slider::new(&mut config.value, min..=max)
-                .text(&config.label)
+                .text(lang.text(&config.label))
                 .logarithmic(log),
         ),
     )
@@ -24,12 +25,26 @@ pub fn choice<T: Clone + PartialEq + std::fmt::Display>(
     ui: &mut egui::Ui,
     config: &mut EnumConfig<T>,
 ) {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
     ui.horizontal(|ui| {
         let response = egui::ComboBox::from_id_source(&config.label)
-            .selected_text(config.value.to_string())
+            .selected_text(if config.label.ends_with("Device") {
+                config.value.to_string()
+            } else {
+                lang.text(&config.value.to_string()).to_owned()
+            })
             .show_ui(ui, |ui| {
                 for value in &config.options {
-                    ui.selectable_value(&mut config.value, value.clone(), value.to_string());
+                    let label = value.to_string();
+                    ui.selectable_value(
+                        &mut config.value,
+                        value.clone(),
+                        if config.label.ends_with("Device") {
+                            &label
+                        } else {
+                            lang.text(&label)
+                        },
+                    );
                 }
             })
             .response;
@@ -42,7 +57,7 @@ pub fn choice<T: Clone + PartialEq + std::fmt::Display>(
                 config.next();
             }
         }
-        ui.label(&config.label);
+        ui.label(lang.text(&config.label));
     });
 }
 
@@ -52,13 +67,14 @@ pub fn selector<T: Copy + PartialEq>(
     value: &mut T,
     options: &[(T, &str)],
 ) -> bool {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
     let previous = *value;
     let index = options.iter().position(|(v, _)| v == value).unwrap_or(0);
     let response = egui::ComboBox::from_id_source(id)
-        .selected_text(options[index].1)
+        .selected_text(lang.text(options[index].1))
         .show_ui(ui, |ui| {
             for (option, label) in options {
-                ui.selectable_value(value, *option, *label);
+                ui.selectable_value(value, *option, lang.text(label));
             }
         })
         .response;
@@ -76,6 +92,7 @@ pub fn selector<T: Copy + PartialEq>(
 }
 
 pub fn filter(ui: &mut egui::Ui, config: &mut FilterConfigs, full: bool) {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
     choice(ui, &mut config.filter_type);
     number(
         ui,
@@ -96,7 +113,7 @@ pub fn filter(ui: &mut egui::Ui, config: &mut FilterConfigs, full: bool) {
     if full {
         theme::caption(
             ui,
-            "FILTER RESPONSE / steady-state, 48 kHz • drag to set cutoff and resonance",
+            lang.text("FILTER RESPONSE / steady-state, 48 kHz • drag to set cutoff and resonance"),
         );
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), 210.0),
@@ -149,7 +166,7 @@ pub fn filter(ui: &mut egui::Ui, config: &mut FilterConfigs, full: bool) {
             .add(egui::Shape::line(points, Stroke::new(2.0, theme::ACCENT)));
         theme::caption(
             ui,
-            "Linear response includes dry/wet; drive and envelope motion are not shown.",
+            lang.text("Linear response includes dry/wet; drive and envelope motion are not shown."),
         );
     }
 }

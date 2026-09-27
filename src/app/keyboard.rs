@@ -26,6 +26,8 @@ impl MyApp {
             && !self.editor.expanded
             && !self.help_open
             && !self.player_open
+            && !self.replay_browser
+            && self.draft.is_none()
             && self.focus == Focus::Performance
             && self.app_state == AppState::MainLoop
             && !self.show_save_prompt
@@ -53,7 +55,7 @@ impl MyApp {
         if !performance {
             self.fader_keys.fill(faders::KeyFader::default());
             self.speed_keys.fill(faders::KeyFader::default());
-            self.clear_held = 0.0;
+            self.clear_gesture.cancel();
         }
         if !input.focused {
             return;
@@ -82,6 +84,15 @@ impl MyApp {
             if pressed(&input, Key::Escape) {
                 self.close_player();
             }
+            return;
+        }
+        if self.replay_browser {
+            if pressed(&input, Key::Escape) {
+                self.replay_browser = false;
+            }
+            return;
+        }
+        if self.draft.is_some() {
             return;
         }
         if self.app_state == AppState::Init {
@@ -137,8 +148,12 @@ impl MyApp {
             return;
         }
         if pressed(&input, Key::Escape) {
-            self.editor.expanded = false;
-            self.focus_panel(ctx, Focus::Performance);
+            if self.editor.expanded || self.focus != Focus::Performance || text {
+                self.editor.expanded = false;
+                self.focus_panel(ctx, Focus::Performance);
+            } else {
+                self.back_to_projects();
+            }
             return;
         }
         if !text && pressed(&input, Key::F9) {
@@ -173,6 +188,23 @@ impl MyApp {
         if !performance {
             return;
         }
+        let selected = self.track_sel.unwrap_or(0);
+        if input.modifiers.is_none()
+            && !pressed(&input, Key::ArrowLeft)
+            && !pressed(&input, Key::ArrowRight)
+            && !input.pointer.any_pressed()
+        {
+            if self.clear_gesture.update(
+                selected,
+                input.key_down(Key::Delete),
+                pressed(&input, Key::Delete),
+                input.time,
+            ) {
+                self.clear_track(selected);
+            }
+        } else {
+            self.clear_gesture.cancel();
+        }
         let numbers = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5];
         for (index, key) in numbers.into_iter().enumerate() {
             if pressed(&input, key) {
@@ -197,15 +229,6 @@ impl MyApp {
             {
                 self.undo_track(index);
             }
-            if input.key_down(Key::Delete) {
-                self.clear_held += input.stable_dt.min(0.05);
-                if self.clear_held >= 0.75 && self.clear_held < 10.0 {
-                    self.clear_track(index);
-                    self.clear_held = 10.0;
-                }
-            } else {
-                self.clear_held = 0.0;
-            }
             for (index, key) in fx_keys.into_iter().enumerate() {
                 if pressed(&input, key) {
                     let slot = index % 4;
@@ -226,7 +249,6 @@ impl MyApp {
             }
             return;
         }
-        self.clear_held = 0.0;
         if pressed(&input, Key::Space) {
             if input.modifiers.shift {
                 self.action(Action::Panic);
@@ -238,7 +260,7 @@ impl MyApp {
             .into_iter()
             .enumerate()
         {
-            if pressed(&input, key) {
+            if pressed(&input, key) && !input.modifiers.alt {
                 self.pause_track(index);
             }
         }

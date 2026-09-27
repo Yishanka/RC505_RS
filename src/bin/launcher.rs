@@ -1,3 +1,4 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
 //! Optional audio preflight. Project management belongs to the main application.
 use cpal::traits::{DeviceTrait, HostTrait};
 use eframe::egui;
@@ -84,6 +85,8 @@ impl Launcher {
 }
 impl eframe::App for Launcher {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.config.language.apply(ctx);
+        let lang = crate::app_support::language::Language::current(ctx);
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
         #[cfg(debug_assertions)]
         if std::env::args().any(|a| a == "--ui-preview=launcher") {
@@ -94,14 +97,20 @@ impl eframe::App for Launcher {
             capture::capture(ctx, "launcher", &mut self.frame);
         }
         egui::CentralPanel::default().show(ctx,|ui|{
-            ui.add_space(16.0);ui.horizontal(|ui|{theme::brand(ui);theme::caption(ui,"AUDIO SETUP");});ui.add_space(20.0);
+            ui.add_space(16.0);ui.horizontal(|ui|{theme::brand(ui);theme::caption(ui,lang.text("AUDIO SETUP"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::language_switch(ui, &mut self.config.language).changed() {
+                        if let Err(error) = app_support::launcher_config::save(&self.config) { self.status=error.to_string(); }
+                    }
+                });
+            });ui.add_space(20.0);
             theme::card().show(ui,|ui|{
-                ui.heading("Prepare your session");ui.add_space(12.0);
-                ui.label("Input device");egui::ComboBox::from_id_source("input").width(ui.available_width()-16.0).selected_text(&self.config.input_device).show_ui(ui,|ui|{for value in &self.inputs{ui.selectable_value(&mut self.config.input_device,value.clone(),value);}});
-                ui.label("Output device");egui::ComboBox::from_id_source("output").width(ui.available_width()-16.0).selected_text(&self.config.output_device).show_ui(ui,|ui|{for value in &self.outputs{ui.selectable_value(&mut self.config.output_device,value.clone(),value);}});
-                ui.add_space(12.0);ui.label("Measure compensation inside RC505 RS → Audio. Project selection and data management live in the main application.");
+                ui.heading(lang.text("Prepare your session"));ui.add_space(12.0);
+                ui.label(lang.text("Input device"));egui::ComboBox::from_id_source("input").width(ui.available_width()-16.0).selected_text(&self.config.input_device).show_ui(ui,|ui|{for value in &self.inputs{ui.selectable_value(&mut self.config.input_device,value.clone(),value);}});
+                ui.label(lang.text("Output device"));egui::ComboBox::from_id_source("output").width(ui.available_width()-16.0).selected_text(&self.config.output_device).show_ui(ui,|ui|{for value in &self.outputs{ui.selectable_value(&mut self.config.output_device,value.clone(),value);}});
+                ui.add_space(12.0);ui.label(lang.text("Measure compensation inside RC505 RS → Audio. Project selection and data management live in the main application."));
             });
-            ui.add_space(20.0);ui.horizontal(|ui|{if ui.button("Open RC505 RS").clicked(){self.launch(false);}if ui.button("Open offline editor").clicked(){self.launch(true);}});
+            ui.add_space(20.0);ui.horizontal(|ui|{if ui.button(lang.text("Open RC505 RS")).clicked(){self.launch(false);}if ui.button(lang.text("Open offline editor")).clicked(){self.launch(true);}});
             ui.add_space(20.0);theme::caption(ui,format!("Data: {}",app_support::paths::appdata_root().unwrap_or_default().display()));
             theme::caption(ui,&self.status);
         });
