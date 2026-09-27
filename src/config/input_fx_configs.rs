@@ -135,10 +135,6 @@ impl InputFxConfigs {
         }
     }
 
-    pub fn active_bank(&self) -> &FxBank {
-        &self.banks[self.sel_bank_idx]
-    }
-
     pub fn active_bank_mut(&mut self) -> &mut FxBank {
         &mut self.banks[self.sel_bank_idx]
     }

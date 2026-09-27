@@ -1,4 +1,5 @@
 pub mod delay;
+pub mod detector;
 pub mod envelope;
 pub mod filter;
 pub mod my_delay;

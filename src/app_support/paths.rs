@@ -1,6 +1,12 @@
 use std::path::{Path, PathBuf};
 
 fn appdata_root() -> Option<PathBuf> {
+    // Useful for portable workspaces and isolated UI/testing sessions.
+    if let Some(path) =
+        std::env::args().find_map(|arg| arg.strip_prefix("--data-dir=").map(PathBuf::from))
+    {
+        return Some(path);
+    }
     std::env::var("APPDATA")
         .ok()
         .map(|appdata| Path::new(&appdata).join("rc505_rs"))

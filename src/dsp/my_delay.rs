@@ -13,6 +13,7 @@ pub struct MyDelayParams {
 
 #[derive(Clone)]
 pub struct MyDelayDspState {
+    input_envelope: crate::dsp::detector::PeakFollower,
     buffer: Vec<f32>,
     write_idx: usize,
     play_idx: usize,
@@ -62,6 +63,7 @@ pub struct MyDelayFxParams {
 impl MyDelayDspState {
     pub fn new() -> Self {
         Self {
+            input_envelope: crate::dsp::detector::PeakFollower::default(),
             buffer: Vec::new(),
             write_idx: 0,
             play_idx: 0,
@@ -82,10 +84,6 @@ impl MyDelayDspState {
     //     self.prev_above = false;
     //     self.record_len_samples = 0;
     // }
-
-    pub fn clear_gate(&mut self) {
-        self.prev_above = false;
-    }
 
     pub fn resolve_loop_len(
         &mut self,
@@ -129,11 +127,11 @@ pub fn process_sample(
         }
     }
 
-    let above = input.abs() >= p.threshold.max(0.0);
+    let above = state.input_envelope.next(input, sr) >= p.threshold.max(0.0);
     let rising = above && !state.prev_above;
     state.prev_above = above;
 
-    if rising {
+    if rising && !state.recording {
         state.recording = true;
         state.ready = false;
         state.write_idx = 0;
@@ -169,10 +167,6 @@ pub fn process_sample(
 }
 
 pub fn process_fx_sample(state: &mut MyDelayFxDspState, p: MyDelayFxParams) -> (f32, f32) {
-    if !p.gate_on {
-        state.delay.clear_gate();
-    }
-
     let loop_len_for_sample = state.delay.resolve_loop_len(p.loop_len_samples, p.gate_on);
     let input_mono = if p.gate_on { p.input_mono } else { 0.0 };
     let delay_out = if let Some(loop_len_samples) = loop_len_for_sample {
@@ -232,5 +226,33 @@ fn loop_window_gain(idx: usize, len: usize) -> f32 {
         (len - 1 - idx) as f32 / fade_len as f32
     } else {
         1.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn continuous_tone_finishes_capture_instead_of_restarting_every_cycle() {
+        let mut state = MyDelayDspState::new();
+        let mut peak = 0.0_f32;
+        for sample in 0..12000 {
+            let input = 0.8 * (sample as f32 * std::f32::consts::TAU * 200.0 / 48000.0).sin();
+            let output = process_sample(
+                &mut state,
+                MyDelayParams {
+                    level: 1.0,
+                    threshold: 0.2,
+                    loop_len_samples: 240,
+                },
+                48000.0,
+                input,
+            );
+            if sample > 6000 {
+                peak = peak.max(output.abs());
+            }
+        }
+        assert!(state.ready);
+        assert!(peak > 0.5, "capture kept resetting: peak={peak}");
     }
 }

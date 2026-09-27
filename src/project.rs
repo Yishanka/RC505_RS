@@ -24,7 +24,8 @@ use crate::config::reverb_configs::{
     REVERB_HIGHCUT_MAX, REVERB_LOWCUT_MAX_HZ, REVERB_LOWCUT_MIN_HZ, REVERB_PREDELAY_MAX_MS,
     REVERB_RT60_MAX_MS, REVERB_RT60_MIN_MS, REVERB_SIZE_MAX, REVERB_WIDTH_MAX,
 };
-use crate::config::roll_configs::RollStep;
+use crate::config::roll_configs::{RollMode, RollStep};
+use crate::config::time_mode::TimeMode;
 use crate::config::track_fx_configs::{TRACK_FX_BANK_COUNT, TRACK_FX_SLOT_COUNT};
 use crate::config::vocoder_configs::{
     VOCODER_ATTACK_MAX_MS, VOCODER_BANDS_MAX, VOCODER_BANDS_MIN, VOCODER_LEVEL_MAX,
@@ -47,6 +48,10 @@ struct ProjectIndex {
 
 #[derive(Serialize, Deserialize)]
 pub struct ProjectData {
+    #[serde(default = "default_fader_speed")]
+    pub fader_speed_db: f32,
+    #[serde(default)]
+    pub track_levels: Vec<f32>,
     pub beat: BeatData,
     pub system: SystemData,
     pub input_fx: InputFxData,
@@ -108,6 +113,8 @@ pub struct TrackFxSlotData {
 
 #[derive(Serialize, Deserialize)]
 pub struct TrackDelayData {
+    #[serde(default)]
+    pub time_mode: TimeMode,
     pub time_ms: usize,
     pub feedback_pct: usize,
     pub high_damp_hz: usize,
@@ -117,6 +124,42 @@ pub struct TrackDelayData {
 #[derive(Serialize, Deserialize)]
 pub struct TrackRollData {
     pub step: usize,
+    #[serde(default = "default_roll_time_mode")]
+    pub time_mode: TimeMode,
+    #[serde(default = "default_roll_time")]
+    pub time_ms: usize,
+    #[serde(default)]
+    pub mode: RollMode,
+    #[serde(default = "default_roll_feedback")]
+    pub feedback: usize,
+    #[serde(default)]
+    pub repeat: usize,
+    #[serde(default = "default_full_level")]
+    pub mix: usize,
+}
+fn default_roll_time_mode() -> TimeMode {
+    TimeMode::Quarter
+}
+fn default_roll_time() -> usize {
+    200
+}
+fn default_roll_feedback() -> usize {
+    50
+}
+fn default_full_level() -> usize {
+    100
+}
+fn default_reverb_wet() -> usize {
+    35
+}
+fn default_legacy_density() -> usize {
+    1
+}
+fn default_sibilance() -> usize {
+    20
+}
+fn default_fader_speed() -> f32 {
+    24.0
 }
 
 #[derive(Serialize, Deserialize)]
@@ -220,6 +263,12 @@ pub struct MyDelayData {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ReverbData {
+    #[serde(default = "default_full_level")]
+    pub dry_level: usize,
+    #[serde(default = "default_reverb_wet")]
+    pub wet_level: usize,
+    #[serde(default = "default_legacy_density")]
+    pub density: usize,
     pub size: usize,
     pub decay_ms: usize,
     pub predelay_ms: usize,
@@ -230,6 +279,16 @@ pub struct ReverbData {
 
 #[derive(Serialize, Deserialize)]
 pub struct VocoderData {
+    #[serde(default)]
+    pub tone: i32,
+    #[serde(default)]
+    pub mod_sens: i32,
+    #[serde(default)]
+    pub formant_semitones: i32,
+    #[serde(default = "default_sibilance")]
+    pub sibilance: usize,
+    #[serde(default)]
+    pub carrier_thru: bool,
     pub carrier: String,
     pub bands: usize,
     pub attack_ms: usize,
@@ -297,24 +356,41 @@ pub fn save_index(entries: &[ProjectEntry]) -> anyhow::Result<()> {
         projects: entries.to_vec(),
     };
     let raw = serde_json::to_string_pretty(&idx)?;
-    fs::write(index_path(), raw)?;
+    atomic_write(&index_path(), raw.as_bytes())?;
     Ok(())
 }
 
-pub fn load_project(entry: &ProjectEntry) -> Option<ProjectData> {
+pub fn load_project(entry: &ProjectEntry) -> anyhow::Result<Option<ProjectData>> {
     let path = project_file_path(&entry.file);
     if !path.exists() {
-        return None;
+        return Ok(None);
     }
-    let raw = fs::read_to_string(path).ok()?;
-    serde_json::from_str::<ProjectData>(&raw).ok()
+    let raw = fs::read_to_string(&path)?;
+    Ok(Some(serde_json::from_str::<ProjectData>(&raw)?))
+}
+
+fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    let result = (|| -> anyhow::Result<()> {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 pub fn save_project(entry: &ProjectEntry, config: &AppConfig) -> anyhow::Result<()> {
     ensure_project_dir()?;
     let data = data_from_config(config);
     let raw = serde_json::to_string_pretty(&data)?;
-    fs::write(project_file_path(&entry.file), raw)?;
+    atomic_write(&project_file_path(&entry.file), raw.as_bytes())?;
     Ok(())
 }
 
@@ -414,6 +490,9 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                     InputFx::Reverb(reverb) => {
                         slot_data.kind = "Reverb".to_string();
                         slot_data.reverb = Some(ReverbData {
+                            dry_level: reverb.dry_level.value,
+                            wet_level: reverb.wet_level.value,
+                            density: reverb.density.value,
                             size: reverb.size.value,
                             decay_ms: reverb.decay_ms.value,
                             predelay_ms: reverb.predelay_ms.value,
@@ -478,6 +557,11 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                     InputFx::Vocoder(vocoder) => {
                         slot_data.kind = "Vocoder".to_string();
                         slot_data.vocoder = Some(VocoderData {
+                            tone: vocoder.tone,
+                            mod_sens: vocoder.mod_sens,
+                            formant_semitones: vocoder.formant_semitones,
+                            sibilance: vocoder.sibilance.value,
+                            carrier_thru: vocoder.carrier_thru,
                             carrier: vocoder_carrier_to_string(vocoder.carrier.value).to_string(),
                             bands: vocoder.bands.value,
                             attack_ms: vocoder.attack_ms.value,
@@ -509,6 +593,7 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                     TrackFx::Delay(delay) => {
                         slot_data.kind = "Delay".to_string();
                         slot_data.delay = Some(TrackDelayData {
+                            time_mode: delay.time_mode.value,
                             time_ms: delay.time_ms.value,
                             feedback_pct: delay.feedback_pct.value,
                             high_damp_hz: delay.high_damp_hz.value,
@@ -518,6 +603,12 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                     TrackFx::Roll(roll) => {
                         slot_data.kind = "Roll".to_string();
                         slot_data.roll = Some(TrackRollData {
+                            time_mode: roll.time_mode.value,
+                            time_ms: roll.time_ms.value,
+                            mode: roll.mode.value,
+                            feedback: roll.feedback.value,
+                            repeat: roll.repeat.value,
+                            mix: roll.mix.value,
                             step: roll.step.value.value(),
                         });
                     }
@@ -565,6 +656,8 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
     }
 
     ProjectData {
+        fader_speed_db: config.fader_speed_db,
+        track_levels: config.track_levels.clone(),
         beat: BeatData {
             bpm: config.beat_config.current_bpm(),
             latency: config.beat_config.current_latency(),
@@ -586,9 +679,23 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
 }
 
 pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
+    config.fader_speed_db = if data.fader_speed_db.is_finite() {
+        data.fader_speed_db.clamp(6.0, 60.0)
+    } else {
+        24.0
+    };
+    for (idx, level) in config.track_levels.iter_mut().enumerate() {
+        *level = data
+            .track_levels
+            .get(idx)
+            .copied()
+            .filter(|v| v.is_finite())
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+    }
     config
         .beat_config
-        .set_values(data.beat.bpm, data.beat.latency);
+        .set_values(data.beat.bpm.clamp(30, 300), data.beat.latency.min(500));
     config.system_config.input_device.value = data.system.input_device;
     config.system_config.output_device.value = data.system.output_device;
     config.input_fx.sel_bank_idx = data.input_fx.selected_bank_idx.min(FX_BANK_COUNT - 1);
@@ -711,6 +818,9 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                     slot.set_kind(FxKind::Reverb);
                     if let Some(InputFx::Reverb(reverb)) = slot.fx.as_mut() {
                         if let Some(reverb_data) = &slot_data.reverb {
+                            reverb.dry_level.value = reverb_data.dry_level.min(100);
+                            reverb.wet_level.value = reverb_data.wet_level.min(100);
+                            reverb.density.value = reverb_data.density.clamp(1, 10);
                             reverb.size.value = reverb_data.size.min(REVERB_SIZE_MAX);
                             reverb.decay_ms.value = reverb_data
                                 .decay_ms
@@ -809,6 +919,12 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                     slot.set_kind(FxKind::Vocoder);
                     if let Some(InputFx::Vocoder(vocoder)) = slot.fx.as_mut() {
                         if let Some(vocoder_data) = &slot_data.vocoder {
+                            vocoder.tone = vocoder_data.tone.clamp(-50, 50);
+                            vocoder.mod_sens = vocoder_data.mod_sens.clamp(-50, 50);
+                            vocoder.formant_semitones =
+                                vocoder_data.formant_semitones.clamp(-12, 12);
+                            vocoder.sibilance.value = vocoder_data.sibilance.min(100);
+                            vocoder.carrier_thru = vocoder_data.carrier_thru;
                             if let Some(carrier) = string_to_vocoder_carrier(&vocoder_data.carrier)
                             {
                                 vocoder.carrier.value = carrier;
@@ -863,6 +979,7 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                         config.track_fx.slot_fx_mut(bank_idx, slot_idx)
                     {
                         if let Some(delay_data) = &slot_data.delay {
+                            delay.time_mode.value = delay_data.time_mode;
                             delay.time_ms.value = delay_data
                                 .time_ms
                                 .clamp(TRACK_DELAY_TIME_MIN_MS, TRACK_DELAY_TIME_MAX_MS);
@@ -883,7 +1000,15 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                         config.track_fx.slot_fx_mut(bank_idx, slot_idx)
                     {
                         if let Some(roll_data) = &slot_data.roll {
+                            roll.time_mode.value = roll_data.time_mode;
+                            roll.time_ms.value = roll_data.time_ms.clamp(1, 1000);
+                            roll.mode.value = roll_data.mode;
+                            roll.feedback.value = roll_data.feedback.clamp(1, 100);
+                            roll.repeat.value = roll_data.repeat.min(100);
+                            roll.mix.value = roll_data.mix.min(100);
                             roll.step.value = match roll_data.step {
+                                1 => RollStep::Off,
+                                16 => RollStep::Sixteen,
                                 2 => RollStep::Two,
                                 8 => RollStep::Eight,
                                 _ => RollStep::Four,
@@ -1052,6 +1177,8 @@ fn string_to_waveform(s: &str) -> Option<Waveform> {
 
 fn vocoder_carrier_to_string(carrier: VocoderCarrier) -> &'static str {
     match carrier {
+        VocoderCarrier::InputLeft => "InputLeft",
+        VocoderCarrier::InputRight => "InputRight",
         VocoderCarrier::Track1 => "Track1",
         VocoderCarrier::Track2 => "Track2",
         VocoderCarrier::Track3 => "Track3",
@@ -1062,6 +1189,8 @@ fn vocoder_carrier_to_string(carrier: VocoderCarrier) -> &'static str {
 
 fn string_to_vocoder_carrier(s: &str) -> Option<VocoderCarrier> {
     match s {
+        "InputLeft" => Some(VocoderCarrier::InputLeft),
+        "InputRight" => Some(VocoderCarrier::InputRight),
         "Track1" | "Tr1" => Some(VocoderCarrier::Track1),
         "Track2" | "Tr2" => Some(VocoderCarrier::Track2),
         "Track3" | "Tr3" => Some(VocoderCarrier::Track3),
@@ -1124,5 +1253,92 @@ fn string_to_note(s: &str) -> Option<Note> {
         "As" => Some(Note::As),
         "B" => Some(Note::B),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn old_project_defaults_and_new_faders_roundtrip() {
+        let mut source = AppConfig::new(127, 85, 5);
+        source.track_levels = vec![0.0, 0.25, 0.5, 0.75, 1.0];
+        source.input_fx.set_slot_kind(0, 0, FxKind::Oscillator);
+        if let Some(InputFx::Oscillator(osc)) = &mut source.input_fx.banks[0].slots[0].fx {
+            osc.note.push();
+            osc.note.push();
+        }
+        let mut json = serde_json::to_value(data_from_config(&source)).unwrap();
+        let mut restored = AppConfig::new(120, 0, 5);
+        apply_data_to_config(&mut restored, serde_json::from_value(json.clone()).unwrap());
+        assert_eq!(restored.track_levels, source.track_levels);
+        assert_eq!(restored.beat_config.current_bpm(), 127);
+        let Some(InputFx::Oscillator(osc)) = &restored.input_fx.banks[0].slots[0].fx else {
+            panic!()
+        };
+        assert_eq!(osc.note.events().len(), 2);
+        json.as_object_mut().unwrap().remove("track_levels");
+        json["beat"]["bpm"] = serde_json::json!(0);
+        apply_data_to_config(&mut restored, serde_json::from_value(json).unwrap());
+        assert_eq!(restored.track_levels, vec![1.0; 5]);
+        assert_eq!(restored.beat_config.current_bpm(), 30);
+    }
+    #[test]
+    fn existing_fx_extensions_roundtrip_and_legacy_fields_migrate() {
+        let mut config = AppConfig::new(120, 0, 5);
+        config.fader_speed_db = 36.0;
+        config.input_fx.set_slot_kind(0, 0, FxKind::Vocoder);
+        config.input_fx.set_slot_kind(0, 1, FxKind::Reverb);
+        config.track_fx.set_slot_kind(0, 0, TrackFxKind::Roll);
+        config.track_fx.set_slot_kind(0, 1, TrackFxKind::Delay);
+        if let Some(InputFx::Vocoder(v)) = &mut config.input_fx.banks[0].slots[0].fx {
+            v.carrier.value = VocoderCarrier::InputLeft;
+            v.tone = -25;
+            v.mod_sens = 13;
+            v.formant_semitones = 7;
+            v.sibilance.value = 68;
+            v.carrier_thru = true;
+        }
+        if let Some(InputFx::Reverb(r)) = &mut config.input_fx.banks[0].slots[1].fx {
+            r.dry_level.value = 40;
+            r.wet_level.value = 81;
+            r.density.value = 9;
+            r.predelay_ms.value = 500;
+        }
+        if let Some(TrackFx::Roll(r)) = config.track_fx.slot_fx_mut(0, 0) {
+            r.step.value = RollStep::Sixteen;
+            r.time_mode.value = TimeMode::DottedEighth;
+            r.mode.value = RollMode::Roll1;
+            r.feedback.value = 72;
+            r.repeat.value = 9;
+            r.mix.value = 61;
+        }
+        if let Some(TrackFx::Delay(d)) = config.track_fx.slot_fx_mut(0, 1) {
+            d.time_mode.value = TimeMode::EighthTriplet;
+        }
+        let before = serde_json::to_value(data_from_config(&config)).unwrap();
+        let mut restored = AppConfig::new(90, 0, 5);
+        apply_data_to_config(
+            &mut restored,
+            serde_json::from_value(before.clone()).unwrap(),
+        );
+        let after = serde_json::to_value(data_from_config(&restored)).unwrap();
+        assert_eq!(before["input_fx"], after["input_fx"]);
+        assert_eq!(before["track_fx"], after["track_fx"]);
+        assert_eq!(restored.fader_speed_db, 36.0);
+        let old: TrackRollData = serde_json::from_str(r#"{"step":4}"#).unwrap();
+        assert!(
+            old.time_mode == TimeMode::Quarter
+                && old.mode == RollMode::Roll2
+                && old.mix == 100
+                && old.repeat == 0
+        );
+        let old:ReverbData=serde_json::from_str(r#"{"size":50,"decay_ms":2500,"predelay_ms":20,"width":70,"high_cut":30,"low_cut":120}"#).unwrap();
+        assert_eq!((old.dry_level, old.wet_level, old.density), (100, 35, 1));
+        let old:VocoderData=serde_json::from_str(r#"{"carrier":"Track1","bands":10,"attack_ms":6,"release_ms":80,"level":100,"mix":100}"#).unwrap();
+        assert_eq!(
+            (old.tone, old.mod_sens, old.formant_semitones, old.sibilance),
+            (0, 0, 0, 20)
+        );
     }
 }

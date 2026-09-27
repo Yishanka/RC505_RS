@@ -6,10 +6,10 @@ pub const REVERB_SIZE_MAX: usize = 100;
 pub const REVERB_SIZE_MIN_MS: usize = 20;
 pub const REVERB_SIZE_MAX_MS: usize = 120;
 
-pub const REVERB_RT60_MIN_MS: usize = 200;
+pub const REVERB_RT60_MIN_MS: usize = 100;
 pub const REVERB_RT60_MAX_MS: usize = 12_000;
 
-pub const REVERB_PREDELAY_MAX_MS: usize = 200;
+pub const REVERB_PREDELAY_MAX_MS: usize = 500;
 
 pub const REVERB_WIDTH_MAX: usize = 100;
 
@@ -19,6 +19,9 @@ pub const REVERB_LOWCUT_MIN_HZ: usize = 20;
 pub const REVERB_LOWCUT_MAX_HZ: usize = 1_000;
 
 pub struct ReverbConfigs {
+    pub dry_level: NumericConfig,
+    pub wet_level: NumericConfig,
+    pub density: NumericConfig,
     pub sel_idx: Option<usize>,
     pub size: NumericConfig,
     pub decay_ms: NumericConfig,
@@ -31,6 +34,9 @@ pub struct ReverbConfigs {
 impl ReverbConfigs {
     pub fn new() -> Self {
         Self {
+            dry_level: NumericConfig::new("Direct level(%)", 100),
+            wet_level: NumericConfig::new("Effect level(%)", 35),
+            density: NumericConfig::new("Density", 5),
             sel_idx: None,
             size: NumericConfig::new("Size", 50),
             decay_ms: NumericConfig::new("Decay(ms)", 2500),

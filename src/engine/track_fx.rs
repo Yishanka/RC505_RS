@@ -19,13 +19,14 @@ use crate::config::track_fx_configs::{
 use crate::dsp::delay::{DelayDspState, DelayParams, process_sample as process_delay_sample};
 use crate::dsp::envelope::{AhdsrParams, AhdsrState};
 use crate::dsp::filter::{FilterDspState, FilterParams, process_sample as process_filter_sample};
-use crate::dsp::note::seq_bool_at_time;
-use crate::dsp::roll::{RollDspState, RollParams, process_sample as process_roll_sample};
+use crate::dsp::note::{StepTrigger, seq_bool_at_time};
+use crate::dsp::roll::{RollDspState, RollParams, process_frame as process_roll_frame};
 
 const DEFAULT_BPM: usize = 120;
 
 #[derive(Clone, Copy)]
 pub struct DelayRuntime {
+    pub time_mode: crate::config::time_mode::TimeMode,
     pub time_ms: f32,
     pub feedback: f32,
     pub high_damp_hz: f32,
@@ -35,6 +36,12 @@ pub struct DelayRuntime {
 #[derive(Clone, Copy)]
 pub struct RollRuntime {
     pub step: usize,
+    pub time_mode: crate::config::time_mode::TimeMode,
+    pub time_ms: usize,
+    pub mode: crate::config::roll_configs::RollMode,
+    pub feedback: f32,
+    pub repeat: usize,
+    pub mix: f32,
 }
 
 #[derive(Clone)]
@@ -100,6 +107,7 @@ pub struct TrackFxEngine {
 
 #[derive(Clone, Copy)]
 pub struct TrackFilterDspState {
+    pub trigger: StepTrigger,
     pub env: AhdsrState,
     pub filter_l: FilterDspState,
     pub filter_r: FilterDspState,
@@ -108,6 +116,7 @@ pub struct TrackFilterDspState {
 impl TrackFilterDspState {
     pub fn new() -> Self {
         Self {
+            trigger: StepTrigger::default(),
             env: AhdsrState::new(),
             filter_l: FilterDspState::new(),
             filter_r: FilterDspState::new(),
@@ -130,9 +139,12 @@ impl TrackFxEngine {
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         self.sample_rate = sample_rate.max(1.0);
         for track in &mut self.state.tracks {
-            for bank in &mut track.banks {
-                for slot in &mut bank.slots {
+            for (bank_idx, bank) in track.banks.iter_mut().enumerate() {
+                for (slot_idx, slot) in bank.slots.iter_mut().enumerate() {
                     slot.delay.set_sample_rate(self.sample_rate);
+                    if self.runtime.banks[bank_idx].slots[slot_idx].roll.is_some() {
+                        slot.roll.prepare(self.sample_rate);
+                    }
                 }
             }
         }
@@ -143,11 +155,46 @@ impl TrackFxEngine {
         self.bpm = bpm.max(1);
     }
 
-    pub fn update_from_config(&mut self, config: &TrackFxConfigs) {
-        let track_count = config.tracks.len();
-        self.runtime = TrackFxRuntime::from_config(config);
-        if self.state.tracks.len() != track_count {
-            self.state = TrackFxState::new(track_count, self.sample_rate);
+    pub fn swap_runtime(&mut self, runtime: TrackFxRuntime) -> TrackFxRuntime {
+        if self.state.tracks.len() != runtime.track_enabled.len() {
+            self.state = TrackFxState::new(runtime.track_enabled.len(), self.sample_rate);
+        }
+        for track in &mut self.state.tracks {
+            for (bank_index, bank) in track.banks.iter_mut().enumerate() {
+                for (slot_index, slot) in bank.slots.iter_mut().enumerate() {
+                    if runtime.banks[bank_index].slots[slot_index].roll.is_some() {
+                        slot.roll.prepare(self.sample_rate);
+                        if runtime.selected_bank_idx != self.runtime.selected_bank_idx
+                            || self.runtime.banks[bank_index].slots[slot_index]
+                                .roll
+                                .is_none()
+                        {
+                            slot.roll.reset();
+                        }
+                    }
+                }
+            }
+        }
+        std::mem::replace(&mut self.runtime, runtime)
+    }
+
+    /// Called by the control thread after a recording is cleared. No previous
+    /// phrase may survive as a frozen Roll slice or a delayed tail.
+    pub fn reset_track(&mut self, index: usize) {
+        if let Some(track) = self.state.tracks.get_mut(index) {
+            for bank in &mut track.banks {
+                for slot in &mut bank.slots {
+                    slot.roll.reset();
+                    slot.delay.reset();
+                    slot.filter = TrackFilterDspState::new();
+                }
+            }
+        }
+    }
+
+    pub fn reset_all_tracks(&mut self) {
+        for index in 0..self.state.tracks.len() {
+            self.reset_track(index);
         }
     }
 
@@ -157,9 +204,6 @@ impl TrackFxEngine {
         elapsed_secs: f64,
         input_l: f32,
         input_r: f32,
-        track_buffer: &[f32],
-        play_cursor: usize,
-        channels: usize,
     ) -> (f32, f32) {
         let Some(track_enabled) = self.runtime.track_enabled.get(track_idx) else {
             return (input_l, input_r);
@@ -176,7 +220,24 @@ impl TrackFxEngine {
 
         for idx in 0..TRACK_FX_SLOT_COUNT {
             let slot = &bank_runtime.slots[idx];
+            if let Some(roll) = slot.roll {
+                (out_l, out_r) = process_roll_frame(
+                    &mut bank_state.slots[idx].roll,
+                    RollParams {
+                        step: roll.step,
+                        time_ms: roll.time_mode.milliseconds(roll.time_ms, self.bpm),
+                        mode: roll.mode,
+                        feedback: roll.feedback,
+                        repeat: roll.repeat,
+                        mix: roll.mix,
+                    },
+                    track_enabled[bank_idx][idx],
+                    out_l,
+                    out_r,
+                );
+            }
             if !track_enabled[bank_idx][idx] {
+                bank_state.slots[idx].filter.trigger = StepTrigger::default();
                 continue;
             }
 
@@ -184,7 +245,9 @@ impl TrackFxEngine {
                 let (l, r) = process_delay_sample(
                     &mut bank_state.slots[idx].delay,
                     DelayParams {
-                        time_ms: delay.time_ms,
+                        time_ms: delay
+                            .time_mode
+                            .milliseconds(delay.time_ms as usize, self.bpm),
                         feedback: delay.feedback,
                         high_damp_hz: delay.high_damp_hz,
                         mix: delay.mix,
@@ -197,47 +260,18 @@ impl TrackFxEngine {
                 out_r = r;
             }
 
-            if let Some(roll) = slot.roll {
-                let _ = elapsed_secs; // Reserved for future beat-quantized roll scheduling.
-                let roll_l = process_roll_sample(
-                    &mut bank_state.slots[idx].roll,
-                    RollParams { step: roll.step },
-                    track_buffer,
-                    play_cursor,
-                    channels,
-                    self.sample_rate,
-                    self.bpm,
-                    out_l,
-                );
-                let roll_r = if channels > 1 {
-                    process_roll_sample(
-                        &mut bank_state.slots[idx].roll,
-                        RollParams { step: roll.step },
-                        track_buffer,
-                        play_cursor.saturating_add(1),
-                        channels,
-                        self.sample_rate,
-                        self.bpm,
-                        out_r,
-                    )
-                } else {
-                    roll_l
-                };
-                out_l = roll_l;
-                out_r = roll_r;
-            }
-
             if let Some(filter) = slot.filter.as_ref() {
                 let gate_on = if self.metronome_start.is_none() || filter.seq.is_empty() {
                     true
                 } else {
                     seq_bool_at_time(&filter.seq, self.bpm, elapsed_secs)
                 };
-                let retrigger = if self.metronome_start.is_none() || filter.trigger_seq.is_empty() {
-                    false
-                } else {
-                    seq_bool_at_time(&filter.trigger_seq, self.bpm, elapsed_secs)
-                };
+                let retrigger = bank_state.slots[idx].filter.trigger.next(
+                    &filter.trigger_seq,
+                    self.bpm,
+                    elapsed_secs,
+                    self.metronome_start.is_some(),
+                );
                 let dt = 1.0 / self.sample_rate.max(1.0);
                 let cutoff_env = bank_state.slots[idx]
                     .filter
@@ -304,6 +338,7 @@ impl TrackFxRuntime {
                 let (delay, roll, filter) = match slot.fx.as_ref() {
                     Some(TrackFx::Delay(delay)) => (
                         Some(DelayRuntime {
+                            time_mode: delay.time_mode.value,
                             time_ms: delay
                                 .time_ms
                                 .value
@@ -327,6 +362,12 @@ impl TrackFxRuntime {
                     Some(TrackFx::Roll(roll)) => (
                         None,
                         Some(RollRuntime {
+                            time_mode: roll.time_mode.value,
+                            time_ms: roll.time_ms.value.clamp(1, 1000),
+                            mode: roll.mode.value,
+                            feedback: roll.feedback.value.min(100) as f32 / 100.0,
+                            repeat: roll.repeat.value.min(100),
+                            mix: roll.mix.value.min(100) as f32 / 100.0,
                             step: roll.step.value.value(),
                         }),
                         None,
@@ -454,4 +495,31 @@ impl TrackFxBankState {
 fn tension_to_exponent(value: usize) -> f32 {
     let t = value.min(ENVELOPE_TENSION_MAX) as f32;
     2.0_f32.powf((t - 100.0) / 50.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::TrackFxKind;
+    #[test]
+    fn clearing_track_discards_frozen_audio_and_delay_tail() {
+        for kind in [TrackFxKind::Roll, TrackFxKind::Delay] {
+            let mut config = TrackFxConfigs::new(1);
+            config.set_slot_kind(0, 0, kind);
+            let mut fx = TrackFxEngine::new(1000.0, 1);
+            fx.swap_runtime(TrackFxRuntime::from_config(&config));
+            for i in 0..600 {
+                fx.process_frame(0, i as f64 / 1000.0, 0.3, -0.3);
+            }
+            config.toggle_slot_enabled(0, 0);
+            fx.swap_runtime(TrackFxRuntime::from_config(&config));
+            for i in 0..600 {
+                fx.process_frame(0, i as f64 / 1000.0, 0.3, -0.3);
+            }
+            fx.reset_track(0);
+            for i in 0..600 {
+                assert_eq!(fx.process_frame(0, i as f64 / 1000.0, 0.0, 0.0), (0.0, 0.0));
+            }
+        }
+    }
 }

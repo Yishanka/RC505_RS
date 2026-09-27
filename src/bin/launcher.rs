@@ -16,6 +16,11 @@ use serde::{Deserialize, Serialize};
 
 #[path = "../app_support/mod.rs"]
 mod app_support;
+#[cfg(debug_assertions)]
+#[path = "../ui/capture.rs"]
+mod capture;
+#[path = "../ui/theme.rs"]
+mod theme;
 
 use app_support::launcher_config::{self, LauncherConfig};
 use app_support::paths;
@@ -77,6 +82,8 @@ struct Rc505Launcher {
 
     // Fonts
     fonts_initialized: bool,
+    #[cfg(debug_assertions)]
+    preview_frame: usize,
 }
 
 impl Rc505Launcher {
@@ -117,6 +124,8 @@ impl Rc505Launcher {
             status_is_error: false,
 
             fonts_initialized: false,
+            #[cfg(debug_assertions)]
+            preview_frame: 0,
         }
     }
 
@@ -178,10 +187,14 @@ impl Rc505Launcher {
             .unwrap_or_default()
     }
 
-    fn save_current_config(&mut self) {
+    fn save_current_config(&mut self) -> bool {
         self.config.input_device = self.get_selected_input();
         self.config.output_device = self.get_selected_output();
-        let _ = launcher_config::save(&self.config);
+        if let Err(error) = launcher_config::save(&self.config) {
+            self.set_status(&format!("Cannot save settings: {error}"), true);
+            return false;
+        }
+        true
     }
 
     // ------------------------------------------------------------------
@@ -257,7 +270,9 @@ impl Rc505Launcher {
             .min(self.projects.len().saturating_sub(1));
 
         // Persist current selections.
-        self.save_current_config();
+        if !self.save_current_config() {
+            return;
+        }
 
         // Locate the main executable next to us.
         let exe_dir = std::env::current_exe()
@@ -286,7 +301,24 @@ impl Rc505Launcher {
 
         self.set_status("Launching RC505_RS...", false);
 
-        match Command::new(&main_exe)
+        let mut command = Command::new(&main_exe);
+        if let Some(root) =
+            std::env::args().find_map(|arg| arg.strip_prefix("--data-dir=").map(PathBuf::from))
+        {
+            match std::path::absolute(root) {
+                Ok(path) => {
+                    command.arg(format!("--data-dir={}", path.display()));
+                }
+                Err(error) => {
+                    self.set_status(&format!("Invalid data directory: {error}"), true);
+                    return;
+                }
+            }
+        }
+        if std::env::args().any(|arg| arg == "--offline") {
+            command.arg("--offline");
+        }
+        match command
             .current_dir(&exe_dir)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -331,7 +363,7 @@ impl Rc505Launcher {
                     .families
                     .entry(egui::FontFamily::Proportional)
                     .or_default()
-                    .insert(0, "cjk_fallback".to_owned());
+                    .push("cjk_fallback".to_owned());
                 fonts
                     .families
                     .entry(egui::FontFamily::Monospace)
@@ -352,6 +384,13 @@ impl Rc505Launcher {
 impl eframe::App for Rc505Launcher {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint();
+        #[cfg(debug_assertions)]
+        if std::env::args().any(|arg| arg == "--ui-preview=launcher") {
+            assert!(std::env::args().any(|arg| arg.starts_with("--data-dir=")));
+            if capture::capture(ctx, "launcher", &mut self.preview_frame) {
+                return;
+            }
+        }
         self.setup_font_fallback(ctx);
 
         // Scan audio on first frame.
@@ -363,6 +402,11 @@ impl eframe::App for Rc505Launcher {
         // Top bar with tab switcher + Launch button.
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                theme::brand(ui);
+                theme::caption(ui, "AUDIO & PROJECT SETUP");
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.current_tab, LauncherTab::Audio, "Audio Setup");
                 ui.selectable_value(&mut self.current_tab, LauncherTab::Projects, "Projects");
                 ui.selectable_value(&mut self.current_tab, LauncherTab::About, "About");
@@ -371,8 +415,12 @@ impl eframe::App for Rc505Launcher {
                     if ui
                         .add_sized(
                             [120.0, 32.0],
-                            egui::Button::new("Launch RC505")
-                                .fill(egui::Color32::from_rgb(0, 140, 80)),
+                            egui::Button::new(
+                                egui::RichText::new("Launch RC505")
+                                    .strong()
+                                    .color(theme::BACKGROUND),
+                            )
+                            .fill(theme::ACCENT),
                         )
                         .clicked()
                     {
@@ -382,27 +430,24 @@ impl eframe::App for Rc505Launcher {
             });
         });
 
-        // Central area.
-        egui::CentralPanel::default().show(ctx, |ui| {
-            egui::Frame::none()
-                .fill(egui::Color32::from_rgb(20, 20, 22))
-                .show(ui, |ui| match self.current_tab {
-                    LauncherTab::Audio => self.draw_audio_tab(ui),
-                    LauncherTab::Projects => self.draw_projects_tab(ui),
-                    LauncherTab::About => self.draw_about_tab(ui),
-                });
-        });
-
         // Bottom status bar.
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             if !self.status_message.is_empty() {
                 let color = if self.status_is_error {
                     egui::Color32::from_rgb(255, 80, 80)
                 } else {
-                    egui::Color32::from_rgb(100, 200, 100)
+                    theme::ACCENT
                 };
                 ui.colored_label(color, &self.status_message);
             }
+        });
+        // Central area.
+        egui::CentralPanel::default().show(ctx, |ui| {
+            theme::card().show(ui, |ui| match self.current_tab {
+                LauncherTab::Audio => self.draw_audio_tab(ui),
+                LauncherTab::Projects => self.draw_projects_tab(ui),
+                LauncherTab::About => self.draw_about_tab(ui),
+            });
         });
     }
 }
@@ -706,7 +751,8 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([680.0, 520.0])
+            .with_inner_size([780.0, 640.0])
+            .with_min_inner_size([680.0, 520.0])
             .with_title("RC505_RS Launcher"),
         ..Default::default()
     };
@@ -714,6 +760,9 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "RC505_RS Launcher",
         options,
-        Box::new(|_cc| Box::new(Rc505Launcher::new())),
+        Box::new(|cc| {
+            theme::apply(&cc.egui_ctx);
+            Box::new(Rc505Launcher::new())
+        }),
     )
 }

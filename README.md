@@ -1,142 +1,69 @@
-﻿# RC505 for Free!
+# RC505 RS
 
-English README. Chinese version: [README_CN.md](./README_CN.md)
+A five-track desktop loop station in Rust, CPAL and egui. It combines keyboard performance with mouse-driven sound design, working toward the RC‑505mkII workflow while adding piano-roll editing and parameter visualization.
 
-## 1. Brief Intro
+[中文](README_CN.md) · [Detailed Chinese manual](docs/USER_GUIDE_CN.md) · [Hardware comparison](docs/RC505_REFERENCE.md) · [Roadmap](AGENTS/PLAN.md)
 
-This project is a free local looper app inspired by the BOSS RC-505 MK2. The real RC-505 Mk2 hardware is expensive, and many free software loopers are too limited for live ideas. So I decided to build one myself in Rust and keep adding features step by step.
+![Performance workspace](docs/images/performance.png)
 
-This is still an early version and still rough in many places, but the core workflow is already usable: multi-track looping, beat sync, input effects, track effects, and project save/load.
+## Run
 
-## 2. What Is RC-505
-
-The RC-505 style workflow is basically live looping with multiple tracks, quick switching, and effects that react to rhythm. You record short phrases, layer them, mute and unmute tracks, and shape sound in real time. This project follows that idea with 5 tracks and two effect layers: Input FX (before recording) and Track FX (on playback tracks).
-
-I am not trying to make a strict 1:1 hardware clone, because I don't have one =(. Many details here are my own design choices, especially in FX behavoir, FX parameters and UI behavior. The goal is practical live use first, then gradual refinement.
-
-## 3. About the Project
-
-The app is written in Rust and currently targets Windows desktop. Audio I/O is built on `cpal` (WASAPI by default, optional ASIO feature), UI is built with `eframe/egui`, and project data is stored in JSON with `serde`.
-
-The architecture is split into clear layers: UI/input handling in `app.rs` and `ui/*`, user-editable parameter trees in `config/*`, real-time audio routing in `engine/*`, DSP algorithms in `dsp/*`, and project persistence in `project.rs`. Runtime DSP state is separated from config data so parameter edits can be pushed into the audio thread safely.
-
-At a high level:
-
-```text
-src/
-  app.rs                app state machine + key handling
-  ui/                   init screen + looper screen drawing
-  config/               all editable parameters (beat/system/fx)
-  engine/
-    audio_io.rs         input/output streams, ring buffer, track timeline
-    input_fx.rs         Input FX runtime and processing
-    track_fx.rs         Track FX runtime and processing
-    metronome.rs        beat timing
-  app_support/          shared app paths and launcher startup config
-  dsp/                  envelope/filter/osc/reverb/delay/roll/my_delay/note
-  project.rs            save/load project index and per-project JSON
-  bin/
-    launcher.rs         desktop launcher with audio device setup and project management
-```
-
-## 4. How To Run and Play
-
-### Build and Run
-
-Right now the safest path is building from source locally.
+Windows is the primary development and verification platform. Install Rust and the MSVC C++ build tools, then run:
 
 ```powershell
-git clone <your-repo-url>
-cd rc505_rs
-cargo run --release
+cargo run --release --bin rc505_rs
 ```
 
-If you want to try ASIO on Windows and your devices support it:
+The optional launcher selects devices, latency compensation and a project. Both executables share the same theme:
 
 ```powershell
-cargo run --release --features asio
+cargo build --release --bins
+.\target\release\rc505_launcher.exe
 ```
 
-If you only want a binary, you can also build once and run `target/release/rc505_rs.exe`.
-
-I upload a binary file to the release without ASIO. You can just download and open it. 
-
-### Basic Operation Flow
-
-When the app starts, you enter the project list. Use `Up/Down` to select, `Enter` to open, `Enter` on `[ NEW PROJECT ]` to create, `R` to rename and `Enter` to determine the name, and `Delete` to remove a project.
-
-Inside a project there are two working states: `Loop` and `Screen`. Press `S` to switch. In `Loop`, you mainly control record/play/dub and the on/off of the FXes. In `Screen`, you edit settings and FX parameters.
-
-In `Loop` state, `1..5` controls tracks. Empty track goes to record, playing track goes to overdub, recording or dubbing track schedules stop on next beat and returns to play, and paused track resumes with timeline alignment. `F1..F5` pauses tracks. `Left/Right` selects track. `Delete` clears the selected track.
-
-FX has two control modes toggled by `T`: `Bank` mode and `Single` mode. In Bank mode, `QWER` switches Input FX bank and `UIOP` switches Track FX bank. In Single mode, `QWER` toggles Input FX slots in current input bank, and `UIOP` toggles Track FX slots for the **currently selected track** in current track bank.
-
-### Screen Editing
-
-In `Screen` state, `B` opens Beat settings, `M` opens System settings, `QWER` opens Input FX slot editing, and `UIOP` opens Track FX slot editing. Most pages use `Left/Right` to move between fields and `Up/Down` to change enum values. Numeric fields accept number keys and `Backspace`. `Enter` is used for entering sub-pages or applying Push/Pop edits in sequence editors.
-
-The UI is intentionally keyboard-first. It looks like a panel, but controls are not mouse-click workflow yet.
-
-### Implemented FX (Current Version)
-
-Input FX has 4 banks x 4 slots. Slot type can be `Oscillator`, `Filter`, `Reverb`, or `MyDelay`.
-
-Oscillator includes waveform, level, threshold, note sequence, AHDSR envelope, plus its own filter and filter-envelope. MyDelay is a custom short-capture looping texture effect with note-driven loop length, its own AHDSR, and filter/filter-envelope. Input Filter is a biquad filter (LPF/HPF/BPF/Notch) with drive and wet mix. Reverb is an FDN-style reverb with size/decay/predelay/width/high-cut/low-cut.
-
-Track FX also has 4 banks x 4 slots, and per-track enable states, so one bank definition can be shared while each track chooses on/off independently. Implemented track effects are `Delay`, `Roll`, and `Filter`. The track filter includes its own `Seq` and `Env` sub-pages, so cutoff motion can be rhythm-gated and envelope-shaped during playback.
-
-### About Note / Seq / Envelope
-
-I don't know the logic of sequencer in RC-505, so I implemented these Fx. Note and Seq are tick-based (12 ticks per beat, max 32 beats). Step options include `1/6`, `1/4`, `1/3`, `1/2`, `2/3`, `3/4`, `5/6`, `1`, and `2`. `Push` appends one step block, `Pop` removes the latest block.
-
-Envelope is AHDSR plus `Start` and tension controls to provide a 'LFO' function. In the current mapping, tension default `100` means linear, values below it bend one way, values above it bend the other way, and max is `1000`.
-
-### Latency Compensation (IMPORTANT)
-
-Windows audio paths can have noticeable round-trip latency. Beat settings include `Latency Complement` (ms), which is used in recording alignment logic. Recorded buffers are compensated when recording stops, overdub write positions are offset accordingly, and track-FX timeline processing is shifted to stay phase-aligned with compensated track audio.
-
-This setting is hardware-dependent. A value that works on one machine may not work on another, so treat it as a per-device calibration value.
-
-### Save, Load, and Project Files
-
-Projects are stored under `%APPDATA%/rc505_rs/projects` (fallback to local `projects/` if `%APPDATA%` is unavailable). There is one index file for the project list and one JSON file per project.
-
-When exiting from loop/screen to init (or closing window), the app asks whether to save: `Y` save, `N` discard, `Esc` cancel exit. Beat/system/fx settings are persisted. Audio track waveform buffers are not persisted yet; this version stores configuration state, not recorded audio clips.
-
-Known limitation for now: if you change an FX slot type (for example Oscillator -> Filter), that slot is reinitialized and its previous parameter set is lost.
-
-### RC505 Launcher
-
-The project also includes a companion launcher (`rc505_launcher.exe`) that helps you configure audio settings and manage projects before starting the main app.
-
-**Features:**
-- **Audio Device Setup** — scan and select input/output devices before launch
-- **Project Manager** — create, rename, and delete projects from a GUI
-- **Hardware Settings** — pre-configure latency compensation (0-500 ms)
-- **One-Click Launch** — launches `rc505_rs.exe`, applies saved preferences, and opens the selected project
-
-**Usage:**
-
-Place `rc505_launcher.exe` in the same directory as `rc505_rs.exe`, then double-click the launcher. Select your audio devices and project, then click **Launch RC505** to open that project in the main app.
-
-You can also build both binaries from source:
+To edit without opening audio streams:
 
 ```powershell
-cargo build --release
-# produces:
-#   target/release/rc505_rs.exe        (main looper app)
-#   target/release/rc505_launcher.exe  (launcher)
+cargo run --release --bin rc505_rs -- --offline
+cargo run --release --bin rc505_rs -- --offline --data-dir=E:\RC505-data
 ```
 
-### Pre-built Releases
+The optional `asio` feature requires the appropriate SDK/driver environment; this revision was verified with default features.
 
-Download the latest `rc505_rs.exe` and `rc505_launcher.exe` from the [Releases](https://github.com/Yishanka/RC505_RS/releases) page. No installation required — just extract and run.
+## Record and perform
 
-## 5. Future Development
+Open or create a project, check **Audio devices & latency**, set BPM, then press `1` to record track 1. Press again to finish on the next beat. While playing, press again to overdub; finish overdubbing at the loop boundary. `F1` stops that track.
 
-There are still many bugs and edge cases. I have not done systematic testing yet, so issue reports are very welcome.
+| Control | Action |
+|---|---|
+| `1`–`5` | Record / play / overdub / finish each track |
+| `F1`–`F5`; `Space` | Individual stop; all start/stop |
+| Click track title; left/right arrows | Select the Track FX target |
+| `Q W E R`; `U I O P` | Input FX; selected track's FX switches |
+| `T` | Switch FX keys between slot toggles and bank selection |
+| `Z X` / `C V` / `B N` / `M ,` / `. /` | Track 1–5 volume down/up pairs |
+| `Shift` + fader keys | Fine adjustment |
+| Click FX slot → Expand editor | Open the visual preset workspace |
+| `Ctrl+S`; expanded editor `Esc` | Save parameters; return to performance |
 
-The roadmap is to keep improving timing stability, expand DSP choices, and improve usability. Vocoder, pitch-related effects, and more refined track-level workflows are all candidates for future work.
+Faders use a dB scale. A tap changes 0.5 dB, holding accelerates, and releasing stops. Shift changes 0.1 dB per tap and runs at 1/8 hold speed. Configure the maximum rate under **Keyboard faders & shortcuts**. Multiple tracks can move independently. Performance shortcuts yield to text input, expanded editing and inactive windows.
 
-If you want to contribute, PRs and suggestions are welcome. I am building this in public and learning while doing it.
+The expanded editor supports monophonic piano-roll drawing, moving/resizing notes, undo/redo, pattern copying, transposition, grid snapping, filter response, AHDSR curves and versioned single-slot presets. Narrow windows collapse the quick editor to keep performance controls visible.
 
+![Piano roll](docs/images/sequence.png)
+
+**Projects currently save parameters and sequences, not recorded loop audio.** Recordings are session-only and do not survive project switching or exit. Default data lives under `%APPDATA%\rc505_rs`; `--data-dir` selects an isolated workspace.
+
+## Scope and verification
+
+This revision improves existing effects; it adds no new FX types. Work includes Vocoder envelope shaping/formant controls, Roll1/2 parameters and stereo capture, tempo-synced delay, reverb dry/wet and density controls, reliable note triggers, envelope-based thresholds and zero-drive filter linearity.
+
+The [official BOSS parameter guide](https://static.roland.com/assets/media/pdf/RC-505mk2_Parameter_eng04_W.pdf) informs the implementation. This is independent DSP with documented differences, not a claim of hardware-identical sound. Hardware A/B listening and driver-latency calibration remain outstanding.
+
+```powershell
+cargo check --all-targets
+cargo test --all-targets
+cargo build --release --bins
+```
+
+See [architecture](docs/ARCHITECTURE.md), [validation](docs/VALIDATION.md), [contributor instructions](AGENTS.md) and the [roadmap](AGENTS/PLAN.md). Audio persistence, callback allocation/lock removal, sample-accurate scheduling and full hardware routing remain priorities.

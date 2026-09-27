@@ -130,7 +130,16 @@ impl NoteConfigs {
         &self.note_seq
     }
 
-    pub fn set_seq(&mut self, seq: Vec<Option<NoteOct>>) {
+    pub fn set_seq(&mut self, mut seq: Vec<Option<NoteOct>>) {
+        seq.truncate(MAX_SEQ_LEN);
+        for value in &mut seq {
+            *value = value
+                .filter(|note| note.note != Note::N)
+                .map(|note| NoteOct {
+                    octave: note.octave.min(9),
+                    ..note
+                });
+        }
         self.step_len_seq = infer_step_len_seq(&seq);
         self.note_seq = seq;
     }
@@ -140,12 +149,8 @@ impl NoteConfigs {
     }
 
     pub fn set_seq_with_steps(&mut self, seq: Vec<Option<NoteOct>>, step_len_seq: Vec<usize>) {
-        if seq.len() != step_len_seq.len() {
-            self.set_seq(seq);
-            return;
-        }
-        self.note_seq = seq;
-        self.step_len_seq = step_len_seq;
+        self.set_seq(seq);
+        self.step_len_seq = super::sequence_edit::canonical_steps(&self.note_seq, &step_len_seq);
     }
 
     pub fn current_note_oct(&self) -> Option<NoteOct> {

@@ -40,7 +40,7 @@ impl Metronome {
             }
             Some(start) => {
                 let now = Instant::now();
-                let elapsed = now.duration_since(start);
+                let elapsed = now.saturating_duration_since(start);
                 let beat_duration = Duration::from_secs_f64(60.0 / self.bpm as f64);
                 let beats_passed =
                     (elapsed.as_secs_f64() / beat_duration.as_secs_f64()).floor() as u64;

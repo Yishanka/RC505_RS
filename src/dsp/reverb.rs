@@ -7,10 +7,12 @@ use crate::config::reverb_configs::{
 const DELAY_RATIOS: [f32; 4] = [0.73, 0.89, 1.0, 1.11];
 const FEEDBACK_MATRIX_SCALE: f32 = 0.5; // 2 / n for n=4
 const INPUT_GAIN: f32 = 0.5;
-const WET_GAIN: f32 = 0.35;
 
 #[derive(Clone, Copy)]
 pub struct ReverbParams {
+    pub dry_level: f32,
+    pub wet_level: f32,
+    pub density: f32,
     pub size_ms: f32,
     pub rt60_ms: f32,
     pub predelay_ms: f32,
@@ -106,6 +108,10 @@ impl OnePoleHp {
 
 #[derive(Clone)]
 pub struct ReverbDspState {
+    diffusers: [Diffuser; 4],
+    smooth_dry: f32,
+    smooth_wet: f32,
+    smooth_density: f32,
     sample_rate: f32,
     predelay: DelayLine,
     lines: [DelayLine; 4],
@@ -124,6 +130,10 @@ impl ReverbDspState {
         let predelay_len = predelay_samples(sample_rate, REVERB_PREDELAY_MAX_MS as f32);
         Self {
             sample_rate,
+            diffusers: make_diffusers(sample_rate),
+            smooth_dry: 1.0,
+            smooth_wet: 0.35,
+            smooth_density: 0.0,
             predelay: DelayLine::new(predelay_len),
             lines: std::array::from_fn(|_| DelayLine::new(max_delay)),
             lp: std::array::from_fn(|_| OnePoleLp::new()),
@@ -140,6 +150,7 @@ impl ReverbDspState {
             return;
         }
         self.sample_rate = sample_rate.max(1.0);
+        self.diffusers = make_diffusers(self.sample_rate);
         let max_delay = max_delay_samples(self.sample_rate);
         for line in &mut self.lines {
             *line = DelayLine::new(max_delay);
@@ -180,7 +191,7 @@ pub fn process_sample(
 
     if (state.smooth_size_ms - state.last_size_ms).abs() > 0.5 {
         let max_delay = state.lines[0].buffer.len().saturating_sub(1);
-        let mut used: Vec<usize> = Vec::with_capacity(4);
+        let mut used = [0; 4];
         for (idx, line) in state.lines.iter_mut().enumerate() {
             let delay_ms = state.smooth_size_ms * DELAY_RATIOS[idx];
             let base_samples = (delay_ms * sr / 1000.0).round() as usize;
@@ -188,19 +199,30 @@ pub fn process_sample(
             while used.contains(&prime) {
                 prime = next_prime(prime + 1);
             }
-            used.push(prime);
+            used[idx] = prime;
             line.set_delay_samples(prime.min(max_delay));
         }
         state.last_size_ms = state.smooth_size_ms;
     }
 
     let input_mono = (input_l + input_r) * 0.5;
-    let predelayed = {
-        let out = state.predelay.read();
+    let mut predelayed = {
+        let out = if predelay_samples == 0 {
+            input_mono
+        } else {
+            state.predelay.read()
+        };
         state.predelay.write(input_mono);
         out
     };
 
+    state.smooth_density +=
+        (((p.density.clamp(1.0, 10.0) - 1.0) / 9.0 * 0.7) - state.smooth_density) * alpha;
+    if state.smooth_density > 1e-5 {
+        for diffuser in &mut state.diffusers {
+            predelayed = diffuser.next(predelayed, state.smooth_density);
+        }
+    }
     let mut y = [0.0f32; 4];
     for (idx, line) in state.lines.iter().enumerate() {
         y[idx] = line.read();
@@ -236,8 +258,20 @@ pub fn process_sample(
     let wet_l = mid + side;
     let wet_r = mid - side;
 
-    let out_l = input_l + wet_l * WET_GAIN;
-    let out_r = input_r + wet_r * WET_GAIN;
+    state.smooth_dry += (p.dry_level.clamp(0.0, 1.0) - state.smooth_dry) * alpha;
+    state.smooth_wet += (p.wet_level.clamp(0.0, 1.0) - state.smooth_wet) * alpha;
+    let dry = if p.dry_level == 0.0 {
+        0.0
+    } else {
+        state.smooth_dry
+    };
+    let wet = if p.wet_level == 0.0 {
+        0.0
+    } else {
+        state.smooth_wet
+    };
+    let out_l = input_l * dry + wet_l * wet;
+    let out_r = input_r * dry + wet_r * wet;
 
     (out_l, out_r)
 }
@@ -283,4 +317,110 @@ fn is_prime(n: usize) -> bool {
         d += 2;
     }
     true
+}
+
+#[derive(Clone)]
+struct Diffuser {
+    buffer: Vec<f32>,
+    index: usize,
+}
+impl Diffuser {
+    fn next(&mut self, input: f32, g: f32) -> f32 {
+        let delayed = self.buffer[self.index];
+        let output = delayed - g * input;
+        self.buffer[self.index] = input + g * output;
+        self.index = (self.index + 1) % self.buffer.len();
+        output
+    }
+}
+fn make_diffusers(sr: f32) -> [Diffuser; 4] {
+    [4.77, 3.53, 1.71, 0.89].map(|ms| Diffuser {
+        buffer: vec![0.0; (ms * sr / 1000.0).round().max(1.0) as usize],
+        index: 0,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn params() -> ReverbParams {
+        ReverbParams {
+            dry_level: 0.0,
+            wet_level: 1.0,
+            density: 10.0,
+            size_ms: 45.0,
+            rt60_ms: 600.0,
+            predelay_ms: 0.0,
+            width: 1.0,
+            high_cut_damp: 0.3,
+            low_cut_hz: 120.0,
+        }
+    }
+    #[test]
+    fn impulse_is_finite_decays_and_predelay_defers_wet_signal() {
+        let mut state = ReverbDspState::new();
+        let mut early = 0.0;
+        let mut late = 0.0;
+        for frame in 0..96000 {
+            let x = if frame == 0 { 1.0 } else { 0.0 };
+            let (l, r) = process_sample(&mut state, params(), 48000.0, x, x);
+            assert!(l.is_finite() && r.is_finite() && l.abs() < 2.0 && r.abs() < 2.0);
+            if frame < 24000 {
+                early += l * l + r * r;
+            }
+            if frame > 72000 {
+                late += l * l + r * r;
+            }
+        }
+        assert!(early > 1e-6 && late < early * 0.001);
+        let mut state = ReverbDspState::new();
+        for frame in 0..24000 {
+            let x = if frame == 0 { 1.0 } else { 0.0 };
+            assert_eq!(
+                process_sample(
+                    &mut state,
+                    ReverbParams {
+                        predelay_ms: 500.0,
+                        ..params()
+                    },
+                    48000.0,
+                    x,
+                    x
+                ),
+                (0.0, 0.0)
+            );
+        }
+    }
+    #[test]
+    fn independent_dry_wet_levels_have_exact_silent_endpoints() {
+        let mut state = ReverbDspState::new();
+        assert_eq!(
+            process_sample(
+                &mut state,
+                ReverbParams {
+                    dry_level: 1.0,
+                    wet_level: 0.0,
+                    ..params()
+                },
+                48000.0,
+                0.2,
+                -0.3
+            ),
+            (0.2, -0.3)
+        );
+        assert_eq!(
+            process_sample(
+                &mut state,
+                ReverbParams {
+                    dry_level: 0.0,
+                    wet_level: 0.0,
+                    ..params()
+                },
+                48000.0,
+                0.2,
+                -0.3
+            ),
+            (0.0, 0.0)
+        );
+    }
 }

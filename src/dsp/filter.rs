@@ -83,11 +83,55 @@ pub fn process_sample(
 
     let drive = p.drive.clamp(0.0, 1.0);
     let gain = 1.0 + drive * 9.0;
-    let driven = (input * gain).tanh() / gain.tanh().max(1e-6);
+    // Drive=0 must be linear. Blend in normalized saturation as drive rises.
+    let saturated = (input * gain).tanh() / gain.tanh().max(1e-6);
+    let driven = input + drive * (saturated - input);
 
     let wet_sig = state.biquad.process(driven, coeffs);
     let wet = p.mix.clamp(0.0, 1.0);
     input * (1.0 - wet) + wet_sig * wet
+}
+
+/// Steady-state linear response, shared with the editor (including dry/wet phase).
+pub fn response_db(kind: FilterType, cutoff: f32, q: f32, mix: f32, hz: f32, sr: f32) -> f32 {
+    let c = coeffs(kind, cutoff.clamp(20.0, sr * 0.49), q.clamp(0.1, 10.0), sr);
+    let w = 2.0 * std::f32::consts::PI * hz / sr;
+    let nr = c.b0 + c.b1 * w.cos() + c.b2 * (2.0 * w).cos();
+    let ni = -c.b1 * w.sin() - c.b2 * (2.0 * w).sin();
+    let dr = 1.0 + c.a1 * w.cos() + c.a2 * (2.0 * w).cos();
+    let di = -c.a1 * w.sin() - c.a2 * (2.0 * w).sin();
+    let norm = (dr * dr + di * di).max(1e-20);
+    let real = (1.0 - mix) + mix * (nr * dr + ni * di) / norm;
+    let imag = mix * (ni * dr - nr * di) / norm;
+    10.0 * (real * real + imag * imag).max(1e-12).log10()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn zero_drive_is_linear_and_dry_mix_is_identity() {
+        let p = FilterParams {
+            filter_type: FilterType::Lpf,
+            cutoff_hz: 2000.0,
+            q: 0.707,
+            drive: 0.0,
+            mix: 1.0,
+        };
+        let mut a = FilterDspState::new();
+        let mut b = FilterDspState::new();
+        for i in 0..2000 {
+            let x = (i as f32 * 0.1).sin() * 0.1;
+            let y = process_sample(&mut a, p, 48000.0, x);
+            let y2 = process_sample(&mut b, p, 48000.0, x * 4.0);
+            assert!((y2 - y * 4.0).abs() < 1e-5);
+        }
+        assert_eq!(
+            process_sample(&mut a, FilterParams { mix: 0.0, ..p }, 48000.0, 0.37),
+            0.37
+        );
+        assert!(response_db(FilterType::Lpf, 1000.0, 0.707, 1.0, 10000.0, 48000.0) < -30.0);
+    }
 }
 
 fn coeffs(filter_type: FilterType, cutoff: f32, q: f32, sample_rate: f32) -> BiquadCoeffs {

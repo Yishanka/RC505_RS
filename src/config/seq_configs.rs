@@ -48,18 +48,15 @@ impl SeqConfigs {
         &self.step_len_seq
     }
 
-    pub fn set_seq(&mut self, seq: Vec<bool>) {
+    pub fn set_seq(&mut self, mut seq: Vec<bool>) {
+        seq.truncate(MAX_SEQ_LEN);
         self.step_len_seq = infer_step_len_seq(&seq);
         self.seq = seq;
     }
 
     pub fn set_seq_with_steps(&mut self, seq: Vec<bool>, step_len_seq: Vec<usize>) {
-        if seq.len() != step_len_seq.len() {
-            self.set_seq(seq);
-            return;
-        }
-        self.seq = seq;
-        self.step_len_seq = step_len_seq;
+        self.set_seq(seq);
+        self.step_len_seq = super::sequence_edit::canonical_steps(&self.seq, &step_len_seq);
     }
 
     pub fn ticks_per_step(&self) -> usize {

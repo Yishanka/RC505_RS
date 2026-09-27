@@ -13,13 +13,15 @@ impl SystemConfigs {
 
         let in_devices: Vec<String> = host
             .input_devices()
-            .unwrap()
+            .into_iter()
+            .flatten()
             .map(|d| d.name().unwrap_or_default())
             .collect();
 
         let out_devices: Vec<String> = host
             .output_devices()
-            .unwrap()
+            .into_iter()
+            .flatten()
             .map(|d| d.name().unwrap_or_default())
             .collect();
 

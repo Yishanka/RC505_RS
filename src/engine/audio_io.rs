@@ -60,6 +60,8 @@ fn shift_buffer_earlier_in_place(buffer: &mut [f32], shift: usize) {
 }
 
 struct EngineTrack {
+    gain: f32,
+    target_gain: f32,
     buffer: Vec<f32>,
     play_cursor: usize,
     carrier_cursor: usize,
@@ -83,6 +85,8 @@ struct EngineTrack {
 impl EngineTrack {
     fn new() -> Self {
         Self {
+            gain: 1.0,
+            target_gain: 1.0,
             buffer: Vec::new(),
             play_cursor: 0,
             carrier_cursor: 0,
@@ -274,14 +278,10 @@ impl AudioIO {
             .find(|d| d.name().ok().as_deref() == Some(output_name))
             .context("Failed to find an output device (Speaker)")?;
 
-        let supported_config = input_device
-            .supported_input_configs()?
-            .filter(|c| c.channels() == 2) // 强制双声道，减少映射开销
-            .next()
-            .map(|range| range.with_max_sample_rate())
-            .unwrap_or(input_device.default_input_config()?);
-        let mut config: cpal::StreamConfig = supported_config.into();
-        config.buffer_size = cpal::BufferSize::Fixed(BUFFER_SIZE);
+        let input_formats: Vec<_> = input_device.supported_input_configs()?.collect();
+        let output_formats: Vec<_> = output_device.supported_output_configs()?.collect();
+        let config =
+            super::device_config::common_config(&input_formats, &output_formats, BUFFER_SIZE)?;
         if let Ok(mut fx) = fx_engine.lock() {
             fx.set_sample_rate(config.sample_rate.0 as f32);
         }
@@ -292,7 +292,7 @@ impl AudioIO {
             as usize)
             * config.channels as usize;
         let frame_size = BUFFER_SIZE;
-        let rb_size = frame_size as usize * config.channels as usize * 4; // 留 4 倍冗余防止断音
+        let rb_size = 4096usize.max(frame_size as usize) * config.channels as usize * 4; // 留 4 倍冗余防止断音
         let rb = HeapRb::<f32>::new(rb_size);
         let (mut prod, mut cons) = rb.split();
 
@@ -494,22 +494,16 @@ impl AudioIO {
                                 0.0
                             };
                             let (wet_l, wet_r) = if let Some(track_fx) = track_fx_guard.as_mut() {
-                                track_fx.process_frame(
-                                    track_idx,
-                                    track_fx_elapsed,
-                                    dry_l,
-                                    dry_r,
-                                    &track.buffer,
-                                    idx_l,
-                                    channels,
-                                )
+                                track_fx.process_frame(track_idx, track_fx_elapsed, dry_l, dry_r)
                             } else {
                                 (dry_l, dry_r)
                             };
 
                             if audible {
-                                mixed_l += wet_l;
-                                mixed_r += wet_r;
+                                track.gain += (track.target_gain - track.gain)
+                                    * (1.0 / (0.005 * sample_rate)).min(1.0);
+                                mixed_l += wet_l * track.gain;
+                                mixed_r += wet_r * track.gain;
                             }
                             if let Some(carrier) = frame_carriers.get_mut(track_idx) {
                                 *carrier = Some((wet_l, wet_r));
@@ -624,14 +618,20 @@ impl AudioIO {
     }
 
     pub fn update_input_fx(&self, config: &crate::config::InputFxConfigs) {
-        if let Ok(mut fx) = self.fx_engine.lock() {
-            fx.update_from_config(config);
+        let runtime = crate::engine::input_fx::InputFxRuntime::from_config(config);
+        if let Ok(mut fx) = self.fx_engine.try_lock() {
+            let retired = fx.swap_runtime(runtime);
+            drop(fx);
+            drop(retired);
         }
     }
 
     pub fn update_track_fx(&self, config: &crate::config::TrackFxConfigs) {
-        if let Ok(mut fx) = self.track_fx_engine.lock() {
-            fx.update_from_config(config);
+        let runtime = crate::engine::track_fx::TrackFxRuntime::from_config(config);
+        if let Ok(mut fx) = self.track_fx_engine.try_lock() {
+            let retired = fx.swap_runtime(runtime);
+            drop(fx);
+            drop(retired);
         }
     }
 
@@ -646,6 +646,72 @@ impl AudioIO {
 
     pub fn set_realtime_enabled(&self, enabled: bool) {
         self.realtime_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn track_playing_only(&self, index: usize) -> bool {
+        self.state
+            .try_lock()
+            .ok()
+            .and_then(|state| {
+                state.tracks.get(index).map(|track| {
+                    track.playing
+                        && !track.recording
+                        && !track.overdubbing
+                        && track.overdub_stop_at.is_none()
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn set_track_levels(&self, levels: &[f32]) {
+        if let Ok(mut state) = self.state.try_lock() {
+            for (track, level) in state.tracks.iter_mut().zip(levels) {
+                track.target_gain = level.clamp(0.0, 1.0);
+            }
+        }
+    }
+
+    pub fn clear_track_now(&self, index: usize) {
+        if let Ok(mut state) = self.state.lock() {
+            if let Some(track) = state.tracks.get_mut(index) {
+                *track = EngineTrack::new();
+            }
+        }
+        if let Ok(mut fx) = self.track_fx_engine.lock() {
+            fx.reset_track(index);
+        }
+        if let Ok(mut queues) = self.track_carriers.lock() {
+            if let Some(queue) = queues.get_mut(index) {
+                queue.clear();
+            }
+        }
+    }
+
+    /// Bounded, non-blocking UI overview; never scan or copy an entire recording.
+    pub fn waveform_overviews(&self) -> Option<Vec<Vec<f32>>> {
+        let state = self.state.try_lock().ok()?;
+        Some(
+            state
+                .tracks
+                .iter()
+                .map(|track| {
+                    (0..96)
+                        .map(|bin| {
+                            if track.buffer.is_empty() {
+                                return 0.0;
+                            }
+                            (0..8)
+                                .map(|sub| {
+                                    let index = ((bin * 8 + sub) * track.buffer.len() / (96 * 8))
+                                        .min(track.buffer.len() - 1);
+                                    track.buffer[index].abs()
+                                })
+                                .fold(0.0_f32, f32::max)
+                        })
+                        .collect()
+                })
+                .collect(),
+        )
     }
 
     pub fn record_at(&self, track_id: usize, at: Instant) {
@@ -727,6 +793,10 @@ impl AudioIO {
     pub fn pause_now(&self, track_id: usize) {
         if let Ok(mut engine) = self.state.lock() {
             if let Some(track) = engine.tracks.get_mut(track_id) {
+                track.overdub_start_at = None;
+                track.overdub_stop_at = None;
+                track.record_start_at = None;
+                track.record_stop_at = None;
                 track.playing = false;
                 track.paused_carrier = false;
                 track.recording = false;
@@ -749,6 +819,10 @@ impl AudioIO {
                         track.carrier_cursor = track.play_cursor;
                     }
                 }
+                track.overdub_start_at = None;
+                track.overdub_stop_at = None;
+                track.record_start_at = None;
+                track.record_stop_at = None;
                 track.playing = false;
                 track.paused_carrier = !track.buffer.is_empty();
                 track.recording = false;
@@ -761,6 +835,14 @@ impl AudioIO {
         if let Ok(mut engine) = self.state.lock() {
             for track in &mut engine.tracks {
                 *track = EngineTrack::new();
+            }
+        }
+        if let Ok(mut fx) = self.track_fx_engine.lock() {
+            fx.reset_all_tracks();
+        }
+        if let Ok(mut queues) = self.track_carriers.lock() {
+            for queue in queues.iter_mut() {
+                queue.clear();
             }
         }
     }

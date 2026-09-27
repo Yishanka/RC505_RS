@@ -1,5 +1,5 @@
-const DELAY_TIME_MIN_MS: f32 = 20.0;
-const DELAY_TIME_MAX_MS: f32 = 1_500.0;
+const DELAY_TIME_MIN_MS: f32 = 1.0;
+const DELAY_TIME_MAX_MS: f32 = 2_000.0;
 const FEEDBACK_MAX: f32 = 0.95;
 
 #[derive(Clone, Copy)]
@@ -53,6 +53,14 @@ impl DelayDspState {
         self.buffer_r = vec![0.0; max_delay_samples.max(2)];
         self.write_idx = 0;
         self.smooth_time_samples = (DELAY_TIME_MIN_MS / 1000.0) * sr;
+        self.fb_lp_l = 0.0;
+        self.fb_lp_r = 0.0;
+    }
+
+    pub fn reset(&mut self) {
+        self.buffer_l.fill(0.0);
+        self.buffer_r.fill(0.0);
+        self.write_idx = 0;
         self.fb_lp_l = 0.0;
         self.fb_lp_r = 0.0;
     }

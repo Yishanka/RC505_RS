@@ -1,4 +1,4 @@
-mod config_type;
+pub(crate) mod config_type;
 
 pub mod app_config;
 pub mod beat_configs;
@@ -24,3 +24,5 @@ pub use input_fx_configs::{FxKind, InputFx, InputFxConfigs};
 pub use osc_configs::OscillatorConfigs;
 pub use system_configs::SystemConfigs;
 pub use track_fx_configs::{TrackFx, TrackFxConfigs, TrackFxKind};
+pub mod sequence_edit;
+pub mod time_mode;

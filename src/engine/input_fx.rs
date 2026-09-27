@@ -29,7 +29,7 @@ use crate::dsp::filter::{FilterDspState, FilterParams, process_sample as process
 use crate::dsp::my_delay::{
     MyDelayFxDspState, MyDelayFxParams, process_fx_sample as process_mydelay_fx_sample,
 };
-use crate::dsp::note::{note_at_time, seq_bool_at_time};
+use crate::dsp::note::{StepTrigger, note_at_time, seq_bool_at_time};
 use crate::dsp::oscillator::{
     OscillatorFxDspState, OscillatorFxParams, process_fx_sample as process_osc_fx_sample,
 };
@@ -63,6 +63,9 @@ pub struct FilterRuntime {
 
 #[derive(Clone, Copy)]
 pub struct ReverbRuntime {
+    pub dry_level: f32,
+    pub wet_level: f32,
+    pub density: f32,
     pub size_ms: f32,
     pub rt60_ms: f32,
     pub predelay_ms: f32,
@@ -86,6 +89,11 @@ pub struct MyDelayRuntime {
 
 #[derive(Clone, Copy)]
 pub struct VocoderRuntime {
+    pub tone: f32,
+    pub mod_sens: f32,
+    pub formant_semitones: f32,
+    pub sibilance: f32,
+    pub carrier_thru: bool,
     pub carrier: VocoderCarrier,
     pub bands: usize,
     pub attack_ms: f32,
@@ -106,6 +114,7 @@ pub struct FxSlotRuntime {
 
 #[derive(Clone)]
 pub struct FxSlotState {
+    pub trigger: StepTrigger,
     pub osc: OscillatorFxDspState,
     pub filter_l: FilterDspState,
     pub filter_r: FilterDspState,
@@ -136,6 +145,7 @@ pub struct InputFxState {
 }
 
 pub struct InputFxEngine {
+    input_envelope: crate::dsp::detector::PeakFollower,
     runtime: InputFxRuntime,
     state: InputFxState,
     metronome_start: Option<Instant>,
@@ -146,6 +156,7 @@ pub struct InputFxEngine {
 impl InputFxEngine {
     pub fn new(sample_rate: f32) -> Self {
         Self {
+            input_envelope: crate::dsp::detector::PeakFollower::default(),
             runtime: InputFxRuntime::empty(),
             state: InputFxState::new(),
             metronome_start: None,
@@ -159,12 +170,19 @@ impl InputFxEngine {
     }
 
     pub fn update_metronome(&mut self, start: Option<Instant>, bpm: usize) {
+        if self.metronome_start != start {
+            for bank in &mut self.state.banks {
+                for slot in &mut bank.slots {
+                    slot.trigger = StepTrigger::default();
+                }
+            }
+        }
         self.metronome_start = start;
         self.bpm = bpm.max(1);
     }
 
-    pub fn update_from_config(&mut self, config: &InputFxConfigs) {
-        self.runtime = InputFxRuntime::from_config(config);
+    pub fn swap_runtime(&mut self, runtime: InputFxRuntime) -> InputFxRuntime {
+        std::mem::replace(&mut self.runtime, runtime)
     }
 
     pub fn process_frame(
@@ -181,7 +199,9 @@ impl InputFxEngine {
 
         let bank = &self.runtime.banks[bank_idx];
         let state_bank = &mut self.state.banks[bank_idx];
-        let input_level = (input_l.abs() + input_r.abs()) * 0.5;
+        let input_level = self
+            .input_envelope
+            .next((input_l.abs() + input_r.abs()) * 0.5, self.sample_rate);
 
         let mut osc_mix = 0.0f32;
         let mut active_osc_count = 0usize;
@@ -206,12 +226,12 @@ impl InputFxEngine {
             } else {
                 seq_bool_at_time(&osc.note_on_seq, self.bpm, elapsed_secs)
             };
-            let note_retrigger =
-                if self.metronome_start.is_none() || osc.note_trigger_seq.is_empty() {
-                    false
-                } else {
-                    seq_bool_at_time(&osc.note_trigger_seq, self.bpm, elapsed_secs)
-                };
+            let note_retrigger = state_bank.slots[idx].trigger.next(
+                &osc.note_trigger_seq,
+                self.bpm,
+                elapsed_secs,
+                self.metronome_start.is_some(),
+            );
             let osc_filtered = process_osc_fx_sample(
                 &mut state_bank.slots[idx].osc,
                 OscillatorFxParams {
@@ -261,12 +281,12 @@ impl InputFxEngine {
             } else {
                 seq_bool_at_time(&delay.note_on_seq, self.bpm, elapsed_secs)
             };
-            let note_retrigger =
-                if self.metronome_start.is_none() || delay.note_trigger_seq.is_empty() {
-                    false
-                } else {
-                    seq_bool_at_time(&delay.note_trigger_seq, self.bpm, elapsed_secs)
-                };
+            let note_retrigger = state_bank.slots[idx].trigger.next(
+                &delay.note_trigger_seq,
+                self.bpm,
+                elapsed_secs,
+                self.metronome_start.is_some(),
+            );
             let note = if delay.note_seq.is_empty() {
                 delay.note_current
             } else if self.metronome_start.is_none() {
@@ -312,14 +332,37 @@ impl InputFxEngine {
                 continue;
             };
             let carrier_idx = vocoder.carrier.track_idx();
-            let carrier = carrier_idx
+            let mut carrier = carrier_idx
                 .and_then(|idx| track_carriers.get(idx))
                 .copied()
                 .flatten();
+            let source_channel = match vocoder.carrier {
+                VocoderCarrier::InputLeft => {
+                    carrier = Some((input_l, input_l));
+                    Some(0)
+                }
+                VocoderCarrier::InputRight => {
+                    carrier = Some((input_r, input_r));
+                    Some(1)
+                }
+                _ => None,
+            };
+            let modulator_override =
+                source_channel.map(|channel| if channel == 0 { out_r } else { out_l });
             let (carrier_l, carrier_r) = carrier.unwrap_or((0.0, 0.0));
             (out_l, out_r) = process_vocoder_frame(
                 &mut state_bank.slots[idx].vocoder,
                 VocoderParams {
+                    tone: vocoder.tone,
+                    mod_sens: vocoder.mod_sens,
+                    formant_semitones: vocoder.formant_semitones,
+                    sibilance: vocoder.sibilance,
+                    modulator_override,
+                    mute_carrier_channel: if vocoder.carrier_thru {
+                        None
+                    } else {
+                        source_channel
+                    },
                     bands: vocoder.bands,
                     attack_ms: vocoder.attack_ms,
                     release_ms: vocoder.release_ms,
@@ -380,6 +423,9 @@ impl InputFxEngine {
             let (wet_l, wet_r) = process_reverb_frame(
                 &mut state_bank.slots[idx].reverb,
                 ReverbParams {
+                    dry_level: reverb.dry_level,
+                    wet_level: reverb.wet_level,
+                    density: reverb.density,
                     size_ms: reverb.size_ms,
                     rt60_ms: reverb.rt60_ms,
                     predelay_ms: reverb.predelay_ms,
@@ -607,6 +653,9 @@ impl InputFxRuntime {
                             None,
                             None,
                             Some(ReverbRuntime {
+                                dry_level: reverb.dry_level.value.min(100) as f32 / 100.0,
+                                wet_level: reverb.wet_level.value.min(100) as f32 / 100.0,
+                                density: reverb.density.value.clamp(1, 10) as f32,
                                 size_ms,
                                 rt60_ms,
                                 predelay_ms,
@@ -761,6 +810,11 @@ impl InputFxRuntime {
                         None,
                         None,
                         Some(VocoderRuntime {
+                            tone: vocoder.tone.clamp(-50, 50) as f32,
+                            mod_sens: vocoder.mod_sens.clamp(-50, 50) as f32,
+                            formant_semitones: vocoder.formant_semitones.clamp(-12, 12) as f32,
+                            sibilance: vocoder.sibilance.value.min(100) as f32 / 100.0,
+                            carrier_thru: vocoder.carrier_thru,
                             carrier: vocoder.carrier.value,
                             bands: vocoder
                                 .bands
@@ -821,6 +875,7 @@ impl FxBankState {
     pub fn new() -> Self {
         Self {
             slots: std::array::from_fn(|_| FxSlotState {
+                trigger: StepTrigger::default(),
                 osc: OscillatorFxDspState::new(),
                 filter_l: FilterDspState::new(),
                 filter_r: FilterDspState::new(),
@@ -835,4 +890,33 @@ impl FxBankState {
 fn tension_to_exponent(value: usize) -> f32 {
     let t = value.min(ENVELOPE_TENSION_MAX) as f32;
     2.0_f32.powf((t - 100.0) / 50.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn attack_completes_inside_the_first_sequence_tick() {
+        let mut config = InputFxConfigs::new();
+        config.set_slot_kind(0, 0, crate::config::FxKind::Oscillator);
+        config.banks[0].slots[0].is_enabled = true;
+        let Some(InputFx::Oscillator(osc)) = &mut config.banks[0].slots[0].fx else {
+            panic!()
+        };
+        osc.threshold.value = 0;
+        osc.envelope.attack_ms.value = 10;
+        osc.osc_filter.mix.value = 0;
+        osc.note.push();
+        let mut engine = InputFxEngine::new(48000.0);
+        engine.swap_runtime(InputFxRuntime::from_config(&config));
+        engine.update_metronome(Some(Instant::now()), 120);
+        let mut peak = 0.0_f32;
+        for sample in 0..960 {
+            let (value, _) = engine.process_frame(sample as f64 / 48000.0, 0.0, 0.0, &[]);
+            if sample > 600 {
+                peak = peak.max(value.abs());
+            }
+        }
+        assert!(peak > 0.8, "attack was held at its first sample: {peak}");
+    }
 }

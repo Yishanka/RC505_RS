@@ -9,6 +9,8 @@ pub const VOCODER_RELEASE_MAX_MS: usize = 1000;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum VocoderCarrier {
+    InputLeft,
+    InputRight,
     Track1,
     Track2,
     Track3,
@@ -19,6 +21,8 @@ pub enum VocoderCarrier {
 impl std::fmt::Display for VocoderCarrier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let label = match self {
+            VocoderCarrier::InputLeft => "Input L (mod: R)",
+            VocoderCarrier::InputRight => "Input R (mod: L)",
             VocoderCarrier::Track1 => "Tr1",
             VocoderCarrier::Track2 => "Tr2",
             VocoderCarrier::Track3 => "Tr3",
@@ -32,6 +36,7 @@ impl std::fmt::Display for VocoderCarrier {
 impl VocoderCarrier {
     pub fn track_idx(self) -> Option<usize> {
         match self {
+            VocoderCarrier::InputLeft | VocoderCarrier::InputRight => None,
             VocoderCarrier::Track1 => Some(0),
             VocoderCarrier::Track2 => Some(1),
             VocoderCarrier::Track3 => Some(2),
@@ -42,6 +47,11 @@ impl VocoderCarrier {
 }
 
 pub struct VocoderConfigs {
+    pub tone: i32,
+    pub mod_sens: i32,
+    pub formant_semitones: i32,
+    pub sibilance: NumericConfig,
+    pub carrier_thru: bool,
     pub sel_idx: Option<usize>,
     pub carrier: EnumConfig<VocoderCarrier>,
     pub bands: NumericConfig,
@@ -54,11 +64,18 @@ pub struct VocoderConfigs {
 impl VocoderConfigs {
     pub fn new() -> Self {
         Self {
+            tone: 0,
+            mod_sens: 0,
+            formant_semitones: 0,
+            sibilance: NumericConfig::new("Sibilance(%)", 20),
+            carrier_thru: false,
             sel_idx: None,
             carrier: EnumConfig::new(
                 "Carrier",
                 VocoderCarrier::Track1,
                 vec![
+                    VocoderCarrier::InputLeft,
+                    VocoderCarrier::InputRight,
                     VocoderCarrier::Track1,
                     VocoderCarrier::Track2,
                     VocoderCarrier::Track3,
