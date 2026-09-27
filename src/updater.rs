@@ -21,6 +21,17 @@ fn script() -> Result<PathBuf> {
 }
 fn command() -> Result<Command> {
     let mut command = Command::new("powershell.exe");
+    #[cfg(windows)]
+    {
+        let powershell_directory = PathBuf::from(
+            std::env::var_os("SystemRoot").context("Windows system directory unavailable")?,
+        )
+        .join("System32/WindowsPowerShell/v1.0");
+        command = Command::new(powershell_directory.join("powershell.exe"));
+        // A pwsh parent can export PowerShell 7's PSModulePath, which prevents
+        // Windows PowerShell from autoloading its own Get-FileHash function.
+        command.env("PSModulePath", powershell_directory.join("Modules"));
+    }
     command
         .args([
             "-NoProfile",

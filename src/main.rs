@@ -29,6 +29,7 @@ fn main() -> eframe::Result<()> {
     let small = std::env::args().any(|arg| arg == "--ui-preview=performance-small");
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
+            .with_icon(ui::theme::window_icon())
             .with_inner_size(if small {
                 [960.0, 720.0]
             } else {

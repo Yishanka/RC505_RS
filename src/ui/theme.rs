@@ -71,21 +71,32 @@ pub fn caption(ui: &mut egui::Ui, text: impl Into<String>) {
 
 /// Shared visual identity for the launcher, performance and preset workspaces.
 pub fn brand(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
-    ui.painter()
-        .rect_filled(rect, 7.0, Color32::from_rgb(28, 66, 63));
-    for (i, height) in [8.0, 17.0, 11.0, 20.0, 8.0].into_iter().enumerate() {
-        let x = rect.left() + 6.0 + i as f32 * 4.0;
-        ui.painter().vline(
-            x,
-            rect.center().y - height / 2.0..=rect.center().y + height / 2.0,
-            egui::Stroke::new(2.0, if i < 3 { ACCENT } else { TRACK }),
-        );
-    }
+    let id = egui::Id::new("rc505-brand-texture");
+    let texture = ui
+        .ctx()
+        .data(|d| d.get_temp::<egui::TextureHandle>(id))
+        .unwrap_or_else(|| {
+            let icon = window_icon();
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [icon.width as usize, icon.height as usize],
+                &icon.rgba,
+            );
+            let texture = ui
+                .ctx()
+                .load_texture("rc505-brand", image, egui::TextureOptions::LINEAR);
+            ui.ctx().data_mut(|d| d.insert_temp(id, texture.clone()));
+            texture
+        });
+    ui.add(egui::Image::new((texture.id(), egui::vec2(32.0, 32.0))));
     ui.label(
         egui::RichText::new("RC505 RS")
             .size(23.0)
             .strong()
             .color(ACCENT),
     );
+}
+
+pub fn window_icon() -> egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!("../../assets/rc505-rs-icon-v1-256.png"))
+        .expect("Bundled RC505 RS icon is invalid")
 }

@@ -31,8 +31,13 @@ $old=Join-Path $downloads 'RC505-RS-0.0.0-windows-x64-setup.exe'
 $unrelated=Join-Path $downloads 'another-program.exe'
 [IO.File]::WriteAllText($old,'old cache fixture')
 [IO.File]::WriteAllText($unrelated,'must remain')
-& (Join-Path $program 'rc505_rs.exe') ("--cleanup-update-cache="+$candidate)
-if ($LASTEXITCODE -ne 0) {throw 'Installer cache finalization failed.'}
+$previousModulePath=$env:PSModulePath
+try {
+    # Reproduce launching from a shell with an incompatible module environment.
+    $env:PSModulePath=Join-Path $testRoot 'foreign-shell-modules'
+    & (Join-Path $program 'rc505_rs.exe') ("--cleanup-update-cache="+$candidate)
+    if ($LASTEXITCODE -ne 0) {throw 'Installer cache finalization failed.'}
+} finally {$env:PSModulePath=$previousModulePath}
 $latest=Join-Path $downloads 'RC505-RS-setup.exe'
 if (!(Test-Path -LiteralPath $latest) -or (Test-Path -LiteralPath $old) -or (Test-Path -LiteralPath $candidate) -or !(Test-Path -LiteralPath $unrelated)) {throw 'Cache retention policy is incorrect.'}
 if ((Get-FileHash -LiteralPath $latest -Algorithm SHA256).Hash -ine $metadata.sha256) {throw 'Latest cached installer changed.'}

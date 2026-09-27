@@ -112,6 +112,7 @@ fn main() -> eframe::Result<()> {
         "RC505 RS · Audio setup",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
+                .with_icon(theme::window_icon())
                 .with_inner_size([780.0, 560.0])
                 .with_min_inner_size([660.0, 520.0]),
             ..Default::default()

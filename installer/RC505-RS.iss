@@ -29,6 +29,7 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 WizardSizePercent=115
+SetupIconFile={#SourceRoot}\assets\rc505-rs-icon-v1.ico
 UninstallDisplayIcon={app}\rc505_rs.exe
 CloseApplications=no
 RestartApplications=no
