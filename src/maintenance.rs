@@ -7,6 +7,20 @@ pub fn cli() -> Option<Result<()>> {
         println!("RC505 RS {}", env!("CARGO_PKG_VERSION"));
         return Some(Ok(()));
     }
+    if args.iter().any(|a| a == "--installation-info") {
+        return Some((|| {
+            let executable = std::env::current_exe()?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "version":env!("CARGO_PKG_VERSION"),"executable":executable,
+                    "data_dir":crate::app_support::paths::appdata_root(),
+                    "download_dir":crate::app_support::paths::downloads_dir(),
+                }))?
+            );
+            Ok(())
+        })());
+    }
     if let Some(source) = args.iter().find_map(|a| a.strip_prefix("--migrate-data=")) {
         return Some((|| {
             let destination =

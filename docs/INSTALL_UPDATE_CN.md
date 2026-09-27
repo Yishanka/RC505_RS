@@ -44,6 +44,7 @@ RC505 RS/
 ```powershell
 & 'E:\SJTU\rc505\rc505_rs.exe' '--migrate-data=C:\Users\你的名字\AppData\Roaming\rc505_rs' '--data-dir=E:\SJTU\rc505\data'
 & 'E:\SJTU\rc505\rc505_rs.exe' '--data-dir=E:\SJTU\rc505\data' --verify-data
+& 'E:\SJTU\rc505\rc505_rs.exe' --installation-info
 ```
 
 以后移动数据：先退出所有 RC505 RS 窗口，复制完整 `data` 目录到新位置，修改 `install-settings.json` 的 `data_dir`，再重启确认。更新向导也可以指定路径。不要在演奏或后台保存时移动文件夹。

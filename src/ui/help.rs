@@ -67,6 +67,10 @@ pub fn draw(ctx: &egui::Context, app: &mut MyApp) {
                 ui.heading(format!("RC505 RS {}",env!("CARGO_PKG_VERSION")));
                 ui.label(format!("Data: {}",crate::app_support::paths::appdata_root().unwrap_or_default().display()));
                 ui.label(format!("Downloads: {}",crate::app_support::paths::downloads_dir().display()));
+                ui.horizontal(|ui|{
+                    if ui.button("Open data folder").clicked(){if let Some(path)=crate::app_support::paths::appdata_root(){if let Err(error)=std::process::Command::new("explorer.exe").arg(path).spawn(){app.status=error.to_string();}}}
+                    if ui.button("Open download folder").clicked(){if let Err(error)=std::process::Command::new("explorer.exe").arg(crate::app_support::paths::downloads_dir()).spawn(){app.status=error.to_string();}}
+                });
                 ui.add_space(12.0);
                 if ui.add_enabled(!app.busy(),egui::Button::new("Check for updates")).clicked(){app.check_update();}
                 if let Some(release)=&app.update {
