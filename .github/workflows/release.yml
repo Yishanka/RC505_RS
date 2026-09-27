@@ -13,7 +13,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: build-cache
         with:
           path: |
             ~/.cargo/registry
@@ -27,14 +28,14 @@ jobs:
           Write-Output "::notice title=Rust toolchain::$(rustc --version)"
           cargo check --all-targets --locked 2>&1 | Tee-Object check.log
           if ($LASTEXITCODE -ne 0) {
-            $details = (Get-Content check.log -Tail 100) -join "`n"
+            $details = (Get-Content check.log -Tail 24) -join "`n"
             $details = $details.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
             Write-Output "::error title=Cargo check failed::$details"
             exit 1
           }
           cargo test --all-targets --locked 2>&1 | Tee-Object test.log
           if ($LASTEXITCODE -ne 0) {
-            $details = (Get-Content test.log -Tail 100) -join "`n"
+            $details = (Get-Content test.log -Tail 24) -join "`n"
             $details = $details.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
             Write-Output "::error title=Cargo tests failed::$details"
             exit 1
@@ -57,3 +58,13 @@ jobs:
           $assets = @(Get-ChildItem -LiteralPath dist -File | ForEach-Object FullName)
           gh release create $env:RELEASE_TAG @assets --verify-tag --title "RC505 RS $env:RELEASE_TAG" --notes-file docs/RELEASE_NOTES_CN.md
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Save build cache
+        if: always() && steps.build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-rust-${{ hashFiles('Cargo.lock') }}-${{ github.ref_type }}
