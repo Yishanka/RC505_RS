@@ -50,6 +50,8 @@ Inno Setup6.7.3从官方Release下载，验证了有效Pyrsys B.V.签名。打�
 
 安装器测试加入不兼容PSModulePath模拟；0.2.3更新助手使用系统Windows PowerShell的绝对路径及系统模块目录，本机测试通过。图标检查了真实alpha和16–256px ICO层，32px缩略图清晰；原图、ICO和生成提示保存于仓库。
 
+包含图标与环境修复的云端[完整验证](https://github.com/Yishanka/RC505_RS/actions/runs/36308713262)已通过：37项测试及安装器smoke test全部成功。
+
 ## 未验证的设备范围
 
 - 用户声卡的长时间压力、拔插/休眠、64/128帧稳定性、ASIO驱动。

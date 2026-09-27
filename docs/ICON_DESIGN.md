@@ -18,4 +18,3 @@ Composition: centered square icon, 1024x1024. A dark navy rounded-square tile wi
 Palette matches the app: deep navy #0F141C and #191F29, luminous mint #55DDBE as the primary accent, restrained periwinkle #8BA7FF as a secondary echo/return accent. Tasteful depth, precise crisp geometry, subtle highlights, minimal glow contained inside the tile. Premium modern synthesizer aesthetic, slightly futuristic and playful but professional.
 No text, no letters or numbers, no fruit, no copied brand mark, no hardware product illustration, no tiny interface details, no gradients washing out the silhouette, no background scene, no external cast shadow, no watermark. Preserve true transparency in the outer corners.
 ```
-
