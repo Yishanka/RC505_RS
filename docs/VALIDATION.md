@@ -65,6 +65,10 @@ Inno Setup6.7.3从官方Release下载，验证了有效Pyrsys B.V.签名。打�
 回放起点要求五轨停止并重置FX尾音；5分钟/轨、30分钟/回放；renderer版本不匹配时拒绝播放，不静默更换算法。完整语义和限制见[操作手册](USER_GUIDE_CN.md)。
 # 0.2.4 界面与启动验证（2026-09-27）
 
+- 提交 `f79324b` 与标签 `v0.2.4` 已推送；[主分支构建](https://github.com/Yishanka/RC505_RS/actions/runs/36318839776) 和 [发布构建](https://github.com/Yishanka/RC505_RS/actions/runs/36318839995) 均成功。[正式发布页](https://github.com/Yishanka/RC505_RS/releases/tag/v0.2.4) 提供安装器与便携包。
+- 已用安装版 0.2.3 的自带更新器检查、下载、校验并安装正式 0.2.4。`E:\SJTU\rc505\rc505_rs.exe` 自动重新打开且响应正常；两个程序的 PE 子系统均为 Windows GUI。安装后的 `--installation-info` 管道输出正常。
+- `E:\SJTU\rc505\data` 的 28 个已有数据文件更新前后 SHA-256 全部一致（排除运行锁）。`E:\installer` 仅保留 `RC505-RS-setup.exe`、对应校验清单与更新辅助脚本，已校验版本 0.2.4；正式安装包 SHA-256 为 `f184df7848c99e3647388d431216120d4df1e32535421034913c79de6d9506c1`。
+
 - `cargo check --all-targets --locked`、`cargo test --all-targets --locked` 通过：主程序 41 项，启动器 2 项。覆盖删除短按/长按/双击、切轨与取消、旧语言配置迁移、动作按钮 Enter 激活；保留原有 DSP、回放与快照测试。
 - `cargo build --release --bins --locked` 与本地安装器打包通过。安装器验证两次无导入安装、数据哨兵保持、两个 PE 的 GUI 子系统、维护命令管道输出，以及仅保留一份安装包。
 - 使用独立 `var/ui-verification/language-test` 数据目录与离线预览检查中文大窗口、英文 960×720 小窗口、双语工程选择页、钢琴卷帘、英文帮助；音频启动器检查语言按钮与渲染。小窗口工作区纵向滚动，五轨保持在窗口宽度内。截图见 `docs/images/`。
