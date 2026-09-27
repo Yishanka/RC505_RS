@@ -12,13 +12,13 @@
 
 | 模块 | 本项目当前状态 | 与硬件的差距 / 后续验收依据 |
 |---|---|---|
-| 五轨循环 | 录音、播放、叠录、暂停、恢复、清除，延迟补偿 | 缺持久化音频、Undo/Redo、one-shot、reverse、完整同步/路由控制 |
+| 五轨循环 | 采样时钟、音频持久化、Undo/Redo、One Shot、Reverse、Stop、固定长度与量化 | 完整硬件同步/通道矩阵、Tempo Sync音频伸缩、Assign/MIDI未覆盖 |
 | FX bank/slot | Input / Track 各4×4；Track 按轨启用 | 串并联、Assign、MIDI、详细路由尚未覆盖 |
 | Oscillator | 4种基础波形、门限、AHDSR、音符序列、内部滤波 | 可服务于 OSC BOT 类演奏；波形与参数不是完整对应 |
 | Vocoder | 音轨/输入声道载波、Tone/Mod Sens、频谱包络归一化、formant移动 | 输入仅一个立体声设备；Attack毫秒、Bands/Release/Formant/Sibilance属于软件参数；灵敏度和频响需A/B标定 |
 | Roll | 捕获前级效果输出；Roll1反馈/Roll2次数；Time、细分、Balance | 按公开控制语义独立实现；反馈曲线、取样时机和瞬态没有实机标定 |
-| Delay | 1–2000ms及常用拍点同步；立体声、插值、反馈、阻尼、平滑、混合 | 反馈仍为百分比，没有映射硬件次数；缺独立Direct/Effect和LowCut |
-| Reverb | 扩散器+4线FDN，干湿、密度、RT60、0–500ms预延迟 | 高频仍用阻尼百分比；Size/Width/12秒上限为软件扩展；需实测脉冲响应和听感 |
+| Delay | 1–2000ms及拍点同步；独立Direct/Effect、反馈低切、立体声、插值与平滑 | 反馈仍为百分比，没有测得硬件次数映射；滑动读头改变时间会改变音高 |
+| Reverb | 扩散器+4线FDN，干湿、密度、RT60、0–500ms预延迟、高切Hz | 旧高切百分比映射到原频率；Size/Width/12秒上限为软件扩展；需实测IR/听感 |
 | Filter | RBJ biquad、Q、Drive、干湿；可视曲线 | 门限与调制语义为自研；应实测扫频、共振、饱和及电平 |
 | MyDelay | 100ms片段采样、音符驱动周期循环 | 自定义效果，不使用硬件名称对应关系来声称一致 |
 
@@ -29,6 +29,8 @@
 3. 滤波器可视曲线从 DSP 系数计算，包络曲线由同一状态机模拟，避免画出与算法无关的装饰图。
 4. 按用户补充授权重写Vocoder，延续原先共振峰对比度的思路，并用整组包络归一化替换逐带限幅。离线双频载波测试验证formant移动方向，尚未证明元音可懂度或硬件等效性。
 5. 公开手册描述的是参数用途，不提供专有DSP。没有使用Serum非公开源码，也不将通用合成器算法误称为RC‑505内部算法。
+6. rev.04的TRACK说明明确：Reverse和One Shot不进入叠录；One Shot再次播放键重触发；Stop含Immediate/Fade/Loop，再次Stop立即停止。软件沿用这些可核对语义，但量化UI统一为Off/Beat/Measure/Loop，并非原机所有LOOP SYNC子参数的完整复制。
+7. 实时线程设计参考[PortAudio回调约束](https://portaudio.com/docs/v19-doxydocs/writing_a_callback.html)：避开分配、文件I/O和mutex。CPAL输入/输出时间戳只作诊断；补偿建议来自实际回环，不假设驱动时间戳包含全部硬件延迟。
 
 ## 硬件听感验证建议
 

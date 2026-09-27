@@ -4,17 +4,28 @@ mod app_support;
 mod config;
 mod dsp;
 mod engine;
+mod maintenance;
 mod presets;
 mod project;
-mod screen;
+mod replay;
+mod session;
 mod state;
-mod track;
+#[cfg(test)]
+mod test_alloc;
 mod ui;
+mod updater;
 mod utils;
 
 use app::MyApp;
 
 fn main() -> eframe::Result<()> {
+    if let Some(result) = maintenance::cli() {
+        if let Err(error) = result {
+            eprintln!("{error:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     let small = std::env::args().any(|arg| arg == "--ui-preview=performance-small");
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

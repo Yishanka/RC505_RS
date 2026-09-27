@@ -21,8 +21,12 @@ pub fn common_config(
                 .iter()
                 .filter(|c| c.sample_format() == SampleFormat::F32 && c.channels() == channels)
             {
-                let min = i.min_sample_rate().0.max(o.min_sample_rate().0);
-                let max = i.max_sample_rate().0.min(o.max_sample_rate().0);
+                let min = i.min_sample_rate().0.max(o.min_sample_rate().0).max(8_000);
+                let max = i
+                    .max_sample_rate()
+                    .0
+                    .min(o.max_sample_rate().0)
+                    .min(192_000);
                 if min > max {
                     continue;
                 }

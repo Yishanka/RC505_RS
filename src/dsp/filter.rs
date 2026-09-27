@@ -43,6 +43,13 @@ pub struct FilterDspState {
     smooth_cutoff_log2: f32,
     smooth_q: f32,
     inited: bool,
+    cached: BiquadCoeffs,
+    last_cutoff: f32,
+    target_log2: f32,
+    last_kind: FilterType,
+    sample_rate: f32,
+    alpha: f32,
+    control_tick: u8,
 }
 
 impl FilterDspState {
@@ -52,6 +59,19 @@ impl FilterDspState {
             smooth_cutoff_log2: 0.0,
             smooth_q: 0.707,
             inited: false,
+            cached: BiquadCoeffs {
+                b0: 1.0,
+                b1: 0.0,
+                b2: 0.0,
+                a1: 0.0,
+                a2: 0.0,
+            },
+            last_cutoff: -1.0,
+            target_log2: 0.0,
+            last_kind: FilterType::Lpf,
+            sample_rate: 0.0,
+            alpha: 0.0,
+            control_tick: 0,
         }
     }
 }
@@ -67,25 +87,44 @@ pub fn process_sample(
     let cutoff = p.cutoff_hz.clamp(20.0, nyquist);
     let q = p.q.clamp(0.1, 10.0);
 
-    let target_log2 = cutoff.log2();
-    if !state.inited {
-        state.smooth_cutoff_log2 = target_log2;
+    if state.sample_rate != sr {
+        state.sample_rate = sr;
+        state.alpha = 1.0 - (-1.0 / (0.02 * sr)).exp();
+        state.inited = false;
+    }
+    if state.last_cutoff != cutoff {
+        state.last_cutoff = cutoff;
+        state.target_log2 = cutoff.log2();
+    }
+    let first = !state.inited;
+    if first {
+        state.smooth_cutoff_log2 = state.target_log2;
         state.smooth_q = q;
         state.inited = true;
     }
-
-    let alpha = 1.0 - (-1.0 / (0.02 * sr)).exp();
-    state.smooth_cutoff_log2 += (target_log2 - state.smooth_cutoff_log2) * alpha;
-    state.smooth_q += (q - state.smooth_q) * alpha;
-    let smooth_cutoff = 2.0_f32.powf(state.smooth_cutoff_log2).clamp(20.0, nyquist);
-
-    let coeffs = coeffs(p.filter_type, smooth_cutoff, state.smooth_q, sr);
-
+    let moving = (state.target_log2 - state.smooth_cutoff_log2).abs() > 1e-5
+        || (q - state.smooth_q).abs() > 1e-5;
+    state.smooth_cutoff_log2 += (state.target_log2 - state.smooth_cutoff_log2) * state.alpha;
+    state.smooth_q += (q - state.smooth_q) * state.alpha;
+    if first || state.last_kind != p.filter_type || (moving && state.control_tick == 0) {
+        state.cached = coeffs(
+            p.filter_type,
+            2.0_f32.powf(state.smooth_cutoff_log2).clamp(20.0, nyquist),
+            state.smooth_q,
+            sr,
+        );
+        state.last_kind = p.filter_type;
+    }
+    state.control_tick = (state.control_tick + 1) % 8;
+    let coeffs = state.cached;
     let drive = p.drive.clamp(0.0, 1.0);
-    let gain = 1.0 + drive * 9.0;
-    // Drive=0 must be linear. Blend in normalized saturation as drive rises.
-    let saturated = (input * gain).tanh() / gain.tanh().max(1e-6);
-    let driven = input + drive * (saturated - input);
+    let driven = if drive == 0.0 {
+        input
+    } else {
+        let gain = 1.0 + drive * 9.0;
+        let saturated = (input * gain).tanh() / gain.tanh().max(1e-6);
+        input + drive * (saturated - input)
+    };
 
     let wet_sig = state.biquad.process(driven, coeffs);
     let wet = p.mix.clamp(0.0, 1.0);

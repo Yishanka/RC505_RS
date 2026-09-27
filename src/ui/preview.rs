@@ -9,7 +9,10 @@ use crate::{
 };
 
 pub fn configure(app: &mut MyApp, mode: &str) {
-    app.open_project(0);
+    if mode == "projects" {
+        return;
+    }
+    app.active_project_idx = Some(0);
     app.app_state = AppState::MainLoop;
     app.config.input_fx.set_slot_kind(0, 0, FxKind::Oscillator);
     app.config.input_fx.set_slot_kind(0, 1, FxKind::Filter);

@@ -25,27 +25,28 @@ pub struct KeyFader {
 }
 
 impl KeyFader {
-    pub fn advance(&mut self, level: &mut f32, direction: i8, fine: bool, dt: f32, speed: f32) {
+    pub fn delta(&mut self, direction: i8, dt: f32, speed: f32, tap: f32) -> f32 {
         if direction == 0 {
             *self = Self::default();
-            return;
+            return 0.0;
         }
         let mut delta = 0.0;
         if self.direction != direction {
             self.direction = direction;
             self.held = 0.0;
-            delta = if fine { 0.1 } else { 0.5 };
+            delta = tap;
         }
         let previous = self.held;
-        // A stalled UI must never cause an unexpected large volume jump.
         self.held += dt.clamp(0.0, 0.05);
-        let speed = speed.clamp(6.0, 60.0);
-        delta += if fine {
-            ((self.held - 0.18).max(0.0) - (previous - 0.18).max(0.0)) * speed / 8.0
-        } else {
-            distance(self.held, speed) - distance(previous, speed)
-        };
-        *level = gain((decibels(*level) + f32::from(direction) * delta).clamp(MIN_DB, 0.0));
+        delta += distance(self.held, speed) - distance(previous, speed);
+        direction as f32 * delta
+    }
+    pub fn advance(&mut self, level: &mut f32, direction: i8, dt: f32, speed: f32) {
+        let delta = self.delta(direction, dt, speed.clamp(1.0, 60.0), 0.5);
+        if delta == 0.0 {
+            return;
+        }
+        *level = gain((decibels(*level) + delta).clamp(MIN_DB, 0.0));
     }
 }
 
@@ -60,20 +61,20 @@ fn distance(time: f32, speed: f32) -> f32 {
 mod tests {
     use super::*;
     #[test]
-    fn tap_hold_fine_and_frame_rate_are_predictable() {
+    fn tap_hold_and_frame_rate_are_predictable() {
         let mut key = KeyFader::default();
         let mut level = 1.0;
-        key.advance(&mut level, -1, false, 0.016, 24.0);
+        key.advance(&mut level, -1, 0.016, 24.0);
         assert!((decibels(level) + 0.5).abs() < 0.001);
-        key.advance(&mut level, 0, false, 1.0, 24.0);
+        key.advance(&mut level, 0, 1.0, 24.0);
         assert!((decibels(level) + 0.5).abs() < 0.001);
-        key.advance(&mut level, -1, true, 0.016, 24.0);
-        assert!((decibels(level) + 0.6).abs() < 0.001);
+        key.advance(&mut level, -1, 0.016, 24.0);
+        assert!((decibels(level) + 1.0).abs() < 0.001);
         let render = |fps: usize| {
             let mut key = KeyFader::default();
             let mut level = 1.0;
             for _ in 0..fps {
-                key.advance(&mut level, -1, false, 1.0 / fps as f32, 24.0);
+                key.advance(&mut level, -1, 1.0 / fps as f32, 24.0);
             }
             decibels(level)
         };
@@ -84,19 +85,19 @@ mod tests {
         let mut keys = [KeyFader::default(); 5];
         let mut levels = [0.5; 5];
         for _ in 0..120 {
-            keys[0].advance(&mut levels[0], -1, false, 1.0 / 60.0, 60.0);
-            keys[1].advance(&mut levels[1], 1, false, 1.0 / 60.0, 24.0);
-            keys[2].advance(&mut levels[2], 0, false, 1.0 / 60.0, 24.0);
+            keys[0].advance(&mut levels[0], -1, 1.0 / 60.0, 60.0);
+            keys[1].advance(&mut levels[1], 1, 1.0 / 60.0, 24.0);
+            keys[2].advance(&mut levels[2], 0, 1.0 / 60.0, 24.0);
         }
         assert_eq!(levels[0], 0.0);
         assert_eq!(levels[1], 1.0);
         assert_eq!(levels[2], 0.5);
         let previous = levels;
         for i in 0..5 {
-            keys[i].advance(&mut levels[i], 0, false, 1.0, 24.0);
+            keys[i].advance(&mut levels[i], 0, 1.0, 24.0);
         }
         assert_eq!(levels, previous);
-        keys[0].advance(&mut levels[0], 1, false, 0.016, 24.0);
+        keys[0].advance(&mut levels[0], 1, 0.016, 24.0);
         assert!(levels[0] > 0.0);
     }
 }

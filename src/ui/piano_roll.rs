@@ -384,7 +384,7 @@ pub fn draw(
                     pos2(grid.left() - 8.0, y + row_height * 0.5),
                     egui::Align2::RIGHT_CENTER,
                     NoteOct::from_pitch_index(pitch).to_string(),
-                    egui::FontId::monospace(11.0),
+                    egui::FontId::monospace(13.0),
                     if black { theme::MUTED } else { Color32::WHITE },
                 );
                 painter.hline(grid.x_range(), y, Stroke::new(0.5, Color32::from_gray(44)));
@@ -404,7 +404,7 @@ pub fn draw(
                         pos2(x + 4.0, rect.top() + 5.0),
                         egui::Align2::LEFT_TOP,
                         format!("{}.{}", tick / 48 + 1, (tick / 12) % 4 + 1),
-                        egui::FontId::monospace(11.0),
+                        egui::FontId::monospace(13.0),
                         theme::MUTED,
                     );
                 }
@@ -437,7 +437,7 @@ pub fn draw(
                         r.left_center() + vec2(4.0, 0.0),
                         egui::Align2::LEFT_CENTER,
                         event.pitch.to_string(),
-                        egui::FontId::monospace(10.0),
+                        egui::FontId::monospace(12.0),
                         theme::BACKGROUND,
                     );
                 }

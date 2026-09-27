@@ -26,3 +26,4 @@ pub use system_configs::SystemConfigs;
 pub use track_fx_configs::{TrackFx, TrackFxConfigs, TrackFxKind};
 pub mod sequence_edit;
 pub mod time_mode;
+pub mod track_options;

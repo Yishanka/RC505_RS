@@ -1,77 +1,39 @@
-# Architecture and maintenance
+# Architecture
 
-## Boundaries
+## Ownership and scheduling
 
-```text
-main.rs                    startup, window, debug preview entry
-app.rs                     lifecycle, config sync, loop scheduling
-app/actions.rs             shared mouse/keyboard application commands
-app/keyboard.rs            performance keys + legacy parameter navigation
-app/faders.rs              independent dB key faders, integrated speed curve
-ui/performance.rs          responsive transport, FX racks, track controls
-ui/editor.rs               pinned FX target, quick/full editor, preset workflow
-ui/parameters.rs           shared parameter widgets + DSP-derived visuals
-ui/piano_roll.rs           pointer interaction, selection, bounded edit history
-ui/compact.rs              retained hardware-style keyboard display
-config/sequence_edit.rs    pure monophonic editing + normalized step boundaries
-config/time_mode.rs         shared milliseconds / musical-time conversion
-config/*                   editable parameter values (single source of truth)
-presets.rs                 versioned single-slot codec using project migration
-project.rs                 project codec, validation, atomic parameter writes
-engine/device_config.rs    common input/output f32 format negotiation
-engine/audio_io.rs         callbacks, track audio, routing, faders, waveform snapshot
-engine/input_fx.rs          config snapshots → input FX DSP
-engine/track_fx.rs          config snapshots → per-track DSP
-dsp/*                      stateful DSP independent of egui
-```
+`engine/core.rs::RenderCore` is the single device-independent renderer. The output callback owns it; UI does not mutate track audio or advance transport. `SampleClock` uses a u64 frame counter and derives every beat boundary from the original rational tempo, avoiding cumulative rounding. Playback, capture, compensation tails, overdub and sequences use this clock. GUI state is a bounded `EngineView` snapshot.
 
-The old `ui/looper.rs` painted track/FX controls without pointer actions. Its active compact display is now isolated in `compact.rs`; dead display-only tracks/racks are removed. Keyboard routing moved out of the application lifecycle. New mouse controls and legacy keyboard track keys call the same commands.
+The input callback sanitizes stereo frames and pushes them into an SPSC ring. The output callback adapts input clock drift with cubic interpolation, runs track FX to obtain pre-fader carriers, processes Input FX, writes recordings/overdubs, applies faders and emits the master mix. Monitor and loop audio share one processing domain. Queue starvation/overflow and callback duration are counted without callback logging.
 
-No trait-object plugin graph or new FX types were introduced. The existing typed enums are retained until routing and state ownership justify a larger graph migration. Adding an effect must still cover config, runtime conversion, DSP, editor, persistence and documentation.
+Control messages are bounded (128). Parameters/runtimes are constructed outside the callback, swapped on receipt and retired through the worker queue. The renderer has no egui dependency. No callback mutex or per-frame Vec remains. Memory reclamation, WAV I/O and serialization run on workers. The zero-allocation test covers five-track rendering, existing heavy FX, parameter exchange, snapshot sharing, overdub, undo and clear; this is not a hardware deadline guarantee.
 
-## Sequence representation
+## Audio pages and undo
 
-12 ticks per quarter-note beat, maximum 384 ticks. `note_seq` contains pitch/rest per tick; `step_len_seq` has nonzero lengths only at step starts. Repeated same-pitch notes therefore have distinct retriggers. Event editing is an adapter over these arrays, preserving the project format.
+`LoopAudio` stores stereo f32 frames in shared 8192-frame pages (storage granularity, not device buffering). Page tables reserve five-minute capacity per track. A dedicated worker supplies prepared pages. Snapshots/undo share references; subsequent writes obtain a fresh page and copy only that page. Old references go to a bounded retirement queue. Pool exhaustion stops the affected recording and reports it, instead of growing a Vec in the callback. Five tracks at 48 kHz, five minutes each need about576 MB for one full audio generation; undo/COW snapshots can increase peak memory.
 
-On import, sequences are bounded, pitch octaves clamped and step lengths rebuilt from markers/value changes. Overlap replacement retains unaffected fragments. Undo stores paired array snapshots, capped at64; the clipboard survives target selection while history does not.
+Undo is one whole overdub transaction per track. Beginning another overdub replaces the prior undo point. Snapshot save serializes both versions. Reverse and One Shot suppress overdub. Stop may be immediate, loop-end or fade; a second stop bypasses a pending playback stop. Recording finalization waits for the configured capture tail, preserving exact target length.
 
-`StepTrigger` converts start markers to one sample per absolute tick. Input sequences use the metronome phase; Track Filter uses the loop playhead. GUI curves do not advance the audio DSP state.
+## Persistence and replay
 
-## Audio path
+`project.rs` retains the legacy JSON parameter codec and explicit defaults. New optional fields include track options, independent fader rates, routing, sample calibration and snapshot reference. Delay Mix migrates to independent Direct/Effect levels. Reverb percent high damping maps to the previous frequency before conversion to Hz. Unique file identifiers survive rename.
 
-```text
-device input → input envelope detector
-  input + normalized OSC bus → MyDelay bus → Vocoder slots
-  → Filter slots → Reverb slots → monitor + record/overdub input
+`session.rs` writes version2 asset bundles: config, five track WAVs, undo WAVs, sample rate, lengths and SHA-256. A new revision is staged, flushed and renamed before updating the project pointer. Existing versions and a prior project JSON backup remain. Missing/corrupt data fails before replacing the runtime. Index recovery and a project trash service are centralized here; the launcher no longer owns an independent project database. A per-data-folder editor lock makes a second editor read-only.
 
-loop buffer → Track FX (slot order) → track fader → master mix
-                                   └→ Vocoder carrier (pre-fader)
-master mix + processed input → hard-clamped device output
-```
+`replay.rs` stores an initial audio/config bundle, dry input float WAV and ordered JSONL events `{frame, sequence, kind}`. Begin Take requires stopped tracks and swaps in prepared clean DSP state; this makes the initial condition explicit instead of omitting old effect tails. Commands are logged at the sample where the renderer accepts them. The worker detects input gaps and queue loss. A completed take has hashes and a renderer version; incomplete takes cannot masquerade as valid replay.
 
-This is the specialized processing order, **not** arbitrary A→B→C→D for all Input FX. Each effect group follows slot order. Track FX follows slot order across effect types. Roll keeps recent processed stereo audio while bypassed and freezes a slice on activation, so preceding Track FX are captured. Switching banks clears Roll history; changing slice length recollects input. Its two-second buffer is prepared on the control path, not allocated in its processing function.
+Offline rendering runs the same `RenderCore` at the original sample rate. A regression fixture verifies bit-identical output and final loop contents for recording, overdub, undo/redo and parameter changes. Future algorithm changes must increment the renderer version or preserve an old renderer. Cross-compiler/CPU bit identity is not promised. Import materializes the final loops/config as a new snapshot in the source project or a new project; arbitrary other-project overwrite is prohibited.
 
-Vocoder uses cached analysis/synthesis bandpass banks, attack/release envelopes, spectral contrast normalization, interpolated formant shift and tone tilt. Input carriers use one stereo device's opposite channel as modulator. Track carriers are post-Track-FX, pre-fader. Reverb adds input allpass diffusion and independent dry/wet levels to the existing four-line FDN. These are independent implementations; public parameter names do not establish hardware-equivalent transfer functions.
+## UI and installation
 
-UI builds FX runtime snapshots before acquiring a mutex; `try_lock` swaps a snapshot and retires the previous allocation after unlocking. If busy, the next UI frame retries. This shortens UI-held locks but is **not a lock-free engine**. Callbacks still lock and allocate; recording growth, carrier queue storage, DSP lazy allocations and independent device clocks need further work.
+`app/actions.rs` shares commands between mouse and keyboard. `keyboard.rs` separates performance, text, full editor and panel focus. F6, A/F7 and D/F8 select top/left/right; navigation registers focusable controls. Momentary FX store their original bank/track/slot so release restores the correct target even after selection changes. Faders integrate elapsed time, with independent direction and rate controllers.
 
-Track gain targets use the shared config and are smoothed in the output callback. Bounded waveform overviews use `try_lock`, 96 bins ×8 samples/track, cached at10Hz. They are visual overviews, not full peak caches.
+`ui/theme.rs` supplies fonts/colors; `performance.rs` uses fixed quick-panel geometry and internal scrolling. `editor.rs`, `parameters.rs` and `piano_roll.rs` edit the same config with pinned bank/slot identity. Legacy painted screens and the old wall-clock Track/Metronome scheduler are removed.
 
-Keyboard faders use independent key-down state for each track, with an integrated dB speed curve, tap increments and a fine modifier. Opposing keys cancel. OS autorepeat is ignored for performance toggles. Focus, expanded editing, text input and legacy mode suspend fader control. Mouse and key faders change the same gain targets. This is not a substitute for testing physical keyboard rollover.
+`app_support/paths.rs` resolves explicit `--data-dir`, then executable-adjacent `install-settings.json`, then the legacy AppData fallback. The installer defaults data to the program's `data` folder. `maintenance.rs` performs copy/verify migration before audio or GUI startup. `updater.rs` uses an embedded PowerShell helper to validate GitHub release metadata, download and hash the installer, and wait for normal app exit before installation. No updater token or GitHub credential is distributed.
 
-Track commands are shared by mouse/keyboard. A pending finish ignores subsequent record taps until the engine acknowledges playback; Stop during initial recording requests finish-then-stop. Pause cancels queued record/overdub operations. Clearing a track clears the recording buffer, frozen Roll, Delay tail, filter state and queued carrier audio as well as the display state.
+## DSP scope
 
-## Persistence and compatibility
+Legacy Input FX: input + normalized Oscillator bus + MyDelay bus → Vocoder → Filter → Reverb. Serial mode executes A→D, with generators added at their slot. Track FX follows slot order. Vocoder carriers are after Track FX and before faders. Filter coefficients update at an eight-sample control interval while moving; Reverb feedback coefficients at32 samples. Fixed parameters use cached coefficients.
 
-- Project fields remain compatible. Optional `track_levels` defaults to unity and `fader_speed_db` to24. New effect fields have explicit legacy defaults; time mode, carrier strings and Roll subdivision round-trip through the same codec as presets. Nonfinite/out-of-range values are sanitized at import.
-- Project save errors reach the UI; a failed save prevents an exit. Project/index writes use a temporary file, sync then rename.
-- Missing project JSON means a new default project; unreadable/malformed JSON reports failure.
-- Single-slot presets have version1 and reuse project conversion. Input/Track types are checked. Loading preserves bypass state, devices, tempo and unrelated slots. Save-as-new uses exclusive creation.
-- Audio buffers and UI state are not serialized. Fader state is in `AppConfig`, not duplicated in `Track`.
-- Intentional sonic changes include single-sample sequence triggers, envelope-following thresholds, linear zero-drive filters, captured-slice Roll and revised Vocoder spectral envelopes. The user's previous Vocoder formant work informed the new shaping; the file is intentionally rewritten under the expanded authorization. Old parameter compatibility does not promise bit-identical audio.
-
-## Validation
-
-See [VALIDATION.md](VALIDATION.md). No audio driver is required for the pure DSP, model, codec or egui pointer tests. `--offline` disables device streams/retries. `--data-dir=...` isolates application files.
-
-Debug builds accept `--ui-preview=performance|performance-small|sequence|filter|envelope|vocoder|roll|reverb` with **both** isolation flags. The launcher accepts `--ui-preview=launcher --data-dir=...`. These render actual application frames, write PPM screenshots under `var/ui-verification/` and close. They are visual fixtures, not saved demo projects or driver tests. Release builds do not contain the capture facility. `ui/theme.rs` and `ui/capture.rs` are shared by both binaries.
+Existing DSP/control semantics are independently implemented from public references. Hardware A/B, long-running driver stress, physical loopback and keyboard rollover remain real-device acceptance work. See [validation](VALIDATION.md) and [references](RC505_REFERENCE.md).

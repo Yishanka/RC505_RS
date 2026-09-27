@@ -65,27 +65,21 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
         });
         return;
     };
-    let beats = app.metronome.start_time().map(|start| {
-        std::time::Instant::now()
-            .saturating_duration_since(start)
-            .as_secs_f64()
-            * app.metronome.current_bpm() as f64
-            / 60.0
-    });
+    let beats = app.beats();
     theme::card().show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new(target.label()).color(theme::ACCENT).strong());
             match target {
-                FxTarget::Input {bank,slot} => { ui.checkbox(&mut app.config.input_fx.banks[bank].slots[slot].is_enabled,"Enabled"); }
+                FxTarget::Input {bank,slot} => { super::navigation::register(ui.checkbox(&mut app.config.input_fx.banks[bank].slots[slot].is_enabled,"Enabled")); }
                 FxTarget::Track {bank,slot} => {
                     let index = app.track_sel.unwrap_or(0);
-                    ui.checkbox(&mut app.config.track_fx.tracks[index].enabled[bank][slot],format!("Track {} enabled",index+1));
+                    super::navigation::register(ui.checkbox(&mut app.config.track_fx.tracks[index].enabled[bank][slot],format!("Track {} enabled",index+1)));
                 }
             }
             if full {
                 if ui.button("Back to performance   Esc").clicked() { app.editor.expanded = false; }
-            } else if ui.button("Expand editor").clicked() { app.editor.expanded = true; }
-            if ui.selectable_label(app.previewing, "Sequence preview").on_hover_text("Run the sequencer clock without recording. Oscillator threshold still applies; use 0 for ungated preview.").clicked() { app.toggle_preview(); }
+            } else if super::navigation::button(ui,"Expand  Enter").clicked() { app.editor.expanded = true; }
+            if super::navigation::register(ui.selectable_label(app.previewing, "Sequence preview")).on_hover_text("Run the sequencer clock without recording. Oscillator threshold still applies; use 0 for ungated preview.").clicked() { app.toggle_preview(); }
         });
         let active = match target { FxTarget::Input{bank,..}=>bank==app.config.input_fx.sel_bank_idx, FxTarget::Track{bank,..}=>bank==app.config.track_fx.sel_bank_idx };
         if !active {
@@ -128,7 +122,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
                 });
                 ui.separator();
             }
-            if !full && synth && ui.button("Open piano roll").clicked() {
+            if !full && synth && super::navigation::button(ui,"Open piano roll").clicked() {
                 app.editor.page = EditorPage::Sequence; app.editor.expanded = true;
             }
             let page = if full { app.editor.page } else { EditorPage::Sound };
@@ -152,9 +146,19 @@ fn kind_picker(ui: &mut egui::Ui, config: &mut AppConfig, target: FxTarget) -> b
         FxTarget::Input { bank, slot } => {
             let previous = config.input_fx.slot_kind(bank, slot);
             let mut kind = previous;
-            egui::ComboBox::from_id_source("kind").selected_text(input_name(kind)).show_ui(ui, |ui| {
-                for k in [FxKind::None,FxKind::Oscillator,FxKind::Filter,FxKind::Reverb,FxKind::MyDelay,FxKind::Vocoder] { ui.selectable_value(&mut kind,k,input_name(k)); }
-            }).response.on_hover_text("Changing type resets this slot's parameters; save a preset first to keep them.");
+            parameters::selector(
+                ui,
+                "kind",
+                &mut kind,
+                &[
+                    (FxKind::None, "Empty"),
+                    (FxKind::Oscillator, "Oscillator"),
+                    (FxKind::Filter, "Filter"),
+                    (FxKind::Reverb, "Reverb"),
+                    (FxKind::MyDelay, "MyDelay"),
+                    (FxKind::Vocoder, "Vocoder"),
+                ],
+            );
             if kind != previous {
                 config.input_fx.set_slot_kind(bank, slot, kind);
                 return true;
@@ -163,18 +167,17 @@ fn kind_picker(ui: &mut egui::Ui, config: &mut AppConfig, target: FxTarget) -> b
         FxTarget::Track { bank, slot } => {
             let previous = config.track_fx.slot_kind(bank, slot);
             let mut kind = previous;
-            egui::ComboBox::from_id_source("kind")
-                .selected_text(track_name(kind))
-                .show_ui(ui, |ui| {
-                    for k in [
-                        TrackFxKind::None,
-                        TrackFxKind::Delay,
-                        TrackFxKind::Roll,
-                        TrackFxKind::Filter,
-                    ] {
-                        ui.selectable_value(&mut kind, k, track_name(k));
-                    }
-                });
+            parameters::selector(
+                ui,
+                "kind",
+                &mut kind,
+                &[
+                    (TrackFxKind::None, "Empty"),
+                    (TrackFxKind::Delay, "Delay"),
+                    (TrackFxKind::Roll, "Roll"),
+                    (TrackFxKind::Filter, "Filter"),
+                ],
+            );
             if kind != previous {
                 config.track_fx.set_slot_kind(bank, slot, kind);
                 return true;
@@ -273,7 +276,7 @@ fn input_parameters(
                 number(ui, &mut reverb.dry_level, 0, 100, false);
                 number(ui, &mut reverb.wet_level, 0, 100, false);
                 number(ui, &mut reverb.density, 1, 10, false);
-                number(ui, &mut reverb.high_cut, 0, REVERB_HIGHCUT_MAX, false);
+                number(ui, &mut reverb.high_cut_hz, 200, 20_000, true);
                 number(
                     ui,
                     &mut reverb.low_cut,
@@ -367,7 +370,9 @@ fn track_parameters(ui: &mut egui::Ui, fx: &mut TrackFx, full: bool) {
                 TRACK_DELAY_DAMP_MAX_HZ,
                 true,
             );
-            number(ui, &mut delay.mix_pct, 0, TRACK_DELAY_MIX_MAX_PCT, false);
+            number(ui, &mut delay.direct_pct, 0, 100, false);
+            number(ui, &mut delay.effect_pct, 0, 100, false);
+            number(ui, &mut delay.low_cut_hz, 0, 1000, false);
         }
         TrackFx::Roll(roll) => {
             use crate::config::{

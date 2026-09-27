@@ -9,3 +9,5 @@
 - [当前规划](PLAN.md)
 
 `requirements/`、`debug-docs/`、`funcdev-docs/`、`code-docs/`中的旧文件保留作历史参考，不代表当前实现。2026-09工作台升级的统一记录见 [本轮记录](code-docs/2026-09-27_workstation-upgrade.md)。
+
+后续音频会话、回放、安装与发布升级见[0.2记录](code-docs/2026-09-27_audio-session-release.md)。

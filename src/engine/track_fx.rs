@@ -30,7 +30,9 @@ pub struct DelayRuntime {
     pub time_ms: f32,
     pub feedback: f32,
     pub high_damp_hz: f32,
-    pub mix: f32,
+    pub direct: f32,
+    pub effect: f32,
+    pub low_cut_hz: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -101,6 +103,7 @@ pub struct TrackFxEngine {
     runtime: TrackFxRuntime,
     state: TrackFxState,
     metronome_start: Option<Instant>,
+    clock_active: bool,
     bpm: usize,
     sample_rate: f32,
 }
@@ -131,9 +134,62 @@ impl TrackFxEngine {
             runtime: TrackFxRuntime::empty(track_count),
             state: TrackFxState::new(track_count, sr),
             metronome_start: None,
+            clock_active: false,
             bpm: DEFAULT_BPM,
             sample_rate: sr,
         }
+    }
+
+    pub fn prepare(&mut self) {
+        for track in &mut self.state.tracks {
+            for bank in &mut track.banks {
+                for slot in &mut bank.slots {
+                    slot.roll.prepare(self.sample_rate);
+                }
+            }
+        }
+    }
+    pub fn set_clock(&mut self, bpm: usize, active: bool) {
+        if active != self.clock_active {
+            for track in &mut self.state.tracks {
+                for bank in &mut track.banks {
+                    for slot in &mut bank.slots {
+                        slot.filter.trigger = StepTrigger::default();
+                    }
+                }
+            }
+        }
+        self.bpm = bpm;
+        self.clock_active = active;
+    }
+    pub fn exchange_runtime(&mut self, runtime: &mut TrackFxRuntime) {
+        if runtime.selected_bank_idx != self.runtime.selected_bank_idx {
+            for track in &mut self.state.tracks {
+                for bank in &mut track.banks {
+                    for slot in &mut bank.slots {
+                        slot.roll.reset();
+                    }
+                }
+            }
+        }
+        for track in &mut self.state.tracks {
+            for (bank_index, bank) in track.banks.iter_mut().enumerate() {
+                for (slot_index, state) in bank.slots.iter_mut().enumerate() {
+                    let old = &self.runtime.banks[bank_index].slots[slot_index];
+                    let new = &runtime.banks[bank_index].slots[slot_index];
+                    if old.roll.is_some() != new.roll.is_some() {
+                        state.roll.reset();
+                    }
+                    if old.delay.is_some() != new.delay.is_some() {
+                        state.delay.reset();
+                    }
+                    if old.filter.is_some() != new.filter.is_some() {
+                        state.filter = TrackFilterDspState::new();
+                    }
+                }
+            }
+        }
+        std::mem::swap(&mut self.runtime, runtime);
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
@@ -151,6 +207,7 @@ impl TrackFxEngine {
     }
 
     pub fn update_metronome(&mut self, start: Option<Instant>, bpm: usize) {
+        self.clock_active = start.is_some();
         self.metronome_start = start;
         self.bpm = bpm.max(1);
     }
@@ -250,7 +307,9 @@ impl TrackFxEngine {
                             .milliseconds(delay.time_ms as usize, self.bpm),
                         feedback: delay.feedback,
                         high_damp_hz: delay.high_damp_hz,
-                        mix: delay.mix,
+                        direct: delay.direct,
+                        effect: delay.effect,
+                        low_cut_hz: delay.low_cut_hz,
                     },
                     self.sample_rate,
                     out_l,
@@ -261,7 +320,7 @@ impl TrackFxEngine {
             }
 
             if let Some(filter) = slot.filter.as_ref() {
-                let gate_on = if self.metronome_start.is_none() || filter.seq.is_empty() {
+                let gate_on = if !self.clock_active || filter.seq.is_empty() {
                     true
                 } else {
                     seq_bool_at_time(&filter.seq, self.bpm, elapsed_secs)
@@ -270,7 +329,7 @@ impl TrackFxEngine {
                     &filter.trigger_seq,
                     self.bpm,
                     elapsed_secs,
-                    self.metronome_start.is_some(),
+                    self.clock_active,
                 );
                 let dt = 1.0 / self.sample_rate.max(1.0);
                 let cutoff_env = bank_state.slots[idx]
@@ -353,8 +412,9 @@ impl TrackFxRuntime {
                                 .value
                                 .clamp(TRACK_DELAY_DAMP_MIN_HZ, TRACK_DELAY_DAMP_MAX_HZ)
                                 as f32,
-                            mix: (delay.mix_pct.value.min(TRACK_DELAY_MIX_MAX_PCT) as f32 / 100.0)
-                                .clamp(0.0, 1.0),
+                            direct: delay.direct_pct.value.min(100) as f32 / 100.0,
+                            effect: delay.effect_pct.value.min(100) as f32 / 100.0,
+                            low_cut_hz: delay.low_cut_hz.value.min(1000) as f32,
                         }),
                         None,
                         None,
@@ -500,6 +560,40 @@ fn tension_to_exponent(value: usize) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sample_clock_activates_track_filter_sequence() {
+        let mut config = TrackFxConfigs::new(1);
+        config.set_slot_kind(0, 0, crate::config::TrackFxKind::Filter);
+        config.tracks[0].enabled[0][0] = true;
+        if let Some(TrackFx::Filter(filter)) = &mut config.banks[0].slots[0].fx {
+            filter.filter.cutoff_hz.value = 2000;
+            filter.env.attack_ms.value = 0;
+            filter
+                .seq
+                .set_seq([vec![false; 12], vec![true; 12]].concat());
+        }
+        let mut engine = TrackFxEngine::new(8000.0, 1);
+        engine.swap_runtime(TrackFxRuntime::from_config(&config));
+        engine.set_clock(120, true);
+        let mut off = 0.0;
+        let mut on = 0.0;
+        for frame in 0..8000 {
+            let input = (std::f32::consts::TAU * 800.0 * frame as f32 / 8000.0).sin() * 0.1;
+            let output = engine
+                .process_frame(0, frame as f64 / 8000.0, input, input)
+                .0;
+            if (2000..4000).contains(&frame) {
+                off += output * output;
+            }
+            if frame >= 6000 {
+                on += output * output;
+            }
+        }
+        assert!(
+            on > off * 100.0,
+            "Sequence gate must actually modulate the filter: {off} / {on}"
+        );
+    }
     use crate::config::TrackFxKind;
     #[test]
     fn clearing_track_discards_frozen_audio_and_delay_tail() {

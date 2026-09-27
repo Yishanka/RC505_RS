@@ -1,877 +1,696 @@
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
-
+//! Input is a bounded SPSC stream. The output callback exclusively owns DSP;
+//! prepared commands and deferred reclamation replace callback mutexes.
+use super::{
+    core::{Action, AudioSnapshot, EngineView, Parameters, RenderCore},
+    loop_audio::{Frame, PAGE_FRAMES, Page, PageAllocator},
+};
+use crate::{
+    config::AppConfig,
+    project::{ProjectData, ProjectEntry},
+    replay,
+};
 use anyhow::{Context, Result};
-// use cpal::Host;
-use crate::engine::input_fx::InputFxEngine;
-use crate::engine::track_fx::TrackFxEngine;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use ringbuf::HeapRb;
+use ringbuf::{HeapConsumer, HeapProducer, HeapRb};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc,
+    },
+    time::{Duration, Instant},
+};
 
-// 128 在 48kHz 下约 2.6ms，在 96kHz 下约 1.3ms
-// 如果报错，可以尝试 256
-const BUFFER_SIZE: u32 = 256;
-type CarrierFrame = Option<(f32, f32)>;
-type CarrierQueues = Vec<VecDeque<CarrierFrame>>;
-
-#[cfg(all(target_os = "windows", feature = "asio"))]
-fn device_exists_in_host(host: &cpal::Host, input_name: &str, output_name: &str) -> Result<bool> {
-    let has_input = host
-        .input_devices()?
-        .any(|d| d.name().ok().as_deref() == Some(input_name));
-    let has_output = host
-        .output_devices()?
-        .any(|d| d.name().ok().as_deref() == Some(output_name));
-    Ok(has_input && has_output)
+const PACKET: usize = 256;
+pub const DEFAULT_BUFFER: u32 = 128;
+#[derive(Default)]
+pub struct Diagnostics {
+    pub underrun: AtomicU64,
+    pub overflow: AtomicU64,
+    pub stream_errors: AtomicU64,
+    pub maximum_callback_ns: AtomicU64,
+    pub callback_frames: AtomicU64,
+    pub queue_frames: AtomicU64,
+    pub input_latency_ns: AtomicU64,
+    pub output_latency_ns: AtomicU64,
+    pub take_failed: AtomicBool,
+    pub taking: AtomicBool,
+    pub calibrating: AtomicBool,
+    pub player_frame: AtomicU64,
+    pub player_playing: AtomicBool,
 }
-
-fn select_host(_input_name: &str, _output_name: &str) -> Result<cpal::Host> {
-    // On Windows, prefer ASIO for lower-latency paths.
-    // If ASIO host or requested devices are unavailable, fallback to default host.
-    #[cfg(all(target_os = "windows", feature = "asio"))]
-    {
-        if let Ok(asio_host) = cpal::host_from_id(cpal::HostId::Asio) {
-            if device_exists_in_host(&asio_host, _input_name, _output_name)? {
-                return Ok(asio_host);
+pub struct Player {
+    pub samples: Vec<Frame>,
+    pub cursor: usize,
+    pub playing: bool,
+}
+pub enum Control {
+    Config {
+        parameters: Box<Parameters>,
+        data: Arc<ProjectData>,
+    },
+    Action(Action),
+    Replace(Box<RenderCore>),
+    Snapshot {
+        snapshot: Box<AudioSnapshot>,
+        entry: ProjectEntry,
+        data: ProjectData,
+    },
+    Capture(Box<AudioSnapshot>),
+    BeginTake {
+        core: Box<RenderCore>,
+        snapshot: Box<AudioSnapshot>,
+        root: PathBuf,
+        project_id: String,
+        data: ProjectData,
+    },
+    EndTake,
+    Enable(bool),
+    Player(Option<Box<Player>>),
+    PlayerToggle,
+    Calibrate(Option<Box<super::latency::Calibration>>),
+}
+enum WorkerMessage {
+    Control {
+        at: u64,
+        command: Control,
+        accepted: bool,
+    },
+    Audio {
+        at: u64,
+        len: usize,
+        frames: [Frame; PACKET],
+    },
+}
+pub enum Response {
+    Saved(String),
+    Take(PathBuf),
+    Error(String),
+    Calibrated(super::latency::Measurement),
+    Captured(Box<AudioSnapshot>),
+}
+struct RealtimePages {
+    available: HeapConsumer<Page>,
+    retired: HeapProducer<Page>,
+}
+impl PageAllocator for RealtimePages {
+    fn acquire(&mut self) -> Option<Page> {
+        self.available.pop()
+    }
+    fn retire(&mut self, page: Page) {
+        // Larger than every page in ten maximum-length 192 kHz loops. Never
+        // fall back to deallocation on the realtime thread if exhausted.
+        if let Err(page) = self.retired.push(page) {
+            std::mem::forget(page);
+        }
+    }
+}
+struct Callback {
+    core: Box<RenderCore>,
+    commands: HeapConsumer<Control>,
+    worker: HeapProducer<WorkerMessage>,
+    views: HeapProducer<EngineView>,
+    pages: RealtimePages,
+    diagnostics: Arc<Diagnostics>,
+    enabled: bool,
+    taking: bool,
+    packet: [Frame; PACKET],
+    packet_len: usize,
+    packet_at: u64,
+    player: Option<Box<Player>>,
+    calibration: Option<Box<super::latency::Calibration>>,
+    take_underrun: u64,
+    take_overflow: u64,
+}
+impl Callback {
+    fn flush(&mut self) {
+        if self.packet_len == 0 {
+            return;
+        }
+        if self
+            .worker
+            .push(WorkerMessage::Audio {
+                at: self.packet_at,
+                len: self.packet_len,
+                frames: self.packet,
+            })
+            .is_err()
+        {
+            self.diagnostics.take_failed.store(true, Ordering::Relaxed);
+        }
+        self.packet_len = 0;
+    }
+    fn commands(&mut self) {
+        for _ in 0..32 {
+            if self.worker.free_len() < 3 {
+                break;
             }
-            eprintln!(
-                "ASIO host is available but selected devices are not in ASIO. Falling back to default host."
-            );
-        }
-    }
-
-    Ok(cpal::default_host())
-}
-
-// Shift recorded audio earlier by `shift` samples and zero-pad the tail.
-// This keeps track length unchanged while compensating input-capture latency.
-fn shift_buffer_earlier_in_place(buffer: &mut [f32], shift: usize) {
-    if buffer.is_empty() || shift == 0 {
-        return;
-    }
-    let actual_shift = shift.min(buffer.len());
-    buffer.copy_within(actual_shift.., 0);
-    let tail_start = buffer.len() - actual_shift;
-    for sample in &mut buffer[tail_start..] {
-        *sample = 0.0;
-    }
-}
-
-struct EngineTrack {
-    gain: f32,
-    target_gain: f32,
-    buffer: Vec<f32>,
-    play_cursor: usize,
-    carrier_cursor: usize,
-    overdub_cursor: usize,
-    record_start_at: Option<Instant>,
-    record_stop_at: Option<Instant>,
-    overdub_start_at: Option<Instant>,
-    overdub_stop_at: Option<Instant>,
-    recording: bool,
-    // After scheduled record stop, keep capturing this many samples so we can
-    // compensate input latency without truncating loop tail content.
-    record_tail_remaining: usize,
-    // Track length at scheduled stop time; used to keep loop duration unchanged
-    // after extra tail capture for latency compensation.
-    record_target_len: Option<usize>,
-    overdubbing: bool,
-    playing: bool,
-    paused_carrier: bool,
-}
-
-impl EngineTrack {
-    fn new() -> Self {
-        Self {
-            gain: 1.0,
-            target_gain: 1.0,
-            buffer: Vec::new(),
-            play_cursor: 0,
-            carrier_cursor: 0,
-            overdub_cursor: 0,
-            record_start_at: None,
-            record_stop_at: None,
-            overdub_start_at: None,
-            overdub_stop_at: None,
-            recording: false,
-            record_tail_remaining: 0,
-            record_target_len: None,
-            overdubbing: false,
-            playing: false,
-            paused_carrier: false,
-        }
-    }
-}
-
-fn align_cursor_to_channels(cursor: usize, len: usize, channels: usize) -> usize {
-    if len == 0 {
-        return 0;
-    }
-    let ch = channels.max(1).min(len);
-    let aligned = cursor - (cursor % ch);
-    aligned % len
-}
-
-fn finalize_recording_stop(track: &mut EngineTrack, latency_comp_samples: usize, channels: usize) {
-    track.recording = false;
-    shift_buffer_earlier_in_place(&mut track.buffer, latency_comp_samples);
-    if let Some(target_len) = track.record_target_len {
-        if track.buffer.len() > target_len {
-            track.buffer.truncate(target_len);
-        } else if track.buffer.len() < target_len {
-            track.buffer.resize(target_len, 0.0);
-        }
-    }
-    track.playing = !track.buffer.is_empty();
-    track.paused_carrier = false;
-    // Recording stop is finalized after an extra tail-capture delay.
-    // To keep loop phase aligned with the original scheduled stop beat,
-    // start playback at the compensated phase instead of restarting at 0.
-    track.play_cursor = if track.buffer.is_empty() {
-        0
-    } else {
-        align_cursor_to_channels(latency_comp_samples, track.buffer.len(), channels)
-    };
-    track.carrier_cursor = track.play_cursor;
-    track.overdub_cursor = track.play_cursor;
-    track.record_tail_remaining = 0;
-    track.record_target_len = None;
-}
-
-struct EngineState {
-    tracks: Vec<EngineTrack>,
-}
-
-impl EngineState {
-    fn new(track_count: usize) -> Self {
-        Self {
-            tracks: (0..track_count).map(|_| EngineTrack::new()).collect(),
-        }
-    }
-
-    fn process_timeline(&mut self, now: Instant, latency_comp_samples: usize, channels: usize) {
-        for track in &mut self.tracks {
-            if let Some(start_at) = track.record_start_at {
-                if now >= start_at {
-                    track.buffer.clear();
-                    track.play_cursor = 0;
-                    track.overdub_cursor = 0;
-                    track.recording = true;
-                    track.record_tail_remaining = 0;
-                    track.record_target_len = None;
-                    track.overdubbing = false;
-                    track.playing = false;
-                    track.paused_carrier = false;
-                    track.record_start_at = None;
-                }
-            }
-
-            if let Some(stop_at) = track.record_stop_at {
-                if now >= stop_at {
-                    if track.recording {
-                        // Keep recording for a short tail so latency compensation
-                        // doesn't truncate the audible end of the loop.
-                        track.record_target_len = Some(track.buffer.len());
-                        track.record_tail_remaining = latency_comp_samples;
-                        if track.record_tail_remaining == 0 {
-                            finalize_recording_stop(track, latency_comp_samples, channels);
-                        }
+            let Some(mut command) = self.commands.pop() else {
+                break;
+            };
+            self.flush();
+            let at = self.core.clock.frame;
+            let mut accepted = true;
+            match &mut command {
+                Control::Config { parameters, .. } => self.core.configure(parameters),
+                Control::Action(action) => {
+                    if self.calibration.is_some() || self.player.is_some() {
+                        accepted = false;
+                    } else {
+                        self.core.action(*action, &mut self.pages)
                     }
-                    track.record_stop_at = None;
+                }
+                Control::Replace(core) => {
+                    if self.taking {
+                        accepted = false;
+                    } else {
+                        core.clock.frame = at;
+                        std::mem::swap(&mut self.core, core);
+                    }
+                }
+                Control::Snapshot { snapshot, .. } => self.core.snapshot(snapshot, &mut self.pages),
+                Control::Capture(snapshot) => self.core.snapshot(snapshot, &mut self.pages),
+                Control::BeginTake { core, snapshot, .. } => {
+                    if !self.core.idle()
+                        || self.taking
+                        || self.player.is_some()
+                        || self.calibration.is_some()
+                    {
+                        accepted = false;
+                    } else {
+                        self.core.snapshot(snapshot, &mut self.pages);
+                        core.restore(snapshot);
+                        core.snapshot(snapshot, &mut self.pages);
+                        core.clock.frame = at;
+                        std::mem::swap(&mut self.core, core);
+                        self.taking = true;
+                        self.diagnostics.take_failed.store(false, Ordering::Relaxed);
+                        self.diagnostics.taking.store(true, Ordering::Relaxed);
+                        self.take_underrun = self.diagnostics.underrun.load(Ordering::Relaxed);
+                        self.take_overflow = self.diagnostics.overflow.load(Ordering::Relaxed);
+                    }
+                }
+                Control::EndTake => {
+                    accepted = self.taking
+                        && self.core.tracks.iter().all(|t| {
+                            !matches!(
+                                t.mode,
+                                super::core::Mode::Recording | super::core::Mode::Overdub
+                            )
+                        });
+                    if accepted {
+                        self.taking = false;
+                        self.diagnostics.taking.store(false, Ordering::Relaxed);
+                    }
+                }
+                Control::Enable(value) => self.enabled = *value,
+                Control::Player(value) => {
+                    if self.taking || !self.core.idle() {
+                        accepted = false;
+                    } else {
+                        std::mem::swap(&mut self.player, value);
+                    }
+                }
+                Control::PlayerToggle => {
+                    if let Some(player) = &mut self.player {
+                        if player.cursor >= player.samples.len() {
+                            player.cursor = 0;
+                        }
+                        player.playing = !player.playing;
+                    }
+                }
+                Control::Calibrate(value) => {
+                    if self.taking || !self.core.idle() || self.calibration.is_some() {
+                        accepted = false;
+                    } else {
+                        std::mem::swap(&mut self.calibration, value);
+                        self.diagnostics.calibrating.store(true, Ordering::Relaxed);
+                    }
                 }
             }
-
-            if let Some(start_at) = track.overdub_start_at {
-                if now >= start_at && !track.buffer.is_empty() {
-                    track.overdubbing = true;
-                    track.playing = true;
-                    track.overdub_cursor = track.play_cursor;
-                    track.overdub_start_at = None;
+            let _ = self.worker.push(WorkerMessage::Control {
+                at,
+                command,
+                accepted,
+            });
+        }
+    }
+    fn frame(&mut self, dry: Frame) -> Frame {
+        if let Some(calibration) = &mut self.calibration {
+            if calibration.finished() {
+                if self.worker.free_len() > 0 {
+                    let command = Control::Calibrate(self.calibration.take());
+                    self.diagnostics.calibrating.store(false, Ordering::Relaxed);
+                    let _ = self.worker.push(WorkerMessage::Control {
+                        at: self.core.clock.frame,
+                        command,
+                        accepted: true,
+                    });
                 }
+                return [0.0; 2];
             }
-
-            if let Some(stop_at) = track.overdub_stop_at {
-                if now >= stop_at {
-                    track.overdubbing = false;
-                    track.overdub_stop_at = None;
-                }
+            return calibration.process(dry);
+        }
+        if let Some(player) = &mut self.player {
+            let frame = if player.playing && player.cursor < player.samples.len() {
+                let frame = player.samples[player.cursor];
+                player.cursor += 1;
+                frame
+            } else {
+                [0.0; 2]
+            };
+            if player.cursor >= player.samples.len() {
+                player.playing = false;
             }
+            self.diagnostics
+                .player_frame
+                .store(player.cursor as u64, Ordering::Relaxed);
+            self.diagnostics
+                .player_playing
+                .store(player.playing, Ordering::Relaxed);
+            return frame;
+        }
+        if !self.enabled {
+            return [0.0; 2];
+        }
+        if self.taking {
+            if self.packet_len == 0 {
+                self.packet_at = self.core.clock.frame;
+            }
+            self.packet[self.packet_len] = dry;
+            self.packet_len += 1;
+            if self.packet_len == PACKET {
+                self.flush();
+            }
+        }
+        let result = self.core.process(dry, &mut self.pages);
+        if self.taking
+            && (self.core.exhausted
+                || self.diagnostics.underrun.load(Ordering::Relaxed) != self.take_underrun
+                || self.diagnostics.overflow.load(Ordering::Relaxed) != self.take_overflow)
+        {
+            self.diagnostics.take_failed.store(true, Ordering::Relaxed);
+        }
+        result
+    }
+    fn publish(&mut self) {
+        if self.views.free_len() > 0 {
+            let _ = self.views.push(self.core.view());
         }
     }
 }
-
 pub struct AudioIO {
-    input_stream: cpal::Stream,
-    output_stream: cpal::Stream,
+    input_stream: Option<cpal::Stream>,
+    output_stream: Option<cpal::Stream>,
     pub config: cpal::StreamConfig,
     input_name: String,
     output_name: String,
-    state: Arc<Mutex<EngineState>>,
-    latency_comp: usize, // Input latency compensation (in milliseconds).
-    fx_engine: Arc<Mutex<InputFxEngine>>,
-    track_fx_engine: Arc<Mutex<TrackFxEngine>>,
-    track_carriers: Arc<Mutex<CarrierQueues>>,
-    realtime_enabled: Arc<AtomicBool>,
+    commands: HeapProducer<Control>,
+    views: HeapConsumer<EngineView>,
+    pub diagnostics: Arc<Diagnostics>,
+    responses: mpsc::Receiver<Response>,
+    stop: Arc<AtomicBool>,
+    offline: Option<Callback>,
+    pub online: bool,
+    pub status: String,
 }
-
-impl AudioIO {
-    pub fn new(
-        input_name: &str,
-        output_name: &str,
-        track_count: usize,
-        latency_comp: usize,
-    ) -> Result<Self> {
-        let state = Arc::new(Mutex::new(EngineState::new(track_count)));
-        let fx_engine = Arc::new(Mutex::new(InputFxEngine::new(48_000.0)));
-        let track_fx_engine = Arc::new(Mutex::new(TrackFxEngine::new(48_000.0, track_count)));
-        let track_carriers = Arc::new(Mutex::new(
-            (0..track_count).map(|_| VecDeque::new()).collect(),
-        ));
-        let realtime_enabled = Arc::new(AtomicBool::new(true));
-        let (input_stream, output_stream, config) = Self::build_streams(
-            input_name,
-            output_name,
-            Arc::clone(&state),
-            Arc::clone(&fx_engine),
-            Arc::clone(&track_fx_engine),
-            Arc::clone(&track_carriers),
-            Arc::clone(&realtime_enabled),
-            latency_comp,
-        )?;
-
-        Ok(Self {
-            input_stream,
-            output_stream,
-            config,
-            input_name: input_name.to_string(),
-            output_name: output_name.to_string(),
-            state,
-            latency_comp,
-            fx_engine,
-            track_fx_engine,
-            track_carriers,
-            realtime_enabled,
-        })
+impl Drop for AudioIO {
+    fn drop(&mut self) {
+        self.input_stream.take();
+        self.output_stream.take();
+        self.offline.take();
+        self.stop.store(true, Ordering::Release);
     }
-
-    fn build_streams(
-        input_name: &str,
-        output_name: &str,
-        state: Arc<Mutex<EngineState>>,
-        fx_engine: Arc<Mutex<InputFxEngine>>,
-        track_fx_engine: Arc<Mutex<TrackFxEngine>>,
-        track_carriers: Arc<Mutex<CarrierQueues>>,
-        realtime_enabled: Arc<AtomicBool>,
-        latency_comp: usize,
-    ) -> Result<(cpal::Stream, cpal::Stream, cpal::StreamConfig)> {
-        let host = select_host(input_name, output_name)?;
-
+}
+impl AudioIO {
+    pub fn new(input: &str, output: &str, _tracks: usize, _latency: usize) -> Result<Self> {
+        Self::with_buffer(input, output, DEFAULT_BUFFER)
+    }
+    pub fn with_buffer(input: &str, output: &str, block: u32) -> Result<Self> {
+        let host = select_host(input, output)?;
         let input_device = host
             .input_devices()?
-            .find(|d| d.name().ok().as_deref() == Some(input_name))
-            .context("Failed to find an input device (Microphone)")?;
-
+            .find(|d| d.name().ok().as_deref() == Some(input))
+            .context("Input device unavailable")?;
         let output_device = host
             .output_devices()?
-            .find(|d| d.name().ok().as_deref() == Some(output_name))
-            .context("Failed to find an output device (Speaker)")?;
-
-        let input_formats: Vec<_> = input_device.supported_input_configs()?.collect();
-        let output_formats: Vec<_> = output_device.supported_output_configs()?.collect();
-        let config =
-            super::device_config::common_config(&input_formats, &output_formats, BUFFER_SIZE)?;
-        if let Ok(mut fx) = fx_engine.lock() {
-            fx.set_sample_rate(config.sample_rate.0 as f32);
-        }
-        if let Ok(mut track_fx) = track_fx_engine.lock() {
-            track_fx.set_sample_rate(config.sample_rate.0 as f32);
-        }
-        let latency_comp_samples = ((config.sample_rate.0 as f32 * latency_comp as f32 / 1000.0)
-            as usize)
-            * config.channels as usize;
-        let frame_size = BUFFER_SIZE;
-        let rb_size = 4096usize.max(frame_size as usize) * config.channels as usize * 4; // 留 4 倍冗余防止断音
-        let rb = HeapRb::<f32>::new(rb_size);
-        let (mut prod, mut cons) = rb.split();
-
-        let err_fn = |err: cpal::StreamError| eprintln!("Audio stream error: {err}");
-
-        let input_state = Arc::clone(&state);
-        let input_fx = Arc::clone(&fx_engine);
-        let input_carriers = Arc::clone(&track_carriers);
-        let input_rt_enabled = Arc::clone(&realtime_enabled);
+            .find(|d| d.name().ok().as_deref() == Some(output))
+            .context("Output device unavailable")?;
+        let config = super::device_config::common_config(
+            &input_device.supported_input_configs()?.collect::<Vec<_>>(),
+            &output_device
+                .supported_output_configs()?
+                .collect::<Vec<_>>(),
+            block,
+        )?;
+        let (mut audio, mut callback) = Self::bridge(config.clone());
+        let (mut input_tx, mut input_rx) = HeapRb::<Frame>::new(16_384).split();
+        let diagnostics = audio.diagnostics.clone();
+        let input_errors = audio.diagnostics.clone();
+        let channels = config.channels as usize;
         let input_stream = input_device.build_input_stream(
             &config,
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                if !input_rt_enabled.load(Ordering::Relaxed) {
-                    for _ in data {
-                        let _ = prod.push(0.0);
-                    }
-                    return;
+            move |data: &[f32], info: &cpal::InputCallbackInfo| {
+                if let Some(duration) = info
+                    .timestamp()
+                    .callback
+                    .duration_since(&info.timestamp().capture)
+                {
+                    diagnostics
+                        .input_latency_ns
+                        .store(duration.as_nanos() as u64, Ordering::Relaxed);
                 }
-                let now = Instant::now();
-                let mut fx_guard = input_fx.lock().ok();
-                let (base_elapsed, sample_rate) = if let Some(fx) = fx_guard.as_ref() {
-                    let elapsed = fx
-                        .metronome_start()
-                        .map(|start| now.saturating_duration_since(start).as_secs_f64())
-                        .unwrap_or(0.0);
-                    (elapsed, fx.sample_rate())
-                } else {
-                    (0.0, config.sample_rate.0 as f32)
-                };
-                let channels = config.channels as usize;
-                let sec_per_frame = 1.0 / sample_rate as f64;
-                let mut processed_block: Vec<f32> = Vec::with_capacity(data.len());
-                let frame_count = data.len() / channels.max(1);
-                let carrier_block = input_carriers
-                    .lock()
-                    .map(|mut carrier_queues| {
-                        (0..frame_count)
-                            .map(|_| {
-                                carrier_queues
-                                    .iter_mut()
-                                    .map(|queue| queue.pop_front().flatten())
-                                    .collect::<Vec<_>>()
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-
-                for (frame_idx, frame) in data.chunks(channels).enumerate() {
-                    let input_l = frame[0];
-                    let input_r = if channels > 1 { frame[1] } else { frame[0] };
-                    let elapsed = base_elapsed + frame_idx as f64 * sec_per_frame;
-                    let (processed_l, processed_r) = if let Some(fx) = fx_guard.as_mut() {
-                        if let Some(carriers) = carrier_block.get(frame_idx) {
-                            fx.process_frame(elapsed, input_l, input_r, carriers)
-                        } else {
-                            fx.process_frame(elapsed, input_l, input_r, &[])
-                        }
-                    } else {
-                        (input_l, input_r)
-                    };
-                    // Keep capturing input samples into ring buffer for overdub alignment.
-                    // We do not monitor this directly to output.
-                    for ch in 0..channels {
-                        let sample = if ch == 0 {
-                            processed_l
-                        } else if ch == 1 {
-                            processed_r
-                        } else {
-                            processed_l
-                        };
-                        let _ = prod.push(sample);
-                        processed_block.push(sample);
-                    }
-                }
-
-                if let Some(engine) = input_state.lock().ok().as_mut() {
-                    for track in &mut engine.tracks {
-                        if track.recording {
-                            track.buffer.extend_from_slice(&processed_block);
-                            if track.record_tail_remaining > 0 {
-                                let consumed =
-                                    processed_block.len().min(track.record_tail_remaining);
-                                track.record_tail_remaining -= consumed;
-                                if track.record_tail_remaining == 0 {
-                                    finalize_recording_stop(track, latency_comp_samples, channels);
-                                }
-                            }
-                        }
-                        // NOTE:
-                        // Overdub writing and timeline scheduling are handled in output callback
-                        // so all playback-phase decisions share one clock domain.
+                for frame in data.chunks_exact(channels) {
+                    let clean = |s: f32| if s.is_finite() { s } else { 0.0 };
+                    let value = [
+                        clean(frame[0]),
+                        clean(frame.get(1).copied().unwrap_or(frame[0])),
+                    ];
+                    if input_tx.push(value).is_err() {
+                        diagnostics.overflow.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             },
-            err_fn,
+            move |_| {
+                input_errors.stream_errors.fetch_add(1, Ordering::Relaxed);
+            },
             None,
         )?;
-
-        let output_state = Arc::clone(&state);
-        let output_track_fx = Arc::clone(&track_fx_engine);
-        let output_carriers = Arc::clone(&track_carriers);
-        let output_rt_enabled = Arc::clone(&realtime_enabled);
+        let diagnostics = audio.diagnostics.clone();
+        let output_errors = diagnostics.clone();
+        let mut drift = super::latency::InputAdapter::new(block as usize);
         let output_stream = output_device.build_output_stream(
             &config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                if !output_rt_enabled.load(Ordering::Relaxed) {
-                    for out in data.iter_mut() {
-                        *out = 0.0;
-                    }
-                    return;
+            move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                let started = Instant::now();
+                if let Some(duration) = info
+                    .timestamp()
+                    .playback
+                    .duration_since(&info.timestamp().callback)
+                {
+                    diagnostics
+                        .output_latency_ns
+                        .store(duration.as_nanos() as u64, Ordering::Relaxed);
                 }
-                let now: Instant = Instant::now();
-                let mut guard: Option<std::sync::MutexGuard<'_, EngineState>> =
-                    output_state.lock().ok();
-                let channels = config.channels as usize;
-                if let Some(engine) = guard.as_mut() {
-                    engine.process_timeline(now, latency_comp_samples, channels);
-                }
-                let mut track_fx_guard = output_track_fx.lock().ok();
-                let track_count = guard
-                    .as_ref()
-                    .map(|engine| engine.tracks.len())
-                    .unwrap_or(0);
-                let mut carrier_block: Vec<Vec<CarrierFrame>> =
-                    Vec::with_capacity(data.len() / channels.max(1));
-                let sample_rate = if let Some(track_fx) = track_fx_guard.as_ref() {
-                    track_fx.sample_rate()
-                } else {
-                    config.sample_rate.0 as f32
-                };
-                let metronome_active = track_fx_guard
-                    .as_ref()
-                    .and_then(|track_fx| track_fx.metronome_start())
-                    .is_some();
-
-                for frame in data.chunks_mut(channels) {
-                    let input_l = cons.pop().unwrap_or(0.0);
-                    let input_r = if channels > 1 {
-                        cons.pop().unwrap_or(input_l)
+                callback.commands();
+                let frames = data.len() / channels;
+                diagnostics
+                    .callback_frames
+                    .store(frames as u64, Ordering::Relaxed);
+                diagnostics
+                    .queue_frames
+                    .store(input_rx.len() as u64, Ordering::Relaxed);
+                drift.begin_block(input_rx.len(), frames);
+                for frame in data.chunks_exact_mut(channels) {
+                    let dry = drift.next(&mut input_rx, &diagnostics);
+                    let wet = callback.frame(dry);
+                    frame[0] = if channels == 1 {
+                        (wet[0] + wet[1]) * 0.5
                     } else {
-                        input_l
+                        wet[0]
                     };
-                    for _ in 2..channels {
-                        let _ = cons.pop();
-                    }
-                    let mut mixed_l = 0.0f32;
-                    let mut mixed_r = 0.0f32;
-                    let mut frame_carriers = vec![None; track_count];
-
-                    if let Some(engine) = guard.as_mut() {
-                        for (track_idx, track) in engine.tracks.iter_mut().enumerate() {
-                            if track.buffer.is_empty() {
-                                continue;
-                            }
-                            let audible = track.playing;
-                            let carrier_only = !audible && metronome_active && track.paused_carrier;
-                            if !audible && !carrier_only {
-                                continue;
-                            }
-
-                            let len = track.buffer.len();
-                            let cursor = if audible {
-                                track.play_cursor
-                            } else {
-                                track.carrier_cursor
-                            };
-                            let idx_l = cursor % len;
-                            let idx_r = if channels > 1 {
-                                (idx_l + 1) % len
-                            } else {
-                                idx_l
-                            };
-
-                            if audible && track.overdubbing {
-                                let comp = latency_comp_samples % len;
-                                let write_l = (idx_l + len - comp) % len;
-                                track.overdub_cursor = write_l;
-                                track.buffer[write_l] =
-                                    (track.buffer[write_l] + input_l).clamp(-1.0, 1.0);
-                                if channels > 1 {
-                                    let write_r = (write_l + 1) % len;
-                                    track.buffer[write_r] =
-                                        (track.buffer[write_r] + input_r).clamp(-1.0, 1.0);
-                                }
-                            }
-
-                            let dry_l = track.buffer[idx_l];
-                            let dry_r = if channels > 1 {
-                                track.buffer[idx_r]
-                            } else {
-                                dry_l
-                            };
-                            // Use this track's current playhead as the seq/env phase reference.
-                            // This keeps Track FX Filter step aligned with what is actually heard,
-                            // including latency-compensated recording and resume-from-pause offsets.
-                            let track_fx_elapsed = if channels > 0 {
-                                idx_l as f64 / channels as f64 / sample_rate.max(1.0) as f64
-                            } else {
-                                0.0
-                            };
-                            let (wet_l, wet_r) = if let Some(track_fx) = track_fx_guard.as_mut() {
-                                track_fx.process_frame(track_idx, track_fx_elapsed, dry_l, dry_r)
-                            } else {
-                                (dry_l, dry_r)
-                            };
-
-                            if audible {
-                                track.gain += (track.target_gain - track.gain)
-                                    * (1.0 / (0.005 * sample_rate)).min(1.0);
-                                mixed_l += wet_l * track.gain;
-                                mixed_r += wet_r * track.gain;
-                            }
-                            if let Some(carrier) = frame_carriers.get_mut(track_idx) {
-                                *carrier = Some((wet_l, wet_r));
-                            }
-
-                            if audible {
-                                track.play_cursor = (track.play_cursor + channels) % len;
-                                track.carrier_cursor = track.play_cursor;
-                            } else {
-                                track.carrier_cursor = (track.carrier_cursor + channels) % len;
-                            }
-                        }
-                    }
-
-                    let out_l = (mixed_l + input_l).clamp(-1.0, 1.0);
-                    let out_r = (mixed_r + input_r).clamp(-1.0, 1.0);
-                    frame[0] = out_l;
                     if channels > 1 {
-                        frame[1] = out_r;
-                    }
-                    for ch in 2..channels {
-                        frame[ch] = ((out_l + out_r) * 0.5).clamp(-1.0, 1.0);
-                    }
-                    carrier_block.push(frame_carriers);
-                }
-                if let Ok(mut carrier_queues) = output_carriers.lock() {
-                    if carrier_queues.len() != track_count {
-                        *carrier_queues = (0..track_count).map(|_| VecDeque::new()).collect();
-                    }
-                    let max_carrier_frames = frame_size as usize * 8;
-                    for frame_carriers in carrier_block {
-                        for (track_idx, carrier) in frame_carriers.into_iter().enumerate() {
-                            if let Some(queue) = carrier_queues.get_mut(track_idx) {
-                                queue.push_back(carrier);
-                                while queue.len() > max_carrier_frames {
-                                    let _ = queue.pop_front();
-                                }
-                            }
-                        }
+                        frame[1] = wet[1];
                     }
                 }
+                callback.flush();
+                callback.publish();
+                diagnostics
+                    .maximum_callback_ns
+                    .fetch_max(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
             },
-            err_fn,
+            move |_| {
+                output_errors.stream_errors.fetch_add(1, Ordering::Relaxed);
+            },
             None,
         )?;
-
         input_stream.play()?;
         output_stream.play()?;
-
-        Ok((input_stream, output_stream, config))
+        audio.input_stream = Some(input_stream);
+        audio.output_stream = Some(output_stream);
+        audio.online = true;
+        audio.input_name = input.into();
+        audio.output_name = output.into();
+        audio.status = format!(
+            "{} Hz / {} ch / requested {} frames",
+            config.sample_rate.0, channels, block
+        );
+        Ok(audio)
     }
-
-    pub fn switch_devices(&mut self, input_name: &str, output_name: &str) -> Result<()> {
-        if input_name == self.input_name && output_name == self.output_name {
-            return Ok(());
+    pub fn offline(message: String) -> Self {
+        let config = cpal::StreamConfig {
+            channels: 2,
+            sample_rate: cpal::SampleRate(48_000),
+            buffer_size: cpal::BufferSize::Fixed(DEFAULT_BUFFER),
+        };
+        let (mut audio, callback) = Self::bridge(config);
+        audio.offline = Some(callback);
+        audio.status = message;
+        audio
+    }
+    fn bridge(config: cpal::StreamConfig) -> (Self, Callback) {
+        let sr = config.sample_rate.0;
+        let (commands, command_rx) = HeapRb::new(128).split();
+        let (view_tx, views) = HeapRb::new(8).split();
+        let (worker_tx, mut worker_rx) = HeapRb::new(8192).split();
+        let (mut page_tx, page_rx) = HeapRb::<Page>::new(256).split();
+        for _ in 0..256 {
+            let _ = page_tx.push(Arc::new([[0.0; 2]; PAGE_FRAMES]));
         }
-
-        let (input_stream, output_stream, config) = Self::build_streams(
-            input_name,
-            output_name,
-            Arc::clone(&self.state),
-            Arc::clone(&self.fx_engine),
-            Arc::clone(&self.track_fx_engine),
-            Arc::clone(&self.track_carriers),
-            Arc::clone(&self.realtime_enabled),
-            self.latency_comp,
-        )?;
-
-        self.input_stream.pause()?;
-        self.output_stream.pause()?;
-
-        self.input_stream = input_stream;
-        self.output_stream = output_stream;
-        self.config = config;
-        self.input_name = input_name.to_string();
-        self.output_name = output_name.to_string();
-        Ok(())
+        let (retire_tx, mut retire_rx) = HeapRb::<Page>::new(131_072).split();
+        let stop = Arc::new(AtomicBool::new(false));
+        let pool_stop = stop.clone();
+        std::thread::Builder::new()
+            .name("audio-page-pool".into())
+            .spawn(move || {
+                while !pool_stop.load(Ordering::Acquire) {
+                    while let Some(page) = retire_rx.pop() {
+                        if Arc::strong_count(&page) == 1 && page_tx.free_len() > 0 {
+                            let _ = page_tx.push(page);
+                        }
+                    }
+                    for _ in 0..8 {
+                        if page_tx.free_len() == 0 {
+                            break;
+                        }
+                        let _ = page_tx.push(Arc::new([[0.0; 2]; PAGE_FRAMES]));
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            })
+            .expect("page pool thread");
+        let (response_tx, responses) = mpsc::channel();
+        let diagnostics = Arc::new(Diagnostics::default());
+        let worker_diag = diagnostics.clone();
+        let worker_stop = stop.clone();
+        std::thread::Builder::new()
+            .name("audio-retire-and-replay".into())
+            .spawn(move || {
+                let mut writer: Option<replay::Writer> = None;
+                while !worker_stop.load(Ordering::Acquire) || !worker_rx.is_empty() {
+                    if let Some(message) = worker_rx.pop() {
+                        if let Err(error) =
+                            worker_message(message, &mut writer, &response_tx, &worker_diag)
+                        {
+                            worker_diag.take_failed.store(true, Ordering::Relaxed);
+                            writer = None;
+                            let _ = response_tx.send(Response::Error(error.to_string()));
+                        }
+                    } else {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
+            })
+            .expect("audio worker thread");
+        let callback = Callback {
+            core: Box::new(RenderCore::new(sr)),
+            commands: command_rx,
+            worker: worker_tx,
+            views: view_tx,
+            pages: RealtimePages {
+                available: page_rx,
+                retired: retire_tx,
+            },
+            diagnostics: diagnostics.clone(),
+            enabled: false,
+            taking: false,
+            packet: [[0.0; 2]; PACKET],
+            packet_len: 0,
+            packet_at: 0,
+            player: None,
+            calibration: None,
+            take_underrun: 0,
+            take_overflow: 0,
+        };
+        (
+            Self {
+                input_stream: None,
+                output_stream: None,
+                config,
+                input_name: String::new(),
+                output_name: String::new(),
+                commands,
+                views,
+                diagnostics,
+                responses,
+                stop,
+                offline: None,
+                online: false,
+                status: String::new(),
+            },
+            callback,
+        )
     }
-
-    pub fn adjust_latency_comp(&mut self, latency_comp: usize) -> Result<()> {
-        if self.latency_comp == latency_comp {
-            return Ok(());
+    pub fn send(&mut self, command: Control) -> Result<()> {
+        self.commands
+            .push(command)
+            .map_err(|_| anyhow::anyhow!("Audio command queue is full; action was not applied"))
+    }
+    pub fn poll(&mut self) -> Option<EngineView> {
+        if let Some(callback) = &mut self.offline {
+            callback.commands();
+            callback.publish();
         }
-
-        let (input_stream, output_stream, config) = Self::build_streams(
-            &self.input_name,
-            &self.output_name,
-            Arc::clone(&self.state),
-            Arc::clone(&self.fx_engine),
-            Arc::clone(&self.track_fx_engine),
-            Arc::clone(&self.track_carriers),
-            Arc::clone(&self.realtime_enabled),
-            latency_comp,
-        )?;
-
-        self.input_stream.pause()?;
-        self.output_stream.pause()?;
-
-        self.input_stream = input_stream;
-        self.output_stream = output_stream;
-        self.config = config;
-        self.latency_comp = latency_comp;
-        Ok(())
+        let mut view = None;
+        while let Some(value) = self.views.pop() {
+            view = Some(value);
+        }
+        view
     }
-
+    pub fn responses(&self) -> impl Iterator<Item = Response> + '_ {
+        self.responses.try_iter()
+    }
+    pub fn configure(&mut self, config: &AppConfig) -> Result<()> {
+        self.send(Control::Config {
+            parameters: Box::new(Parameters::from_config(config, self.config.sample_rate.0)),
+            data: Arc::new(crate::project::data_from_config(config)),
+        })
+    }
     pub fn curr_input_name(&self) -> &str {
         &self.input_name
     }
-
     pub fn curr_output_name(&self) -> &str {
         &self.output_name
     }
-
-    pub fn update_input_fx(&self, config: &crate::config::InputFxConfigs) {
-        let runtime = crate::engine::input_fx::InputFxRuntime::from_config(config);
-        if let Ok(mut fx) = self.fx_engine.try_lock() {
-            let retired = fx.swap_runtime(runtime);
-            drop(fx);
-            drop(retired);
+    pub fn suspend(&self) {
+        if let Some(stream) = &self.input_stream {
+            let _ = stream.pause();
+        }
+        if let Some(stream) = &self.output_stream {
+            let _ = stream.pause();
         }
     }
-
-    pub fn update_track_fx(&self, config: &crate::config::TrackFxConfigs) {
-        let runtime = crate::engine::track_fx::TrackFxRuntime::from_config(config);
-        if let Ok(mut fx) = self.track_fx_engine.try_lock() {
-            let retired = fx.swap_runtime(runtime);
-            drop(fx);
-            drop(retired);
+    pub fn resume(&self) {
+        if let Some(stream) = &self.input_stream {
+            let _ = stream.play();
+        }
+        if let Some(stream) = &self.output_stream {
+            let _ = stream.play();
         }
     }
-
-    pub fn update_metronome(&self, start_time: Option<Instant>, bpm: usize) {
-        if let Ok(mut fx) = self.fx_engine.lock() {
-            fx.update_metronome(start_time, bpm);
-        }
-        if let Ok(mut fx) = self.track_fx_engine.lock() {
-            fx.update_metronome(start_time, bpm);
-        }
-    }
-
-    pub fn set_realtime_enabled(&self, enabled: bool) {
-        self.realtime_enabled.store(enabled, Ordering::Relaxed);
-    }
-
-    pub fn track_playing_only(&self, index: usize) -> bool {
-        self.state
-            .try_lock()
-            .ok()
-            .and_then(|state| {
-                state.tracks.get(index).map(|track| {
-                    track.playing
-                        && !track.recording
-                        && !track.overdubbing
-                        && track.overdub_stop_at.is_none()
-                })
-            })
-            .unwrap_or(false)
-    }
-
-    pub fn set_track_levels(&self, levels: &[f32]) {
-        if let Ok(mut state) = self.state.try_lock() {
-            for (track, level) in state.tracks.iter_mut().zip(levels) {
-                track.target_gain = level.clamp(0.0, 1.0);
+}
+fn worker_message(
+    message: WorkerMessage,
+    writer: &mut Option<replay::Writer>,
+    tx: &mpsc::Sender<Response>,
+    diagnostics: &Diagnostics,
+) -> Result<()> {
+    match message {
+        WorkerMessage::Audio { at, len, frames } => {
+            if let Some(writer) = writer {
+                writer.audio(at, &frames[..len])?;
             }
         }
-    }
-
-    pub fn clear_track_now(&self, index: usize) {
-        if let Ok(mut state) = self.state.lock() {
-            if let Some(track) = state.tracks.get_mut(index) {
-                *track = EngineTrack::new();
+        WorkerMessage::Control {
+            at,
+            command,
+            accepted,
+        } => {
+            if !accepted {
+                let _ = tx.send(Response::Error(
+                    "Operation requires stopped tracks and no active replay capture".into(),
+                ));
+                return Ok(());
             }
-        }
-        if let Ok(mut fx) = self.track_fx_engine.lock() {
-            fx.reset_track(index);
-        }
-        if let Ok(mut queues) = self.track_carriers.lock() {
-            if let Some(queue) = queues.get_mut(index) {
-                queue.clear();
-            }
-        }
-    }
-
-    /// Bounded, non-blocking UI overview; never scan or copy an entire recording.
-    pub fn waveform_overviews(&self) -> Option<Vec<Vec<f32>>> {
-        let state = self.state.try_lock().ok()?;
-        Some(
-            state
-                .tracks
-                .iter()
-                .map(|track| {
-                    (0..96)
-                        .map(|bin| {
-                            if track.buffer.is_empty() {
-                                return 0.0;
-                            }
-                            (0..8)
-                                .map(|sub| {
-                                    let index = ((bin * 8 + sub) * track.buffer.len() / (96 * 8))
-                                        .min(track.buffer.len() - 1);
-                                    track.buffer[index].abs()
-                                })
-                                .fold(0.0_f32, f32::max)
-                        })
-                        .collect()
-                })
-                .collect(),
-        )
-    }
-
-    pub fn record_at(&self, track_id: usize, at: Instant) {
-        if let Ok(mut engine) = self.state.lock() {
-            if let Some(track) = engine.tracks.get_mut(track_id) {
-                track.record_start_at = Some(at);
-                track.record_stop_at = None;
-            }
-        }
-    }
-
-    pub fn stop_record_play_at(&self, track_id: usize, at: Instant) {
-        if let Ok(mut engine) = self.state.lock() {
-            if let Some(track) = engine.tracks.get_mut(track_id) {
-                if track.recording || track.record_start_at.is_some() {
-                    track.record_stop_at = Some(at);
-                }
-            }
-        }
-    }
-
-    pub fn play_now(&self, track_id: usize) {
-        if let Ok(mut engine) = self.state.lock() {
-            if let Some(track) = engine.tracks.get_mut(track_id) {
-                if !track.buffer.is_empty() {
-                    track.playing = true;
-                    track.paused_carrier = false;
-                }
-            }
-        }
-    }
-
-    pub fn play_at_progress_now(&self, track_id: usize, progress: Option<f32>) {
-        if let Ok(mut engine) = self.state.lock() {
-            if let Some(track) = engine.tracks.get_mut(track_id) {
-                if !track.buffer.is_empty() {
-                    let channels = self.config.channels as usize;
-                    if let Some(p) = progress {
-                        let len = track.buffer.len();
-                        let normalized = p.rem_euclid(1.0);
-                        let cursor = ((normalized * len as f32).floor() as usize).min(len - 1);
-                        let aligned = align_cursor_to_channels(cursor, len, channels);
-                        track.play_cursor = aligned;
-                        track.overdub_cursor = aligned;
-                    } else {
-                        track.play_cursor = 0;
-                        track.overdub_cursor = 0;
-                    }
-                    track.playing = true;
-                    track.paused_carrier = false;
-                }
-            }
-        }
-    }
-
-    pub fn sync_playhead_if_drift(&self, track_id: usize, progress: f32, drift_ratio: f32) {
-        if let Ok(mut engine) = self.state.lock() {
-            if let Some(track) = engine.tracks.get_mut(track_id) {
-                if !track.playing || track.buffer.is_empty() {
-                    return;
-                }
-                let len = track.buffer.len();
-                let channels = self.config.channels as usize;
-                let normalized = progress.rem_euclid(1.0);
-                let target = ((normalized * len as f32).floor() as usize).min(len - 1);
-                let target = align_cursor_to_channels(target, len, channels);
-                let curr = track.play_cursor;
-                let direct = curr.abs_diff(target);
-                let cyclic = direct.min(len - direct);
-                let max_drift = ((len as f32) * drift_ratio.clamp(0.0, 0.5)).round() as usize;
-                if cyclic > max_drift {
-                    track.play_cursor = target;
-                    track.overdub_cursor = target;
-                }
-            }
-        }
-    }
-
-    pub fn pause_now(&self, track_id: usize) {
-        if let Ok(mut engine) = self.state.lock() {
-            if let Some(track) = engine.tracks.get_mut(track_id) {
-                track.overdub_start_at = None;
-                track.overdub_stop_at = None;
-                track.record_start_at = None;
-                track.record_stop_at = None;
-                track.playing = false;
-                track.paused_carrier = false;
-                track.recording = false;
-                track.overdubbing = false;
-            }
-        }
-    }
-
-    pub fn pause_at_progress_now(&self, track_id: usize, progress: Option<f32>) {
-        if let Ok(mut engine) = self.state.lock() {
-            if let Some(track) = engine.tracks.get_mut(track_id) {
-                if !track.buffer.is_empty() {
-                    let channels = self.config.channels as usize;
-                    if let Some(p) = progress {
-                        let len = track.buffer.len();
-                        let normalized = p.rem_euclid(1.0);
-                        let cursor = ((normalized * len as f32).floor() as usize).min(len - 1);
-                        track.carrier_cursor = align_cursor_to_channels(cursor, len, channels);
-                    } else {
-                        track.carrier_cursor = track.play_cursor;
+            match command {
+                Control::Config { data, .. } => {
+                    if let Some(writer) = writer {
+                        writer.event(at, replay::EventKind::Config((*data).clone()))?;
                     }
                 }
-                track.overdub_start_at = None;
-                track.overdub_stop_at = None;
-                track.record_start_at = None;
-                track.record_stop_at = None;
-                track.playing = false;
-                track.paused_carrier = !track.buffer.is_empty();
-                track.recording = false;
-                track.overdubbing = false;
-            }
-        }
-    }
-
-    pub fn clear_all_tracks_now(&self) {
-        if let Ok(mut engine) = self.state.lock() {
-            for track in &mut engine.tracks {
-                *track = EngineTrack::new();
-            }
-        }
-        if let Ok(mut fx) = self.track_fx_engine.lock() {
-            fx.reset_all_tracks();
-        }
-        if let Ok(mut queues) = self.track_carriers.lock() {
-            for queue in queues.iter_mut() {
-                queue.clear();
-            }
-        }
-    }
-
-    pub fn overdub_at(&self, track_id: usize, at: Instant) {
-        if let Ok(mut engine) = self.state.lock() {
-            if let Some(track) = engine.tracks.get_mut(track_id) {
-                track.overdub_start_at = Some(at);
-                track.overdub_stop_at = None;
-            }
-        }
-    }
-
-    pub fn stop_overdub_at(&self, track_id: usize, at: Instant) {
-        if let Ok(mut engine) = self.state.lock() {
-            if let Some(track) = engine.tracks.get_mut(track_id) {
-                // If overdub is scheduled but not started yet, and stop is requested
-                // no later than the scheduled start, cancel pending overdub entirely.
-                if !track.overdubbing {
-                    if let Some(start_at) = track.overdub_start_at {
-                        if at <= start_at {
-                            track.overdub_start_at = None;
-                            track.overdub_stop_at = None;
-                            return;
-                        }
+                Control::Action(action) => {
+                    if let Some(writer) = writer {
+                        writer.event(at, replay::EventKind::Action(action))?;
                     }
                 }
-                track.overdub_stop_at = Some(at);
+                Control::BeginTake {
+                    snapshot,
+                    root,
+                    project_id,
+                    data,
+                    ..
+                } => {
+                    *writer = Some(replay::Writer::begin(
+                        root, project_id, at, *snapshot, data,
+                    )?);
+                }
+                Control::EndTake => {
+                    let Some(value) = writer.take() else {
+                        anyhow::bail!("No valid replay capture to finish");
+                    };
+                    anyhow::ensure!(
+                        !diagnostics.take_failed.load(Ordering::Relaxed),
+                        "Replay capture overflowed; incomplete input cannot be exported"
+                    );
+                    let root = value.finish(at)?;
+                    let _ = tx.send(Response::Take(root));
+                }
+                Control::Snapshot {
+                    snapshot,
+                    entry,
+                    data,
+                } => {
+                    let tx = tx.clone();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(
+                            match crate::session::save_snapshot(&entry, &snapshot, data) {
+                                Ok(revision) => Response::Saved(revision),
+                                Err(e) => Response::Error(format!("Snapshot save failed: {e}")),
+                            },
+                        );
+                    });
+                }
+                Control::Capture(snapshot) => {
+                    let _ = tx.send(Response::Captured(snapshot));
+                }
+                Control::Calibrate(Some(value)) if value.finished() => {
+                    let tx = tx.clone();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(match value.analyze() {
+                            Ok(v) => Response::Calibrated(v),
+                            Err(e) => Response::Error(e.to_string()),
+                        });
+                    });
+                }
+                _ => {}
             }
         }
     }
+    Ok(())
+}
+fn select_host(_input: &str, _output: &str) -> Result<cpal::Host> {
+    #[cfg(all(target_os = "windows", feature = "asio"))]
+    if let Ok(host) = cpal::host_from_id(cpal::HostId::Asio) {
+        if host
+            .input_devices()?
+            .any(|d| d.name().ok().as_deref() == Some(_input))
+            && host
+                .output_devices()?
+                .any(|d| d.name().ok().as_deref() == Some(_output))
+        {
+            return Ok(host);
+        }
+    }
+    Ok(cpal::default_host())
 }

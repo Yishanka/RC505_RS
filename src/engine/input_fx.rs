@@ -70,7 +70,7 @@ pub struct ReverbRuntime {
     pub rt60_ms: f32,
     pub predelay_ms: f32,
     pub width: f32,
-    pub high_cut_damp: f32,
+    pub high_cut_hz: f32,
     pub low_cut_hz: f32,
 }
 
@@ -145,6 +145,8 @@ pub struct InputFxState {
 }
 
 pub struct InputFxEngine {
+    routing: crate::config::track_options::InputRouting,
+    clock_active: bool,
     input_envelope: crate::dsp::detector::PeakFollower,
     runtime: InputFxRuntime,
     state: InputFxState,
@@ -156,6 +158,8 @@ pub struct InputFxEngine {
 impl InputFxEngine {
     pub fn new(sample_rate: f32) -> Self {
         Self {
+            routing: crate::config::track_options::InputRouting::Legacy,
+            clock_active: false,
             input_envelope: crate::dsp::detector::PeakFollower::default(),
             runtime: InputFxRuntime::empty(),
             state: InputFxState::new(),
@@ -163,6 +167,30 @@ impl InputFxEngine {
             bpm: DEFAULT_BPM,
             sample_rate,
         }
+    }
+
+    pub fn prepare(&mut self, sample_rate: f32) {
+        self.sample_rate = sample_rate;
+        for bank in &mut self.state.banks {
+            for slot in &mut bank.slots {
+                slot.reverb.prepare(sample_rate);
+                slot.my_delay.delay.prepare(sample_rate);
+            }
+        }
+    }
+    pub fn set_clock(&mut self, active: bool, bpm: usize) {
+        if self.clock_active != active {
+            for bank in &mut self.state.banks {
+                for slot in &mut bank.slots {
+                    slot.trigger = StepTrigger::default();
+                }
+            }
+        }
+        self.clock_active = active;
+        self.bpm = bpm;
+    }
+    pub fn set_routing(&mut self, routing: crate::config::track_options::InputRouting) {
+        self.routing = routing;
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
@@ -177,6 +205,7 @@ impl InputFxEngine {
                 }
             }
         }
+        self.clock_active = start.is_some();
         self.metronome_start = start;
         self.bpm = bpm.max(1);
     }
@@ -192,6 +221,43 @@ impl InputFxEngine {
         input_r: f32,
         track_carriers: &[Option<(f32, f32)>],
     ) -> (f32, f32) {
+        let input_level = self
+            .input_envelope
+            .next((input_l.abs() + input_r.abs()) * 0.5, self.sample_rate);
+        if self.routing == crate::config::track_options::InputRouting::Legacy {
+            self.process_chain(
+                elapsed_secs,
+                input_l,
+                input_r,
+                None,
+                input_level,
+                track_carriers,
+            )
+        } else {
+            let mut result = (input_l, input_r);
+            for slot in 0..FX_SLOT_COUNT {
+                result = self.process_chain(
+                    elapsed_secs,
+                    result.0,
+                    result.1,
+                    Some(slot),
+                    input_level,
+                    track_carriers,
+                );
+            }
+            result
+        }
+    }
+
+    fn process_chain(
+        &mut self,
+        elapsed_secs: f64,
+        input_l: f32,
+        input_r: f32,
+        only_slot: Option<usize>,
+        input_level: f32,
+        track_carriers: &[Option<(f32, f32)>],
+    ) -> (f32, f32) {
         let bank_idx = self.runtime.selected_bank_idx;
         if bank_idx >= FX_BANK_COUNT {
             return (input_l, input_r);
@@ -199,16 +265,13 @@ impl InputFxEngine {
 
         let bank = &self.runtime.banks[bank_idx];
         let state_bank = &mut self.state.banks[bank_idx];
-        let input_level = self
-            .input_envelope
-            .next((input_l.abs() + input_r.abs()) * 0.5, self.sample_rate);
 
         let mut osc_mix = 0.0f32;
         let mut active_osc_count = 0usize;
 
         for idx in 0..FX_SLOT_COUNT {
             let slot = &bank.slots[idx];
-            if !slot.enabled {
+            if !slot.enabled || only_slot.is_some_and(|only| only != idx) {
                 continue;
             }
             let Some(osc) = slot.osc.as_ref() else {
@@ -216,12 +279,12 @@ impl InputFxEngine {
             };
             let note = if osc.note_seq.is_empty() {
                 osc.note_current
-            } else if self.metronome_start.is_none() {
+            } else if !self.clock_active {
                 osc.note_current
             } else {
                 note_at_time(&osc.note_seq, self.bpm, elapsed_secs)
             };
-            let note_on = if self.metronome_start.is_none() || osc.note_on_seq.is_empty() {
+            let note_on = if !self.clock_active || osc.note_on_seq.is_empty() {
                 true
             } else {
                 seq_bool_at_time(&osc.note_on_seq, self.bpm, elapsed_secs)
@@ -230,7 +293,7 @@ impl InputFxEngine {
                 &osc.note_trigger_seq,
                 self.bpm,
                 elapsed_secs,
-                self.metronome_start.is_some(),
+                self.clock_active,
             );
             let osc_filtered = process_osc_fx_sample(
                 &mut state_bank.slots[idx].osc,
@@ -269,14 +332,14 @@ impl InputFxEngine {
 
         for idx in 0..FX_SLOT_COUNT {
             let slot = &bank.slots[idx];
-            if !slot.enabled {
+            if !slot.enabled || only_slot.is_some_and(|only| only != idx) {
                 continue;
             }
             let Some(delay) = slot.my_delay.as_ref() else {
                 continue;
             };
 
-            let note_on = if self.metronome_start.is_none() || delay.note_on_seq.is_empty() {
+            let note_on = if !self.clock_active || delay.note_on_seq.is_empty() {
                 true
             } else {
                 seq_bool_at_time(&delay.note_on_seq, self.bpm, elapsed_secs)
@@ -285,11 +348,11 @@ impl InputFxEngine {
                 &delay.note_trigger_seq,
                 self.bpm,
                 elapsed_secs,
-                self.metronome_start.is_some(),
+                self.clock_active,
             );
             let note = if delay.note_seq.is_empty() {
                 delay.note_current
-            } else if self.metronome_start.is_none() {
+            } else if !self.clock_active {
                 delay.note_current
             } else {
                 note_at_time(&delay.note_seq, self.bpm, elapsed_secs)
@@ -325,7 +388,7 @@ impl InputFxEngine {
 
         for idx in 0..FX_SLOT_COUNT {
             let slot = &bank.slots[idx];
-            if !slot.enabled {
+            if !slot.enabled || only_slot.is_some_and(|only| only != idx) {
                 continue;
             }
             let Some(vocoder) = slot.vocoder else {
@@ -380,7 +443,7 @@ impl InputFxEngine {
 
         for idx in 0..FX_SLOT_COUNT {
             let slot = &bank.slots[idx];
-            if !slot.enabled {
+            if !slot.enabled || only_slot.is_some_and(|only| only != idx) {
                 continue;
             }
             let Some(filter) = slot.filter else {
@@ -414,7 +477,7 @@ impl InputFxEngine {
 
         for idx in 0..FX_SLOT_COUNT {
             let slot = &bank.slots[idx];
-            if !slot.enabled {
+            if !slot.enabled || only_slot.is_some_and(|only| only != idx) {
                 continue;
             }
             let Some(reverb) = slot.reverb else {
@@ -430,7 +493,7 @@ impl InputFxEngine {
                     rt60_ms: reverb.rt60_ms,
                     predelay_ms: reverb.predelay_ms,
                     width: reverb.width,
-                    high_cut_damp: reverb.high_cut_damp,
+                    high_cut_hz: reverb.high_cut_hz,
                     low_cut_hz: reverb.low_cut_hz,
                 },
                 self.sample_rate,
@@ -641,9 +704,7 @@ impl InputFxRuntime {
                             reverb.predelay_ms.value.min(REVERB_PREDELAY_MAX_MS) as f32;
                         let width = (reverb.width.value.min(REVERB_WIDTH_MAX) as f32 / 100.0)
                             .clamp(0.0, 1.0);
-                        let high_cut_damp = (reverb.high_cut.value.min(REVERB_HIGHCUT_MAX) as f32
-                            / 100.0)
-                            .clamp(0.0, 1.0);
+                        let high_cut_hz = reverb.high_cut_hz.value.clamp(200, 20_000) as f32;
                         let low_cut_hz = reverb
                             .low_cut
                             .value
@@ -660,7 +721,7 @@ impl InputFxRuntime {
                                 rt60_ms,
                                 predelay_ms,
                                 width,
-                                high_cut_damp,
+                                high_cut_hz,
                                 low_cut_hz,
                             }),
                             None,

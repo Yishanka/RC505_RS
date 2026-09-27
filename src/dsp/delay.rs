@@ -7,7 +7,9 @@ pub struct DelayParams {
     pub time_ms: f32,
     pub feedback: f32,
     pub high_damp_hz: f32,
-    pub mix: f32,
+    pub direct: f32,
+    pub effect: f32,
+    pub low_cut_hz: f32,
 }
 
 #[derive(Clone)]
@@ -19,7 +21,10 @@ pub struct DelayDspState {
     smooth_time_samples: f32,
     smooth_feedback: f32,
     smooth_damp_hz: f32,
-    smooth_mix: f32,
+    smooth_direct: f32,
+    smooth_effect: f32,
+    hp_y: [f32; 2],
+    hp_x: [f32; 2],
     fb_lp_l: f32,
     fb_lp_r: f32,
 }
@@ -36,7 +41,10 @@ impl DelayDspState {
             smooth_time_samples: (DELAY_TIME_MIN_MS / 1000.0) * sr,
             smooth_feedback: 0.0,
             smooth_damp_hz: 20_000.0,
-            smooth_mix: 0.0,
+            smooth_direct: 1.0,
+            smooth_effect: 0.0,
+            hp_y: [0.0; 2],
+            hp_x: [0.0; 2],
             fb_lp_l: 0.0,
             fb_lp_r: 0.0,
         }
@@ -82,13 +90,15 @@ pub fn process_sample(
         .clamp(1.0, max_delay_samples as f32);
     let target_feedback = p.feedback.clamp(0.0, FEEDBACK_MAX);
     let target_damp_hz = p.high_damp_hz.clamp(200.0, 20_000.0);
-    let target_mix = p.mix.clamp(0.0, 1.0);
+    let target_direct = p.direct.clamp(0.0, 1.0);
+    let target_effect = p.effect.clamp(0.0, 1.0);
 
     let smooth_coeff = smoothing_coeff(sr, 25.0);
     state.smooth_time_samples += (target_time_samples - state.smooth_time_samples) * smooth_coeff;
     state.smooth_feedback += (target_feedback - state.smooth_feedback) * smooth_coeff;
     state.smooth_damp_hz += (target_damp_hz - state.smooth_damp_hz) * smooth_coeff;
-    state.smooth_mix += (target_mix - state.smooth_mix) * smooth_coeff;
+    state.smooth_direct += (target_direct - state.smooth_direct) * smooth_coeff;
+    state.smooth_effect += (target_effect - state.smooth_effect) * smooth_coeff;
 
     let delay_samples = state
         .smooth_time_samples
@@ -100,9 +110,19 @@ pub fn process_sample(
     state.fb_lp_l += (delayed_l - state.fb_lp_l) * lp_alpha;
     state.fb_lp_r += (delayed_r - state.fb_lp_r) * lp_alpha;
 
+    let mut feedback = [state.fb_lp_l, state.fb_lp_r];
+    if p.low_cut_hz > 0.0 {
+        let a = (-2.0 * std::f32::consts::PI * p.low_cut_hz.clamp(10.0, 1000.0) / sr).exp();
+        for ch in 0..2 {
+            let x = feedback[ch];
+            state.hp_y[ch] = a * (state.hp_y[ch] + x - state.hp_x[ch]);
+            state.hp_x[ch] = x;
+            feedback[ch] = state.hp_y[ch];
+        }
+    }
     let fb = state.smooth_feedback;
-    let write_l = (input_l + state.fb_lp_l * fb).clamp(-1.0, 1.0);
-    let write_r = (input_r + state.fb_lp_r * fb).clamp(-1.0, 1.0);
+    let write_l = (input_l + feedback[0] * fb).clamp(-1.0, 1.0);
+    let write_r = (input_r + feedback[1] * fb).clamp(-1.0, 1.0);
     state.buffer_l[state.write_idx] = write_l;
     state.buffer_r[state.write_idx] = write_r;
 
@@ -111,10 +131,20 @@ pub fn process_sample(
         state.write_idx = 0;
     }
 
-    let mix = state.smooth_mix;
-    let out_l = input_l * (1.0 - mix) + delayed_l * mix;
-    let out_r = input_r * (1.0 - mix) + delayed_r * mix;
-    (out_l.clamp(-1.0, 1.0), out_r.clamp(-1.0, 1.0))
+    let direct = if p.direct == 0.0 {
+        0.0
+    } else {
+        state.smooth_direct
+    };
+    let effect = if p.effect == 0.0 {
+        0.0
+    } else {
+        state.smooth_effect
+    };
+    (
+        input_l * direct + delayed_l * effect,
+        input_r * direct + delayed_r * effect,
+    )
 }
 
 fn read_interp(buffer: &[f32], read_pos: f32) -> f32 {

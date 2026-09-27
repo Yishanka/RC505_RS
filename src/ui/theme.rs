@@ -27,11 +27,34 @@ pub fn apply(ctx: &egui::Context) {
         .insert(egui::TextStyle::Heading, egui::FontId::proportional(24.0));
     style
         .text_styles
-        .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
+        .insert(egui::TextStyle::Body, egui::FontId::proportional(16.0));
+    style
+        .text_styles
+        .insert(egui::TextStyle::Button, egui::FontId::proportional(15.0));
+    style
+        .text_styles
+        .insert(egui::TextStyle::Small, egui::FontId::proportional(13.0));
+    style
+        .text_styles
+        .insert(egui::TextStyle::Monospace, egui::FontId::monospace(15.0));
     style.spacing.item_spacing = egui::vec2(10.0, 8.0);
     style.spacing.button_padding = egui::vec2(12.0, 8.0);
     style.spacing.slider_width = 180.0;
+    style.spacing.scroll = egui::style::ScrollStyle::solid();
     ctx.set_style(style);
+    for path in [r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\simhei.ttf"] {
+        if let Ok(bytes) = std::fs::read(path) {
+            let mut fonts = egui::FontDefinitions::default();
+            fonts
+                .font_data
+                .insert("cjk".into(), egui::FontData::from_owned(bytes));
+            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                fonts.families.entry(family).or_default().push("cjk".into());
+            }
+            ctx.set_fonts(fonts);
+            break;
+        }
+    }
 }
 
 pub fn card() -> egui::Frame {
@@ -60,7 +83,7 @@ pub fn brand(ui: &mut egui::Ui) {
         );
     }
     ui.label(
-        egui::RichText::new("RC / 505 RS")
+        egui::RichText::new("RC505 RS")
             .size(23.0)
             .strong()
             .color(ACCENT),

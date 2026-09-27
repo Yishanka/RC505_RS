@@ -58,7 +58,7 @@ impl BeatConfigs {
             // bpm: initial_bpm,
             // latency: initial_latency,
             input_bpm: NumericConfig::new("BPM", initial_bpm),
-            input_latency: NumericConfig::new("Latency Complement", initial_latency),
+            input_latency: NumericConfig::new("Compensation (ms)", initial_latency),
             tap_calc: BeatTapCaculator::new(initial_bpm),
             sel_idx: Some(0),
         }

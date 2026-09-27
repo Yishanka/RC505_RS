@@ -41,13 +41,21 @@ pub struct ProjectEntry {
     pub file: String,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct ProjectIndex {
     projects: Vec<ProjectEntry>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectData {
+    #[serde(default)]
+    pub calibration: Option<crate::config::track_options::LatencyCalibration>,
+    #[serde(default)]
+    pub snapshot: Option<String>,
+    #[serde(default)]
+    pub track_options: Vec<crate::config::track_options::TrackOptions>,
+    #[serde(default)]
+    pub input_routing: crate::config::track_options::InputRouting,
     #[serde(default = "default_fader_speed")]
     pub fader_speed_db: f32,
     #[serde(default)]
@@ -59,25 +67,25 @@ pub struct ProjectData {
     pub track_fx: TrackFxData,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct BeatData {
     pub bpm: usize,
     pub latency: usize,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SystemData {
     pub input_device: String,
     pub output_device: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct InputFxData {
     pub selected_bank_idx: usize,
     pub banks: Vec<FxBankData>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TrackFxData {
     pub selected_bank_idx: usize,
     #[serde(default)]
@@ -86,7 +94,7 @@ pub struct TrackFxData {
     pub tracks: Vec<TrackFxTrackData>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TrackFxTrackData {
     #[serde(default)]
     pub enabled: Vec<Vec<bool>>,
@@ -94,12 +102,12 @@ pub struct TrackFxTrackData {
     pub banks: Vec<TrackFxBankData>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TrackFxBankData {
     pub slots: Vec<TrackFxSlotData>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TrackFxSlotData {
     pub is_enabled: bool,
     pub kind: String,
@@ -111,8 +119,14 @@ pub struct TrackFxSlotData {
     pub filter: Option<TrackFilterData>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TrackDelayData {
+    #[serde(default)]
+    pub direct_pct: Option<usize>,
+    #[serde(default)]
+    pub effect_pct: Option<usize>,
+    #[serde(default)]
+    pub low_cut_hz: usize,
     #[serde(default)]
     pub time_mode: TimeMode,
     pub time_ms: usize,
@@ -121,7 +135,7 @@ pub struct TrackDelayData {
     pub mix_pct: usize,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TrackRollData {
     pub step: usize,
     #[serde(default = "default_roll_time_mode")]
@@ -162,7 +176,7 @@ fn default_fader_speed() -> f32 {
     24.0
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TrackFilterData {
     #[serde(default)]
     pub filter: FilterData,
@@ -176,12 +190,12 @@ pub struct TrackFilterData {
     pub env: EnvelopeData,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct FxBankData {
     pub slots: Vec<FxSlotData>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct FxSlotData {
     pub is_enabled: bool,
     pub kind: String,
@@ -195,7 +209,7 @@ pub struct FxSlotData {
     pub vocoder: Option<VocoderData>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OscData {
     pub waveform: String,
     pub level: usize,
@@ -245,7 +259,7 @@ pub struct FilterData {
     pub mix: usize,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MyDelayData {
     pub level: usize,
     pub threshold: usize,
@@ -263,6 +277,8 @@ pub struct MyDelayData {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ReverbData {
+    #[serde(default)]
+    pub high_cut_hz: Option<usize>,
     #[serde(default = "default_full_level")]
     pub dry_level: usize,
     #[serde(default = "default_reverb_wet")]
@@ -277,7 +293,7 @@ pub struct ReverbData {
     pub low_cut: usize,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct VocoderData {
     #[serde(default)]
     pub tone: i32,
@@ -338,15 +354,15 @@ impl Default for TrackFxData {
 pub fn load_index() -> Vec<ProjectEntry> {
     let path = index_path();
     if !path.exists() {
-        return vec![];
+        return recover_index();
     }
     let content = fs::read_to_string(path);
     match content {
         Ok(raw) => match serde_json::from_str::<ProjectIndex>(&raw) {
             Ok(idx) => idx.projects,
-            Err(_) => vec![],
+            Err(_) => recover_index(),
         },
-        Err(_) => vec![],
+        Err(_) => recover_index(),
     }
 }
 
@@ -356,20 +372,29 @@ pub fn save_index(entries: &[ProjectEntry]) -> anyhow::Result<()> {
         projects: entries.to_vec(),
     };
     let raw = serde_json::to_string_pretty(&idx)?;
+    if index_path().exists() {
+        let previous = fs::read(index_path())?;
+        if serde_json::from_slice::<ProjectIndex>(&previous).is_ok() {
+            atomic_write(&index_path().with_extension("json.bak"), &previous)?;
+        }
+    }
     atomic_write(&index_path(), raw.as_bytes())?;
     Ok(())
 }
 
 pub fn load_project(entry: &ProjectEntry) -> anyhow::Result<Option<ProjectData>> {
-    let path = project_file_path(&entry.file);
+    let path = crate::session::safe_child(&projects_root(), &entry.file)?;
     if !path.exists() {
-        return Ok(None);
+        anyhow::bail!(
+            "Project configuration is missing: {}. The index entry has been preserved.",
+            entry.file
+        );
     }
     let raw = fs::read_to_string(&path)?;
     Ok(Some(serde_json::from_str::<ProjectData>(&raw)?))
 }
 
-fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+pub fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
     use std::io::Write;
     let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
     let result = (|| -> anyhow::Result<()> {
@@ -388,10 +413,27 @@ fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
 
 pub fn save_project(entry: &ProjectEntry, config: &AppConfig) -> anyhow::Result<()> {
     ensure_project_dir()?;
-    let data = data_from_config(config);
-    let raw = serde_json::to_string_pretty(&data)?;
-    atomic_write(&project_file_path(&entry.file), raw.as_bytes())?;
-    Ok(())
+    let mut data = data_from_config(config);
+    data.snapshot = load_project(entry)?.and_then(|p| p.snapshot);
+    save_project_data(entry, &data)
+}
+
+pub fn save_project_data(entry: &ProjectEntry, data: &ProjectData) -> anyhow::Result<()> {
+    use fs2::FileExt;
+    ensure_project_dir()?;
+    let path = crate::session::safe_child(&projects_root(), &entry.file)?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path.with_extension("lock"))?;
+    lock.try_lock_exclusive()
+        .map_err(|_| anyhow::anyhow!("Project is being saved by another process"))?;
+    if path.exists() {
+        fs::copy(&path, path.with_extension("json.bak"))?;
+    }
+    atomic_write(&path, &serde_json::to_vec_pretty(data)?)
 }
 
 pub fn remove_project_file(file: &str) {
@@ -401,7 +443,75 @@ pub fn remove_project_file(file: &str) {
 
 pub fn make_project_file_name(name: &str, idx: usize) -> String {
     let safe = sanitize_name(name);
-    format!("{}_{}.json", safe, idx)
+    format!("{}_{}_{}.json", safe, idx, crate::session::id())
+}
+
+fn recover_index() -> Vec<ProjectEntry> {
+    if let Ok(raw) = fs::read(index_path().with_extension("json.bak")) {
+        if let Ok(index) = serde_json::from_slice::<ProjectIndex>(&raw) {
+            return index.projects;
+        }
+    }
+    fs::read_dir(projects_root())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|v| v.to_str()) != Some("json") {
+                return None;
+            }
+            let data = fs::read(&path).ok()?;
+            serde_json::from_slice::<ProjectData>(&data).ok()?;
+            Some(ProjectEntry {
+                name: path.file_stem()?.to_string_lossy().into_owned(),
+                file: path.file_name()?.to_string_lossy().into_owned(),
+            })
+        })
+        .collect()
+}
+
+pub fn trash_project(entry: &ProjectEntry) -> anyhow::Result<()> {
+    let root = projects_root().join("trash").join(crate::session::id());
+    fs::create_dir_all(&root)?;
+    // Persist recovery metadata first; all paths are validated single components.
+    atomic_write(&root.join("entry.json"), &serde_json::to_vec(entry)?)?;
+    let source = crate::session::safe_child(&projects_root(), &entry.file)?;
+    if source.exists() {
+        fs::rename(&source, root.join(&entry.file))?;
+    }
+    let assets = crate::session::project_assets(entry)?;
+    if assets.exists() {
+        fs::rename(&assets, root.join("assets"))?;
+    }
+    Ok(())
+}
+pub fn restore_last_deleted() -> anyhow::Result<Option<ProjectEntry>> {
+    let mut entries: Vec<_> = fs::read_dir(projects_root().join("trash"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().join("entry.json").exists())
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    let Some(last) = entries.pop() else {
+        return Ok(None);
+    };
+    let root = last.path();
+    let entry: ProjectEntry = serde_json::from_slice(&fs::read(root.join("entry.json"))?)?;
+    let destination = crate::session::safe_child(&projects_root(), &entry.file)?;
+    anyhow::ensure!(
+        !destination.exists() && !crate::session::project_assets(&entry)?.exists(),
+        "Project identity already exists; restore will not overwrite it"
+    );
+    if root.join(&entry.file).exists() {
+        fs::rename(root.join(&entry.file), destination)?;
+    }
+    if root.join("assets").exists() {
+        fs::rename(root.join("assets"), crate::session::project_assets(&entry)?)?;
+    }
+    fs::rename(root.join("entry.json"), root.join("restored.json"))?;
+    Ok(Some(entry))
 }
 
 pub fn data_from_config(config: &AppConfig) -> ProjectData {
@@ -490,6 +600,7 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                     InputFx::Reverb(reverb) => {
                         slot_data.kind = "Reverb".to_string();
                         slot_data.reverb = Some(ReverbData {
+                            high_cut_hz: Some(reverb.high_cut_hz.value),
                             dry_level: reverb.dry_level.value,
                             wet_level: reverb.wet_level.value,
                             density: reverb.density.value,
@@ -593,6 +704,9 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                     TrackFx::Delay(delay) => {
                         slot_data.kind = "Delay".to_string();
                         slot_data.delay = Some(TrackDelayData {
+                            direct_pct: Some(delay.direct_pct.value),
+                            effect_pct: Some(delay.effect_pct.value),
+                            low_cut_hz: delay.low_cut_hz.value,
                             time_mode: delay.time_mode.value,
                             time_ms: delay.time_ms.value,
                             feedback_pct: delay.feedback_pct.value,
@@ -656,6 +770,10 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
     }
 
     ProjectData {
+        calibration: config.calibration.clone(),
+        snapshot: None,
+        track_options: config.track_options.clone(),
+        input_routing: config.input_routing,
         fader_speed_db: config.fader_speed_db,
         track_levels: config.track_levels.clone(),
         beat: BeatData {
@@ -679,6 +797,16 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
 }
 
 pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
+    config.calibration = data.calibration;
+    config.input_routing = data.input_routing;
+    for (index, options) in config.track_options.iter_mut().enumerate() {
+        *options = data.track_options.get(index).copied().unwrap_or_else(|| {
+            let mut value = crate::config::track_options::TrackOptions::default();
+            value.fader_speed = data.fader_speed_db;
+            value
+        });
+        options.normalize();
+    }
     config.fader_speed_db = if data.fader_speed_db.is_finite() {
         data.fader_speed_db.clamp(6.0, 60.0)
     } else {
@@ -829,6 +957,10 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                                 reverb_data.predelay_ms.min(REVERB_PREDELAY_MAX_MS);
                             reverb.width.value = reverb_data.width.min(REVERB_WIDTH_MAX);
                             reverb.high_cut.value = reverb_data.high_cut.min(REVERB_HIGHCUT_MAX);
+                            reverb.high_cut_hz.value = reverb_data
+                                .high_cut_hz
+                                .unwrap_or(18_000 - reverb.high_cut.value * 155)
+                                .clamp(200, 20_000);
                             reverb.low_cut.value = reverb_data
                                 .low_cut
                                 .clamp(REVERB_LOWCUT_MIN_HZ, REVERB_LOWCUT_MAX_HZ);
@@ -989,6 +1121,15 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                                 .high_damp_hz
                                 .clamp(TRACK_DELAY_DAMP_MIN_HZ, TRACK_DELAY_DAMP_MAX_HZ);
                             delay.mix_pct.value = delay_data.mix_pct.min(TRACK_DELAY_MIX_MAX_PCT);
+                            delay.direct_pct.value = delay_data
+                                .direct_pct
+                                .unwrap_or(100 - delay.mix_pct.value)
+                                .min(100);
+                            delay.effect_pct.value = delay_data
+                                .effect_pct
+                                .unwrap_or(delay.mix_pct.value)
+                                .min(100);
+                            delay.low_cut_hz.value = delay_data.low_cut_hz.min(1000);
                         }
                     }
                 }

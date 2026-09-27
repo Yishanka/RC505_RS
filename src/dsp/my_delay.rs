@@ -61,6 +61,11 @@ pub struct MyDelayFxParams {
 }
 
 impl MyDelayDspState {
+    pub fn prepare(&mut self, sr: f32) {
+        self.record_len_samples = ((RECORD_WINDOW_MS * sr / 1000.0).round() as usize).max(2);
+        self.buffer.resize(self.record_len_samples, 0.0);
+    }
+
     pub fn new() -> Self {
         Self {
             input_envelope: crate::dsp::detector::PeakFollower::default(),

@@ -17,7 +17,7 @@ pub struct ReverbParams {
     pub rt60_ms: f32,
     pub predelay_ms: f32,
     pub width: f32,
-    pub high_cut_damp: f32,
+    pub high_cut_hz: f32,
     pub low_cut_hz: f32,
 }
 
@@ -65,17 +65,24 @@ impl DelayLine {
 #[derive(Clone, Copy)]
 struct OnePoleLp {
     z: f32,
+    cached: (f32, f32, f32),
 }
 
 impl OnePoleLp {
     fn new() -> Self {
-        Self { z: 0.0 }
+        Self {
+            z: 0.0,
+            cached: (0.0, 0.0, 0.0),
+        }
     }
 
     fn process(&mut self, x: f32, cutoff_hz: f32, sample_rate: f32) -> f32 {
         let sr = sample_rate.max(1.0);
         let fc = cutoff_hz.max(10.0).min(sr * 0.49);
-        let a = (-2.0 * std::f32::consts::PI * fc / sr).exp();
+        if self.cached.0 != fc || self.cached.1 != sr {
+            self.cached = (fc, sr, (-2.0 * std::f32::consts::PI * fc / sr).exp());
+        }
+        let a = self.cached.2;
         self.z = (1.0 - a) * x + a * self.z;
         self.z
     }
@@ -83,6 +90,7 @@ impl OnePoleLp {
 
 #[derive(Clone, Copy)]
 struct OnePoleHp {
+    cached: (f32, f32, f32),
     y: f32,
     x_prev: f32,
 }
@@ -90,6 +98,7 @@ struct OnePoleHp {
 impl OnePoleHp {
     fn new() -> Self {
         Self {
+            cached: (0.0, 0.0, 0.0),
             y: 0.0,
             x_prev: 0.0,
         }
@@ -98,7 +107,10 @@ impl OnePoleHp {
     fn process(&mut self, x: f32, cutoff_hz: f32, sample_rate: f32) -> f32 {
         let sr = sample_rate.max(1.0);
         let fc = cutoff_hz.max(10.0).min(sr * 0.49);
-        let a = (-2.0 * std::f32::consts::PI * fc / sr).exp();
+        if self.cached.0 != fc || self.cached.1 != sr {
+            self.cached = (fc, sr, (-2.0 * std::f32::consts::PI * fc / sr).exp());
+        }
+        let a = self.cached.2;
         let y = a * (self.y + x - self.x_prev);
         self.x_prev = x;
         self.y = y;
@@ -121,6 +133,9 @@ pub struct ReverbDspState {
     smooth_rt60_ms: f32,
     last_size_ms: f32,
     inited: bool,
+    alpha: f32,
+    feedback_gain: [f32; 4],
+    control_tick: u8,
 }
 
 impl ReverbDspState {
@@ -142,7 +157,14 @@ impl ReverbDspState {
             smooth_rt60_ms: 2000.0,
             last_size_ms: -1.0,
             inited: false,
+            alpha: 1.0 - (-1.0 / (0.05 * sample_rate)).exp(),
+            feedback_gain: [0.0; 4],
+            control_tick: 0,
         }
+    }
+
+    pub fn prepare(&mut self, sample_rate: f32) {
+        self.ensure_sample_rate(sample_rate);
     }
 
     fn ensure_sample_rate(&mut self, sample_rate: f32) {
@@ -150,6 +172,7 @@ impl ReverbDspState {
             return;
         }
         self.sample_rate = sample_rate.max(1.0);
+        self.alpha = 1.0 - (-1.0 / (0.05 * self.sample_rate)).exp();
         self.diffusers = make_diffusers(self.sample_rate);
         let max_delay = max_delay_samples(self.sample_rate);
         for line in &mut self.lines {
@@ -176,7 +199,7 @@ pub fn process_sample(
         .size_ms
         .clamp(REVERB_SIZE_MIN_MS as f32, REVERB_SIZE_MAX_MS as f32);
     let target_rt60 = p.rt60_ms.max(50.0);
-    let alpha = 1.0 - (-1.0 / (0.05 * sr)).exp();
+    let alpha = state.alpha;
     if !state.inited {
         state.smooth_size_ms = target_size;
         state.smooth_rt60_ms = target_rt60;
@@ -229,8 +252,7 @@ pub fn process_sample(
     }
 
     let mut fb = [0.0f32; 4];
-    let damp = p.high_cut_damp.clamp(0.0, 1.0);
-    let high_cut_hz = lerp(18_000.0, 2_500.0, damp).min(sr * 0.49);
+    let high_cut_hz = p.high_cut_hz.clamp(200.0, 20_000.0).min(sr * 0.49);
     let low_cut_hz = p.low_cut_hz.max(10.0).min(high_cut_hz * 0.95);
 
     for idx in 0..4 {
@@ -238,10 +260,14 @@ pub fn process_sample(
         let lp = state.lp[idx].process(hp, high_cut_hz, sr);
         let delay_sec = (state.lines[idx].delay_samples() as f32) / sr;
         let rt60_sec = state.smooth_rt60_ms.max(10.0) / 1000.0;
-        let gain = 10.0_f32.powf(-3.0 * delay_sec / rt60_sec);
+        if state.control_tick == 0 {
+            state.feedback_gain[idx] = 10.0_f32.powf(-3.0 * delay_sec / rt60_sec);
+        }
+        let gain = state.feedback_gain[idx];
         fb[idx] = lp * gain;
     }
 
+    state.control_tick = (state.control_tick + 1) % 32;
     let sum = fb.iter().sum::<f32>();
     for idx in 0..4 {
         let mixed = fb[idx] - FEEDBACK_MATRIX_SCALE * sum;
@@ -352,7 +378,7 @@ mod tests {
             rt60_ms: 600.0,
             predelay_ms: 0.0,
             width: 1.0,
-            high_cut_damp: 0.3,
+            high_cut_hz: 13_350.0,
             low_cut_hz: 120.0,
         }
     }

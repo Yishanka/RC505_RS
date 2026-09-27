@@ -7,13 +7,14 @@ use crate::dsp::envelope::{AhdsrParams, AhdsrState};
 use eframe::egui::{self, Color32, Stroke, pos2};
 
 pub fn number(ui: &mut egui::Ui, config: &mut NumericConfig, min: usize, max: usize, log: bool) {
-    if ui
-        .add(
+    if super::navigation::register(
+        ui.add(
             egui::Slider::new(&mut config.value, min..=max)
                 .text(&config.label)
                 .logarithmic(log),
-        )
-        .changed()
+        ),
+    )
+    .changed()
     {
         config.buffer.clear();
     }
@@ -24,15 +25,54 @@ pub fn choice<T: Clone + PartialEq + std::fmt::Display>(
     config: &mut EnumConfig<T>,
 ) {
     ui.horizontal(|ui| {
-        egui::ComboBox::from_id_source(&config.label)
+        let response = egui::ComboBox::from_id_source(&config.label)
             .selected_text(config.value.to_string())
             .show_ui(ui, |ui| {
                 for value in &config.options {
                     ui.selectable_value(&mut config.value, value.clone(), value.to_string());
                 }
-            });
+            })
+            .response;
+        let response = super::navigation::register(response);
+        if response.has_focus() {
+            if ui.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+                config.prev();
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+                config.next();
+            }
+        }
         ui.label(&config.label);
     });
+}
+
+pub fn selector<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    id: &str,
+    value: &mut T,
+    options: &[(T, &str)],
+) -> bool {
+    let previous = *value;
+    let index = options.iter().position(|(v, _)| v == value).unwrap_or(0);
+    let response = egui::ComboBox::from_id_source(id)
+        .selected_text(options[index].1)
+        .show_ui(ui, |ui| {
+            for (option, label) in options {
+                ui.selectable_value(value, *option, *label);
+            }
+        })
+        .response;
+    if response.has_focus() {
+        let delta = ui.input(|i| {
+            i32::from(i.key_pressed(egui::Key::ArrowRight))
+                - i32::from(i.key_pressed(egui::Key::ArrowLeft))
+        });
+        if delta != 0 {
+            *value = options[(index as i32 + delta).rem_euclid(options.len() as i32) as usize].0;
+        }
+    }
+    super::navigation::register(response);
+    previous != *value
 }
 
 pub fn filter(ui: &mut egui::Ui, config: &mut FilterConfigs, full: bool) {
@@ -83,7 +123,7 @@ pub fn filter(ui: &mut egui::Ui, config: &mut FilterConfigs, full: bool) {
                 pos2(x, rect.bottom() - 4.0),
                 egui::Align2::CENTER_BOTTOM,
                 format!("{hz:.0}"),
-                egui::FontId::monospace(10.0),
+                egui::FontId::monospace(12.0),
                 theme::MUTED,
             );
         }

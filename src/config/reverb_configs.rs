@@ -19,6 +19,7 @@ pub const REVERB_LOWCUT_MIN_HZ: usize = 20;
 pub const REVERB_LOWCUT_MAX_HZ: usize = 1_000;
 
 pub struct ReverbConfigs {
+    pub high_cut_hz: NumericConfig,
     pub dry_level: NumericConfig,
     pub wet_level: NumericConfig,
     pub density: NumericConfig,
@@ -34,6 +35,7 @@ pub struct ReverbConfigs {
 impl ReverbConfigs {
     pub fn new() -> Self {
         Self {
+            high_cut_hz: NumericConfig::new("High cut (Hz)", 13_350),
             dry_level: NumericConfig::new("Direct level(%)", 100),
             wet_level: NumericConfig::new("Effect level(%)", 35),
             density: NumericConfig::new("Density", 5),

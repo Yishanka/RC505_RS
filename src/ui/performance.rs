@@ -1,146 +1,413 @@
-use super::{editor, parameters, theme};
+use super::{editor, navigation as nav, parameters, theme};
 use crate::{
-    app::MyApp,
+    app::{Focus, LeftPage, MyApp},
+    config::track_options::{InputRouting, Quantize, StopMode},
+    engine::core::Mode,
     presets::FxTarget,
-    state::{AppState, FxState, TrackState},
 };
 use eframe::egui::{self, Color32, Stroke};
+use std::sync::atomic::Ordering;
 
 pub fn draw(ui: &mut egui::Ui, app: &mut MyApp) {
     transport(ui, app);
     ui.add_space(6.0);
     if app.editor.expanded {
         egui::ScrollArea::vertical()
-            .id_source("expanded_workspace")
+            .id_source("expanded")
             .show(ui, |ui| editor::draw(ui, app, true));
         return;
     }
-    egui::ScrollArea::vertical().id_source("performance_workspace").show(ui, |ui| {
-        if ui.available_width() >= 1100.0 {
-            quick_area(ui,app);
-        } else {
-            egui::CollapsingHeader::new("Quick parameters & settings").show(ui,|ui| quick_area(ui,app));
-        }
-        ui.add_space(8.0);
-        ui.columns(2,|columns| { rack(&mut columns[0],app,false); rack(&mut columns[1],app,true); });
-        ui.add_space(8.0);
-        app.refresh_waveforms();
-        // Columns follow available width, unlike the old fixed 1000 px panel.
-        ui.columns(5,|columns| {
-            for (index,column) in columns.iter_mut().enumerate() { track(column,app,index); }
+    egui::ScrollArea::vertical()
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+        .id_source("performance")
+        .show(ui, |ui| {
+            ui.columns(2, |columns| {
+                fixed_panel(&mut columns[0], app, Focus::Left, |ui, app| left(ui, app));
+                fixed_panel(&mut columns[1], app, Focus::Right, |ui, app| {
+                    ui.horizontal(|ui| {
+                        ui.strong("FX EDITOR");
+                        theme::caption(ui, "D / F8");
+                    });
+                    editor::draw(ui, app, false);
+                });
+            });
+            ui.add_space(8.0);
+            ui.columns(2, |columns| {
+                rack(&mut columns[0], app, false);
+                rack(&mut columns[1], app, true);
+            });
+            ui.add_space(8.0);
+            ui.columns(5, |columns| {
+                for (index, column) in columns.iter_mut().enumerate() {
+                    track(column, app, index);
+                }
+            });
         });
-        ui.add_space(6.0);
-        theme::caption(ui,"Signal: Input + Oscillator → MyDelay → Vocoder → Filter / Reverb → recording / monitor | loop → Track FX → fader → master");
+}
+fn fixed_panel(
+    ui: &mut egui::Ui,
+    app: &mut MyApp,
+    focus: Focus,
+    draw: impl FnOnce(&mut egui::Ui, &mut MyApp),
+) {
+    let frame = theme::card().inner_margin(12.0).stroke(Stroke::new(
+        1.0,
+        if app.focus == focus {
+            theme::ACCENT
+        } else {
+            Color32::from_rgb(43, 53, 67)
+        },
+    ));
+    frame.show(ui, |ui| {
+        let request = app.focus == focus && app.focus_request;
+        nav::begin(ui, focus, request);
+        if request {
+            app.focus_request = false;
+        }
+        let height = if ui.ctx().screen_rect().height() < 800.0 {
+            120.0
+        } else {
+            236.0
+        };
+        egui::ScrollArea::vertical()
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+            .id_source(if focus == Focus::Left {
+                "left-controls"
+            } else {
+                "right-controls"
+            })
+            .max_height(height)
+            .min_scrolled_height(height)
+            .auto_shrink([false, false])
+            .show(ui, |ui| draw(ui, app));
+        nav::end(ui);
     });
 }
-
-fn quick_area(ui: &mut egui::Ui, app: &mut MyApp) {
-    ui.columns(2,|columns| {
-            if app.app_state == AppState::MainScreen {
-                egui::ScrollArea::horizontal().id_source("legacy_screen").show(&mut columns[0],|ui| super::compact::draw_screen(ui,app));
-            } else {
-                theme::card().show(&mut columns[0],|ui| {
-                    theme::caption(ui,"PERFORMANCE / 5 TRACK LOOP STATION");
-                    ui.heading(app.project_name());
-                    ui.add_space(6.0);
-                    let phase = app.metronome.beat_phase(std::time::Instant::now()).unwrap_or(0.0);
-                    ui.add(egui::ProgressBar::new(phase).fill(theme::ACCENT));
-                    theme::caption(ui,if app.metronome.start_time().is_some() {"CLOCK RUNNING"} else {"READY TO RECORD"});
-                    theme::caption(ui,"1–5 Record / Play / Dub    F1–F5 Stop    Space All start / stop");
-                    theme::caption(ui,"Select an FX slot to edit it here, or expand for visual tools.");
-                    ui.add_space(8.0);
-                    egui::CollapsingHeader::new("Keyboard faders & shortcuts").show(ui,|ui| {
-                        ui.add(egui::Slider::new(&mut app.config.fader_speed_db,6.0..=60.0).text("Hold speed (dB/s)"));
-                        theme::caption(ui,"Down / up: Z X | C V | B N | M , | . / | tracks 1 to 5");
-                        theme::caption(ui,"Tap 0.5 dB; hold accelerates after 180 ms. Shift: tap 0.1 dB, hold at 1/8 speed. Both keys: hold level.");
-                        theme::caption(ui,"Q W E R: Input FX | U I O P: selected Track FX | T: bank / slot keys | Left / Right: select track");
-                        theme::caption(ui,"Typing, expanded editors and inactive windows suspend performance keys.");
-                    });
-                    egui::CollapsingHeader::new("Audio devices & latency").show(ui,|ui| {
-                        parameters::choice(ui,&mut app.config.system_config.input_device);
-                        parameters::choice(ui,&mut app.config.system_config.output_device);
-                        parameters::number(ui,&mut app.config.beat_config.input_latency,0,500,false);
-                        theme::caption(ui,"Changing devices or latency restarts the audio streams.");
-                    });
-                });
-            }
-            editor::draw(&mut columns[1],app,false);
-        });
-}
-
 fn transport(ui: &mut egui::Ui, app: &mut MyApp) {
+    let request = app.focus == Focus::Transport && app.focus_request;
+    nav::begin(ui, Focus::Transport, request);
+    if request {
+        app.focus_request = false;
+    }
     ui.horizontal_wrapped(|ui| {
         theme::brand(ui);
         ui.separator();
-        let locked = app.metronome.start_time().is_some();
         ui.label("BPM");
-        ui.add_enabled(!locked,egui::DragValue::new(&mut app.config.beat_config.input_bpm.value).clamp_range(30..=300).speed(0.2))
-            .on_hover_text("Stop every track and preview before changing tempo. Recorded audio is not time-stretched.");
-        if ui.add_enabled(!locked,egui::Button::new("Tap")).clicked() {
+        nav::register(
+            ui.add_enabled(
+                app.stopped(),
+                egui::DragValue::new(&mut app.config.beat_config.input_bpm.value)
+                    .clamp_range(30..=300)
+                    .speed(0.2),
+            ),
+        );
+        if nav::register(ui.add_enabled(app.stopped(), egui::Button::new("Tap T"))).clicked() {
             app.config.beat_config.tap_calc.calculate_avg_bpm();
             app.config.beat_config.input_bpm.value = app.config.beat_config.tap_calc.value;
         }
-        if ui.button("All start / stop").clicked() { app.toggle_all(); }
-        if ui.button("Save  Ctrl+S").clicked() { app.save_now(); }
-        if ui.button("Projects").clicked() { app.back_to_projects(); }
-        if ui.selectable_label(app.app_state==AppState::MainScreen,"Legacy keys  S").clicked() {
-            app.app_state = if app.app_state==AppState::MainScreen {AppState::MainLoop} else {AppState::MainScreen};
+        if nav::button(ui, "All  Space").clicked() {
+            app.toggle_all();
+        }
+        ui.menu_button("Save", |ui| {
+            if ui.button("Configuration  Ctrl+S").clicked() {
+                app.save_now();
+                ui.close_menu();
+            }
+            if ui.button("Configuration + audio  Ctrl+Shift+S").clicked() {
+                app.save_snapshot();
+                ui.close_menu();
+            }
+        });
+        let taking = app.taking();
+        if nav::register(
+            ui.add_enabled(
+                !app.busy(),
+                egui::Button::new(if taking {
+                    "End take  F9"
+                } else {
+                    "Record take  F9"
+                })
+                .fill(if taking {
+                    Color32::from_rgb(132, 43, 61)
+                } else {
+                    Color32::from_rgb(37, 45, 58)
+                }),
+            ),
+        )
+        .clicked()
+        {
+            if taking {
+                app.finish_take();
+            } else {
+                app.start_take();
+            }
+        }
+        if nav::button(ui, "Projects").clicked() {
+            app.back_to_projects();
+        }
+        if nav::button(ui, "Help  F12").clicked() {
+            app.help_open = true;
         }
     });
-    theme::caption(ui, app.audio_status());
-    if !app.status.is_empty() {
-        theme::caption(ui, &app.status);
+    nav::end(ui);
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), 24.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            theme::caption(ui, app.project_name());
+            ui.separator();
+            let mode = match app.focus {
+                Focus::Performance => "Performance",
+                Focus::Transport => "Top controls · F6",
+                Focus::Left => "Left controls · A / F7",
+                Focus::Right => "FX controls · D / F8",
+            };
+            theme::caption(ui, mode);
+            let message = if app.status.is_empty() {
+                app.audio_status()
+            } else {
+                app.status.clone()
+            };
+            ui.add(
+                egui::Label::new(egui::RichText::new(&message).size(13.0).color(theme::MUTED))
+                    .truncate(true),
+            )
+            .on_hover_text(message);
+        },
+    );
+}
+fn left(ui: &mut egui::Ui, app: &mut MyApp) {
+    ui.horizontal(|ui| {
+        for (page, label) in [
+            (LeftPage::Track, "Track"),
+            (LeftPage::Audio, "Audio"),
+            (LeftPage::Session, "Session"),
+        ] {
+            nav::register(ui.selectable_value(&mut app.left_page, page, label));
+        }
+        theme::caption(ui, "A / F7");
+    });
+    ui.separator();
+    match app.left_page {
+        LeftPage::Track => {
+            let index = app.track_sel.unwrap_or(0);
+            ui.strong(format!("TRACK {}", index + 1));
+            let options = &mut app.config.track_options[index];
+            ui.add_enabled_ui(
+                !matches!(app.view.tracks[index].mode, Mode::Recording | Mode::Overdub),
+                |ui| {
+                    ui.horizontal(|ui| {
+                        nav::register(ui.checkbox(&mut options.reverse, "Reverse"));
+                        nav::register(ui.checkbox(&mut options.one_shot, "One shot"));
+                    });
+                },
+            );
+            ui.horizontal(|ui| {
+                ui.label("Stop");
+                parameters::selector(
+                    ui,
+                    "stop-mode",
+                    &mut options.stop_mode,
+                    &[
+                        (StopMode::Immediate, "Immediate"),
+                        (StopMode::LoopEnd, "Loop end"),
+                        (StopMode::Fade, "Fade out"),
+                    ],
+                );
+                nav::register(
+                    ui.add_enabled(
+                        options.stop_mode == StopMode::Fade,
+                        egui::DragValue::new(&mut options.fade_ms)
+                            .clamp_range(10..=30_000)
+                            .suffix(" ms"),
+                    ),
+                );
+            });
+            ui.horizontal(|ui|{
+                ui.label("Quantize");parameters::selector(ui,"quantize",&mut options.quantize,&[(Quantize::Off,"Off"),(Quantize::Beat,"Beat"),(Quantize::Measure,"Measure"),(Quantize::Loop,"Loop")]);
+                ui.label("Length");nav::register(ui.add(egui::DragValue::new(&mut options.measures).clamp_range(0..=128).suffix(" bars"))).on_hover_text("0 = finish manually; 1–128 = fixed length in 4/4. Maximum audio length is five minutes.");
+            });
+            theme::caption(
+                ui,
+                "0 bars = manual finish · Reverse / One shot disable overdub",
+            );
+            ui.horizontal(|ui| {
+                if nav::register(ui.add_enabled(
+                    app.view.tracks[index].undo || app.view.tracks[index].redo,
+                    egui::Button::new(if app.view.tracks[index].redo {
+                        "Redo  Ctrl+Y"
+                    } else {
+                        "Undo  Ctrl+Z"
+                    }),
+                ))
+                .clicked()
+                {
+                    app.undo_track(index);
+                }
+                if nav::button(ui, "Expand selected FX").clicked() {
+                    app.editor.expanded = true;
+                }
+            });
+        }
+        LeftPage::Audio => {
+            parameters::choice(ui, &mut app.config.system_config.input_device);
+            parameters::choice(ui, &mut app.config.system_config.output_device);
+            ui.horizontal(|ui| {
+                ui.label("Buffer");
+                nav::register(
+                    egui::ComboBox::from_id_source("buffer-frames")
+                        .selected_text(format!("{} frames", app.buffer_frames))
+                        .show_ui(ui, |ui| {
+                            for frames in [64, 128, 256, 512, 1024] {
+                                ui.selectable_value(
+                                    &mut app.buffer_frames,
+                                    frames,
+                                    format!("{frames}"),
+                                );
+                            }
+                        })
+                        .response,
+                );
+                if nav::register(ui.add_enabled(
+                    app.stopped() && !app.busy() && !app.taking(),
+                    egui::Button::new("Reconnect"),
+                ))
+                .clicked()
+                {
+                    app.reconnect();
+                }
+            });
+            ui.add_enabled_ui(app.stopped(), |ui| {
+                parameters::number(ui, &mut app.config.beat_config.input_latency, 0, 500, false)
+            });
+            let d = &app.audio.diagnostics;
+            theme::caption(
+                ui,
+                format!(
+                    "Input gaps {} · overflow {} · errors {} · peak callback {:.2} ms",
+                    d.underrun.load(Ordering::Relaxed),
+                    d.overflow.load(Ordering::Relaxed),
+                    d.stream_errors.load(Ordering::Relaxed),
+                    d.maximum_callback_ns.load(Ordering::Relaxed) as f64 / 1e6
+                ),
+            );
+            theme::caption(
+                ui,
+                "Loopback: connect output L to input L; disconnect speakers. Monitoring is muted during probes.",
+            );
+            ui.horizontal(|ui| {
+                if nav::register(ui.add_enabled(
+                    app.stopped() && app.audio.online && !app.taking(),
+                    egui::Button::new("Measure loopback"),
+                ))
+                .clicked()
+                {
+                    app.calibrate();
+                }
+                if let Some(value) = app.measurement {
+                    if nav::button(
+                        ui,
+                        format!(
+                            "Apply {:.3} ms",
+                            value.frames as f64 * 1000.0 / value.sample_rate as f64
+                        ),
+                    )
+                    .clicked()
+                    {
+                        app.apply_measurement();
+                    }
+                }
+            });
+        }
+        LeftPage::Session => {
+            ui.strong(app.project_name());
+            ui.horizontal(|ui| {
+                if nav::button(ui, "Save configuration").clicked() {
+                    app.save_now();
+                }
+                if nav::button(ui, "Save audio snapshot").clicked() {
+                    app.save_snapshot();
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Input FX order");
+                nav::register(
+                    egui::ComboBox::from_id_source("routing")
+                        .selected_text(match app.config.input_routing {
+                            InputRouting::Legacy => "Legacy groups",
+                            InputRouting::Serial => "Slot A → D",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut app.config.input_routing,
+                                InputRouting::Legacy,
+                                "Legacy groups",
+                            );
+                            ui.selectable_value(
+                                &mut app.config.input_routing,
+                                InputRouting::Serial,
+                                "Slot A → D",
+                            );
+                        })
+                        .response,
+                );
+            });
+            if nav::button(ui, "Replay library & import").clicked() {
+                app.replay_browser = true;
+            }
+            if nav::button(ui, "Signal flow and operation guide").clicked() {
+                app.help_open = true;
+                app.help_tab = 1;
+            }
+            let d = &app.audio.diagnostics;
+            theme::caption(
+                ui,
+                format!(
+                    "Input {:.1} dB · output {:.1} dB · clipped frames {}",
+                    db(app.view.input_peak),
+                    db(app.view.output_peak),
+                    app.view.clipped
+                ),
+            );
+            theme::caption(
+                ui,
+                format!(
+                    "Audio clock {} frames · queued input {}",
+                    app.view.frame,
+                    d.queue_frames.load(Ordering::Relaxed)
+                ),
+            );
+        }
     }
 }
-
+fn db(value: f32) -> f32 {
+    20.0 * value.max(1e-5).log10()
+}
 fn rack(ui: &mut egui::Ui, app: &mut MyApp, track_fx: bool) {
-    theme::card().show(ui, |ui| {
+    theme::card().inner_margin(10.0).show(ui, |ui| {
         let mut bank = if track_fx {
             app.config.track_fx.sel_bank_idx
         } else {
             app.config.input_fx.sel_bank_idx
         };
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                egui::RichText::new(if track_fx { "TRACK FX" } else { "INPUT FX" })
-                    .color(if track_fx {
-                        theme::TRACK
-                    } else {
-                        theme::ACCENT
-                    })
-                    .strong(),
+        ui.horizontal(|ui| {
+            ui.colored_label(
+                if track_fx {
+                    theme::TRACK
+                } else {
+                    theme::ACCENT
+                },
+                if track_fx { "TRACK FX" } else { "INPUT FX" },
             );
-            for index in 0..4 {
-                ui.selectable_value(&mut bank, index, format!("Bank {}", index + 1));
+            for i in 0..4 {
+                ui.selectable_value(&mut bank, i, format!("{}", i + 1));
             }
+            theme::caption(ui, if track_fx { "U I O P" } else { "Q W E R" });
         });
         if track_fx {
             app.config.track_fx.select_bank(bank);
         } else {
             app.config.input_fx.select_bank(bank);
-        }
-        if track_fx {
-            theme::caption(
-                ui,
-                format!(
-                    "U I O P: {} / TRACK {}",
-                    if app.fx_state == FxState::Single {
-                        "enable slots"
-                    } else {
-                        "select banks"
-                    },
-                    app.track_sel.unwrap_or(0) + 1
-                ),
-            );
-        } else {
-            theme::caption(
-                ui,
-                if app.fx_state == FxState::Single {
-                    "Q W E R = enable slots   •   T switches bank keys"
-                } else {
-                    "Q W E R = select banks   •   T switches slot keys"
-                },
-            );
         }
         ui.columns(4, |columns| {
             for (slot, column) in columns.iter_mut().enumerate() {
@@ -154,13 +421,12 @@ fn rack(ui: &mut egui::Ui, app: &mut MyApp, track_fx: bool) {
                 } else {
                     editor::input_name(app.config.input_fx.slot_kind(bank, slot))
                 };
-                let selected = app.editor.target == Some(target);
                 if column
                     .add_sized(
-                        [column.available_width(), 40.0],
+                        [column.available_width(), 29.0],
                         egui::SelectableLabel::new(
-                            selected,
-                            format!("{}  {}", ['A', 'B', 'C', 'D'][slot], name),
+                            app.editor.target == Some(target),
+                            format!("{} {name}", ['A', 'B', 'C', 'D'][slot]),
                         ),
                     )
                     .clicked()
@@ -168,75 +434,131 @@ fn rack(ui: &mut egui::Ui, app: &mut MyApp, track_fx: bool) {
                     app.editor.select(target);
                 }
                 let index = app.track_sel.unwrap_or(0);
-                let mut enabled = if track_fx {
-                    app.config.track_fx.slot_enabled(index, bank, slot)
+                let enabled = if track_fx {
+                    &mut app.config.track_fx.tracks[index].enabled[bank][slot]
                 } else {
-                    app.config.input_fx.banks[bank].slots[slot].is_enabled
+                    &mut app.config.input_fx.banks[bank].slots[slot].is_enabled
                 };
-                if column
-                    .add_enabled(name != "Empty", egui::Checkbox::new(&mut enabled, "On"))
-                    .changed()
-                {
-                    if track_fx {
-                        app.config.track_fx.toggle_slot_enabled(index, slot);
-                    } else {
-                        app.config.input_fx.toggle_slot_enabled(slot);
-                    }
-                }
+                column.add_enabled(name != "Empty", egui::Checkbox::new(enabled, "On"));
             }
         });
+        theme::caption(ui, "Shift: hold effect · Alt: bank · Ctrl: edit");
     });
 }
-
 fn track(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
-    let state = app.tracks[index].track_state;
+    let view = app.view.tracks[index];
     let selected = app.track_sel == Some(index);
-    let (label, color) = match state {
-        TrackState::Empty => ("EMPTY", theme::MUTED),
-        TrackState::Record => ("RECORDING", Color32::from_rgb(255, 109, 118)),
-        TrackState::Dub => ("OVERDUB", Color32::from_rgb(255, 196, 106)),
-        TrackState::Pause => ("STOPPED", theme::MUTED),
-        TrackState::Play => ("PLAYING", theme::ACCENT),
-        TrackState::NxtPlay => ("FINISHING", Color32::from_rgb(255, 196, 106)),
+    let (state, color) = match view.mode {
+        Mode::Empty => ("EMPTY", theme::MUTED),
+        Mode::Recording => ("RECORDING", Color32::from_rgb(255, 109, 118)),
+        Mode::Overdub => ("OVERDUB", Color32::from_rgb(255, 196, 106)),
+        Mode::Playing => ("PLAYING", theme::ACCENT),
+        Mode::Stopped => ("STOPPED", theme::MUTED),
     };
-    let frame = theme::card().inner_margin(12.0).stroke(Stroke::new(
-        if selected { 2.0 } else { 1.0 },
-        if selected {
-            theme::TRACK
-        } else {
-            Color32::from_gray(48)
-        },
-    ));
-    frame.show(ui,|ui| {
-        ui.set_width(ui.available_width());
-        if ui.selectable_label(selected,egui::RichText::new(format!("TRACK {:02}",index+1)).strong()).clicked() { app.track_sel=Some(index); }
-        ui.label(egui::RichText::new(label).small().color(color));
-        let (rect,_) = ui.allocate_exact_size(egui::vec2(ui.available_width(),72.0),egui::Sense::hover());
-        ui.painter().rect_filled(rect,5.0,theme::BACKGROUND);
-        if let Some(wave) = app.waveforms.get(index) {
-            for (bin,amplitude) in wave.iter().enumerate() {
-                let x = rect.left()+bin as f32 / wave.len() as f32*rect.width();
-                let h = amplitude.min(1.0)*rect.height()*0.42;
-                ui.painter().vline(x,rect.center().y-h..=rect.center().y+h,Stroke::new(1.0,color));
+    theme::card()
+        .inner_margin(10.0)
+        .stroke(Stroke::new(
+            if selected { 2.0 } else { 1.0 },
+            if selected {
+                theme::TRACK
+            } else {
+                Color32::from_gray(48)
+            },
+        ))
+        .show(ui, |ui| {
+            if ui.ctx().screen_rect().height() < 800.0 {
+                ui.spacing_mut().item_spacing.y = 4.0;
             }
-        }
-        let progress = app.tracks[index].track_play_progress(std::time::Instant::now());
-        if matches!(state,TrackState::Play|TrackState::NxtPlay|TrackState::Dub) {ui.painter().vline(rect.left()+progress*rect.width(),rect.y_range(),Stroke::new(2.0,Color32::WHITE));}
-        let duration = app.tracks[index].track_loop_duration.map(|d|format!("{:.2} s",d.as_secs_f64())).unwrap_or_else(||"—".into());
-        theme::caption(ui,duration);
-        ui.spacing_mut().slider_width = (ui.available_width()-48.0).max(48.0);
-        let mut db = crate::app::faders::decibels(app.config.track_levels[index]);
-        if ui.add(egui::Slider::new(&mut db,-60.0..=0.0).text("dB").show_value(false))
-            .on_hover_text("Drag or click to set level; keyboard down / up keys can operate several tracks together.").changed() {
-            app.config.track_levels[index] = crate::app::faders::gain(db);
-        }
-        theme::caption(ui,format!("{}   [{} - / {} +]",if app.config.track_levels[index]==0.0 {"MUTE".into()} else {format!("{db:.1} dB")},
-            ["Z","C","B","M","."][index],["X","V","N",",","/"][index]));
-        let action = match state {TrackState::Empty=>"Record",TrackState::Pause=>"Play",TrackState::Record|TrackState::Dub=>"Finish",TrackState::NxtPlay=>"Finishing...",_=>"Overdub"};
-        if ui.add_sized([ui.available_width(),38.0],egui::Button::new(format!("{}  [{}]",action,index+1))).clicked() {app.trigger_track(index);}
-        ui.horizontal_wrapped(|ui| {
-            if ui.add_enabled(matches!(state,TrackState::Record|TrackState::Play|TrackState::NxtPlay|TrackState::Dub),egui::Button::new("Stop")).clicked() {app.pause_track(index);}
-            if ui.add_enabled(!matches!(state,TrackState::Empty|TrackState::Record|TrackState::Dub),egui::Button::new("Clear")).clicked() {app.clear_track(index);}
+            if ui
+                .selectable_label(
+                    selected,
+                    egui::RichText::new(format!("TRACK {}", index + 1)).strong(),
+                )
+                .clicked()
+            {
+                app.track_sel = Some(index);
+            }
+            ui.label(
+                egui::RichText::new(if view.pending { "QUEUED" } else { state })
+                    .size(13.0)
+                    .color(color),
+            );
+            let (rect, _) = ui
+                .allocate_exact_size(egui::vec2(ui.available_width(), 48.0), egui::Sense::hover());
+            ui.painter().rect_filled(rect, 5.0, theme::BACKGROUND);
+            for (bin, amplitude) in view.wave.iter().enumerate() {
+                let x = rect.left() + bin as f32 / 24.0 * rect.width();
+                let h = amplitude.min(1.0) * rect.height() * 0.45;
+                ui.painter().vline(
+                    x,
+                    rect.center().y - h..=rect.center().y + h,
+                    Stroke::new(2.0, color),
+                );
+            }
+            if view.frames > 0 {
+                ui.painter().vline(
+                    rect.left() + view.cursor as f32 / view.frames as f32 * rect.width(),
+                    rect.y_range(),
+                    Stroke::new(1.5, Color32::WHITE),
+                );
+            }
+            theme::caption(
+                ui,
+                format!("{:.2} s", view.frames as f64 / app.view.sample_rate as f64),
+            );
+            ui.spacing_mut().slider_width = (ui.available_width() - 4.0).max(40.0);
+            let mut level = crate::app::faders::decibels(app.config.track_levels[index]);
+            if ui
+                .add(egui::Slider::new(&mut level, -60.0..=0.0).show_value(false))
+                .changed()
+            {
+                app.config.track_levels[index] = crate::app::faders::gain(level);
+            }
+            let keys = ["Z / X", "C / V", "B / N", "M / ,", ". / /"][index];
+            ui.label(format!("{level:.1} dB   {keys}"));
+            ui.horizontal(|ui| {
+                ui.label("Speed");
+                ui.add(
+                    egui::DragValue::new(&mut app.config.track_options[index].fader_speed)
+                        .clamp_range(1.0..=60.0)
+                        .speed(0.25)
+                        .suffix(" dB/s"),
+                );
+            });
+            theme::caption(ui, format!("Shift + {keys}: speed"));
+            let action = match view.mode {
+                Mode::Empty => "Record",
+                Mode::Stopped => "Play",
+                Mode::Recording | Mode::Overdub => "Finish",
+                Mode::Playing if app.config.track_options[index].one_shot => "Retrigger",
+                _ => "Overdub",
+            };
+            if ui
+                .add_sized(
+                    [ui.available_width(), 34.0],
+                    egui::Button::new(format!("{action}  {}", index + 1)),
+                )
+                .clicked()
+            {
+                app.trigger_track(index);
+            }
+            ui.horizontal(|ui| {
+                if ui.button(format!("Stop  F{}", index + 1)).clicked() {
+                    app.pause_track(index);
+                }
+                if ui
+                    .add_enabled(
+                        view.undo || view.redo,
+                        egui::Button::new(if view.redo { "Redo" } else { "Undo" }),
+                    )
+                    .clicked()
+                {
+                    app.undo_track(index);
+                }
+            });
+            if selected && app.clear_held > 0.0 && app.clear_held < 1.0 {
+                ui.painter()
+                    .rect_stroke(rect, 5.0, Stroke::new(2.0, Color32::LIGHT_RED));
+            }
         });
-    });
 }
