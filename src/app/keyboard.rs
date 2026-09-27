@@ -19,7 +19,7 @@ impl MyApp {
         }
     }
     pub(super) fn handle_input(&mut self, ctx: &egui::Context) {
-        let input = ctx.input(Clone::clone);
+        let mut input = ctx.input(Clone::clone);
         let text = ctx.wants_keyboard_input();
         let performance = input.focused
             && !text
@@ -30,6 +30,11 @@ impl MyApp {
             && self.app_state == AppState::MainLoop
             && !self.show_save_prompt
             && !self.performance_locked();
+        if performance {
+            self.performance_keys.poll(&mut input);
+        } else {
+            self.performance_keys.suspend();
+        }
         let fx_keys = [
             Key::Q,
             Key::W,

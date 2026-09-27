@@ -30,6 +30,8 @@ Offline rendering runs the same `RenderCore` at the original sample rate. A regr
 
 `app/actions.rs` shares commands between mouse and keyboard. `keyboard.rs` separates performance, text, full editor and panel focus. F6, A/F7 and D/F8 select top/left/right; navigation registers focusable controls. Momentary FX store their original bank/track/slot so release restores the correct target even after selection changes. Faders integrate elapsed time, with independent direction and rate controllers.
 
+On Windows, `performance_keys.rs` bridges egui0.27's dropped/translated Shift symbols using key state for the explicitly bound performance keys. It checks both application focus and foreground process identity before polling, suppresses held keys when returning from editing, and modifies only the command router's input copy. The original text input stream is unchanged.
+
 `ui/theme.rs` supplies fonts/colors; `performance.rs` uses fixed quick-panel geometry and internal scrolling. `editor.rs`, `parameters.rs` and `piano_roll.rs` edit the same config with pinned bank/slot identity. Legacy painted screens and the old wall-clock Track/Metronome scheduler are removed.
 
 `app_support/paths.rs` resolves explicit `--data-dir`, then executable-adjacent `install-settings.json`, then the legacy AppData fallback. The installer defaults data to the program's `data` folder. `maintenance.rs` performs copy/verify migration before audio or GUI startup. `updater.rs` uses an embedded PowerShell helper to validate GitHub release metadata, download and hash the installer, and wait for normal app exit before installation. No updater token or GitHub credential is distributed.

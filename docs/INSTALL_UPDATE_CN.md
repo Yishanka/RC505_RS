@@ -66,7 +66,7 @@ RC505 RS/
 
 ## 开发 → 推送 → Release → 更新
 
-普通 `main` 推送执行 Windows 检查和测试；不会把每个未发版提交推送给演奏用户。正式交付步骤：
+普通 `main` 推送执行 Windows 检查、测试和安装器验证；不会把每个未发版提交推送给演奏用户。正式交付步骤：
 
 ```powershell
 # 修改源码和文档，更新 Cargo.toml 中的版本，并更新 Cargo.lock

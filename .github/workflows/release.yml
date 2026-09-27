@@ -41,13 +41,20 @@ jobs:
             exit 1
           }
       - name: Package
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         shell: pwsh
         run: |
-          $version = $env:RELEASE_TAG.Substring(1)
-          ./scripts/package.ps1 -Version $version
+          $version = if ($env:RELEASE_TAG.StartsWith('v')) {$env:RELEASE_TAG.Substring(1)} else {''}
+          try { ./scripts/package.ps1 -Version $version 2>&1 | Tee-Object package.log }
+          catch {
+            $details = (Get-Content package.log -Tail 20) -join "`n"
+            $details += "`n" + $_.Exception.Message
+            $details = $details.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
+            Write-Output "::error title=Installer validation failed::$details"
+            exit 1
+          }
       - name: Publish installer, portable package and update manifest
         if: startsWith(github.ref, 'refs/tags/v')
         env:
@@ -58,7 +65,7 @@ jobs:
           $assets = @(Get-ChildItem -LiteralPath dist -File | ForEach-Object FullName)
           gh release create $env:RELEASE_TAG @assets --verify-tag --title "RC505 RS $env:RELEASE_TAG" --notes-file docs/RELEASE_NOTES_CN.md
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ($env:RELEASE_TAG -eq 'v0.2.2') {
+          if ($env:RELEASE_TAG -in @('v0.2.2','v0.2.3')) {
             gh release edit v0.2.1 --prerelease --notes-file docs/RELEASE_0.2.1_STATUS.md
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }

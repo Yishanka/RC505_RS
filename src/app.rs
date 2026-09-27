@@ -1,6 +1,7 @@
 mod actions;
 pub mod faders;
 mod keyboard;
+mod performance_keys;
 mod workflow;
 use crate::{
     config::AppConfig,
@@ -62,6 +63,7 @@ pub enum JobResult {
     Error(String),
 }
 pub struct MyApp {
+    performance_keys: performance_keys::PerformanceKeys,
     fader_keys: [faders::KeyFader; 5],
     speed_keys: [faders::KeyFader; 5],
     pub editor: ui::editor::EditorState,
@@ -165,6 +167,7 @@ impl MyApp {
             .and_then(|s| projects.iter().position(|p| p.name == s.last_project))
             .unwrap_or(0);
         Self {
+            performance_keys: performance_keys::PerformanceKeys::default(),
             fader_keys: [faders::KeyFader::default(); 5],
             speed_keys: [faders::KeyFader::default(); 5],
             editor: ui::editor::EditorState::default(),
