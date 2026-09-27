@@ -92,3 +92,24 @@ pub fn install_after_exit(installer: &Path) -> Result<()> {
     command.spawn()?;
     Ok(())
 }
+
+pub fn cleanup_installer_cache(installer: &Path) -> Result<()> {
+    let raw = std::fs::read_to_string(format!("{}.verified.json", installer.display()))?;
+    let metadata: Release = serde_json::from_str(raw.trim_start_matches('\u{feff}'))?;
+    ensure!(
+        metadata.version == env!("CARGO_PKG_VERSION"),
+        "Only the successfully installed current version can finalize its cache"
+    );
+    let output = command()?
+        .args(["-Mode", "Cleanup", "-Installer"])
+        .arg(installer)
+        .arg("-DownloadDir")
+        .arg(crate::app_support::paths::downloads_dir())
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "Installer cache cleanup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}

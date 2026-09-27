@@ -76,6 +76,14 @@ pub fn cli() -> Option<Result<()>> {
     {
         return Some(crate::updater::install_after_exit(Path::new(installer)));
     }
+    if let Some(installer) = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--cleanup-update-cache="))
+    {
+        return Some(crate::updater::cleanup_installer_cache(Path::new(
+            installer,
+        )));
+    }
     None
 }
 pub fn migrate(source: &Path, destination: &Path) -> Result<usize> {

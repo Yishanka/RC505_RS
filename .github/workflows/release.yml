@@ -20,7 +20,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: windows-rust-${{ hashFiles('Cargo.lock') }}-${{ github.ref_type }}
+          key: windows-rust-${{ hashFiles('Cargo.lock', '.cargo/config.toml') }}-${{ github.ref_type }}
           restore-keys: windows-rust-
       - name: Check and test
         shell: pwsh
@@ -58,6 +58,10 @@ jobs:
           $assets = @(Get-ChildItem -LiteralPath dist -File | ForEach-Object FullName)
           gh release create $env:RELEASE_TAG @assets --verify-tag --title "RC505 RS $env:RELEASE_TAG" --notes-file docs/RELEASE_NOTES_CN.md
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($env:RELEASE_TAG -eq 'v0.2.2') {
+            gh release edit v0.2.1 --prerelease --notes-file docs/RELEASE_0.2.1_STATUS.md
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
       - name: Save build cache
         if: always() && steps.build-cache.outputs.cache-hit != 'true'
@@ -67,4 +71,4 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: windows-rust-${{ hashFiles('Cargo.lock') }}-${{ github.ref_type }}
+          key: windows-rust-${{ hashFiles('Cargo.lock', '.cargo/config.toml') }}-${{ github.ref_type }}

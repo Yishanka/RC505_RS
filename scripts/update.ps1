@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('Check','Download','Install')][string]$Mode = 'Check',
+    [ValidateSet('Check','Download','Install','Cleanup')][string]$Mode = 'Check',
     [string]$DownloadDir,
     [string]$Installer,
     [string]$InstallDir,
@@ -19,8 +19,41 @@ function Read-Release {
     if ($release.url -cne $expected -or $release.sha256 -notmatch '^[a-fA-F0-9]{64}$') { throw 'Update URL or checksum is invalid.' }
     return $release
 }
+function Complete-InstallerCache {
+    param([string]$SourceInstaller)
+    $root = [IO.Path]::GetFullPath($DownloadDir).TrimEnd([char[]]'\/')
+    $prefix = $root + [IO.Path]::DirectorySeparatorChar
+    $source = [IO.Path]::GetFullPath($SourceInstaller)
+    $latest = Join-Path $root 'RC505-RS-setup.exe'
+    $sidecar = $source + '.verified.json'
+    $metadata = Get-Content -LiteralPath $sidecar -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($metadata.url -cne ($releaseRoot + "download/v$($metadata.version)/$($metadata.file)")) { throw 'Untrusted cached installer origin.' }
+    if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ine $metadata.sha256) { throw 'Cached installer checksum mismatch.' }
+    if ($source -ine $latest) {
+        # Moves stay inside the configured download folder. Manual installers
+        # outside that folder are copied and their originals remain untouched.
+        if ($source.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)) {
+            Move-Item -LiteralPath $source -Destination $latest -Force
+            Move-Item -LiteralPath $sidecar -Destination ($latest+'.verified.json') -Force
+        } else {
+            Copy-Item -LiteralPath $source -Destination $latest -Force
+            Copy-Item -LiteralPath $sidecar -Destination ($latest+'.verified.json') -Force
+        }
+    }
+    if ((Get-FileHash -LiteralPath $latest -Algorithm SHA256).Hash -ine $metadata.sha256) { throw 'Latest cache verification failed; old caches retained.' }
+    foreach ($old in Get-ChildItem -LiteralPath $root -File) {
+        if ($old.Name -match '^RC505-RS-\d+\.\d+\.\d+-windows-x64-setup\.exe(?:\.verified\.json|\.partial)?$') {
+            $target = [IO.Path]::GetFullPath($old.FullName)
+            if (!$target.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)) { throw 'Cache path escaped download folder.' }
+            Remove-Item -LiteralPath $target
+        }
+    }
+    $errorLog=Join-Path $root 'update-error.log'
+    if (Test-Path -LiteralPath $errorLog) {Remove-Item -LiteralPath $errorLog}
+}
 try {
     if ($Mode -eq 'Check') { Read-Release | ConvertTo-Json -Compress; exit 0 }
+    if ($Mode -eq 'Cleanup') {Complete-InstallerCache -SourceInstaller $Installer; exit 0}
     if ($Mode -eq 'Download') {
         $release = Read-Release
         [IO.Directory]::CreateDirectory($DownloadDir) | Out-Null
@@ -42,6 +75,9 @@ try {
     $setup = Start-Process -FilePath $Installer -ArgumentList $arguments -PassThru -WindowStyle Hidden
     $setup.WaitForExit()
     if ($setup.ExitCode -ne 0) { throw "Installer failed with code $($setup.ExitCode). Previous data remains at $DataDir" }
+    try {Complete-InstallerCache -SourceInstaller $Installer} catch {
+        ('Update installed; cache cleanup needs a retry: '+$_.Exception.Message) | Set-Content -LiteralPath (Join-Path $DownloadDir 'update-error.log') -Encoding UTF8
+    }
     $restartInfo = [Diagnostics.ProcessStartInfo]::new()
     $restartInfo.FileName = Join-Path $InstallDir 'rc505_rs.exe'
     $restartInfo.WorkingDirectory = $InstallDir

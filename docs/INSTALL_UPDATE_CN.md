@@ -58,7 +58,7 @@ RC505 RS/
 3. 停止轨道、结束并处理回放草稿后，点 **Save snapshot, close and install update**。
 4. 软件先完成当前工程的 config + audio snapshot 保存，再正常退出。独立助手等待进程退出后运行安装器，成功后重新打开工程选择页。
 
-升级复用固定应用标识、程序位置及数据路径，不删除工程、快照、回放或视频资料。卸载仅移除已安装的程序文件，保留数据；用户可自行备份或清理。更新失败记录位于下载目录 `update-error.log`，可用保留的安装包重试。
+升级复用固定应用标识、程序位置及数据路径，不删除工程、快照、回放或视频资料。成功更新后，下载目录只保留一个固定名称的 `RC505-RS-setup.exe` 及其校验清单，旧版本安装缓存自动清理；下载/安装未成功时先保留旧包。清理范围限定为本软件的版本化安装缓存。卸载仅移除已安装的程序文件，保留数据。更新失败记录位于下载目录 `update-error.log`，可用保留的安装包重试。
 
 安装包未使用商业代码签名证书；Windows 对首次下载的开源安装包可能显示信誉提示。请从上述仓库下载并核对同一 Release 的 `SHA256SUMS.txt`。SHA-256 验证下载完整性；发布账户本身仍是更新信任来源。
 
@@ -86,3 +86,5 @@ git push origin v0.2.1
 `.github/workflows/release.yml` 在 Windows 上验证、构建，然后使用仓库 Actions 的内置凭据发布安装包、便携包、校验和、更新清单。tag 和 Cargo 版本不一致会失败；测试失败不会发布。Release 发布成功后，安装版才能检查到更新。已发布 tag 不应移动；修复应使用新的版本号。
 
 打包参考 [Inno Setup 官方文档](https://jrsoftware.org/ishelp/contents.htm)。FFmpeg 不是本版本依赖；无损 WAV 读写由 Hound 完成，回放音频由 Rust DSP 渲染。
+
+Windows x64使用[静态C运行库链接](https://doc.rust-lang.org/reference/linkage.html#static-and-dynamic-c-runtimes)，不要求用户另装VC++运行库。打包时自动执行隔离的安装/再次安装/数据保留/缓存清理测试；失败则不发布。

@@ -6,7 +6,12 @@
 #endif
 
 [Setup]
+#ifdef InstallerSmokeTest
+AppId=RC505-RS-Installer-Smoke
+Uninstallable=no
+#else
 AppId={{D70BC68C-93D0-4FA4-A660-7552396837B5}
+#endif
 AppName=RC505 RS
 AppVersion={#AppVersion}
 AppPublisher=Yishanka
@@ -41,10 +46,12 @@ Source: "{#SourceRoot}\docs\*"; DestDir: "{app}\docs"; Flags: ignoreversion recu
 Source: "{#SourceRoot}\scripts\update.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 
 [Icons]
+#ifndef InstallerSmokeTest
 Name: "{group}\RC505 RS"; Filename: "{app}\rc505_rs.exe"; WorkingDir: "{app}"
 Name: "{group}\Audio setup"; Filename: "{app}\rc505_launcher.exe"; WorkingDir: "{app}"
 Name: "{group}\Uninstall RC505 RS"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\RC505 RS"; Filename: "{app}\rc505_rs.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+#endif
 
 [Run]
 Filename: "{app}\rc505_rs.exe"; Description: "Open RC505 RS"; Flags: nowait postinstall skipifsilent
@@ -53,6 +60,7 @@ Filename: "{app}\rc505_rs.exe"; Description: "Open RC505 RS"; Flags: nowait post
 var
   PathsPage: TInputDirWizardPage;
   ImportPage: TInputDirWizardPage;
+  ImportChoicePage: TInputOptionWizardPage;
   FollowProgramFolder: Boolean;
   SuggestedDataDir: String;
 
@@ -69,11 +77,22 @@ begin
   SuggestedDataDir := PathsPage.Values[0];
   PathsPage.Values[1] := ExpandConstant('{param:DOWNLOADDIR|}');
   if PathsPage.Values[1] = '' then PathsPage.Values[1] := GetPreviousData('DownloadDir', ExpandConstant('{userdocs}\RC505 RS Installers'));
-  ImportPage := CreateInputDirPage(PathsPage.ID, 'Import existing data (optional)',
+  ImportChoicePage := CreateInputOptionPage(PathsPage.ID, 'Import existing data (optional)',
+    'Would you like to copy projects from a previous installation?',
+    'Leave this option unchecked for a new installation or a normal update. Existing data in your chosen data folder is preserved.', False, False);
+  ImportChoicePage.Add('Copy existing RC505 RS projects and settings');
+  ImportChoicePage.Values[0] := ExpandConstant('{param:IMPORTDIR|}') <> '';
+  ImportPage := CreateInputDirPage(ImportChoicePage.ID, 'Choose existing data',
     'Copy your existing RC505 RS projects into the chosen data folder.',
-    'Choose the old data folder containing projects and launcher_config.json. Leave empty to skip. Originals remain untouched; conflicting files are never overwritten.', False, '');
-  ImportPage.Add('Existing data folder (optional):');
+    'Choose the old data folder containing projects and launcher_config.json. Originals remain untouched; conflicting files are never overwritten.', False, '');
+  ImportPage.Add('Existing data folder:');
   ImportPage.Values[0] := ExpandConstant('{param:IMPORTDIR|}');
+  if ImportPage.Values[0] = '' then ImportPage.Values[0] := ExpandConstant('{userappdata}\rc505_rs');
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := (PageID = ImportPage.ID) and not ImportChoicePage.Values[0];
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
@@ -107,7 +126,7 @@ begin
     if not ForceDirectories(PathsPage.Values[1]) then RaiseException('Cannot create download folder.');
     Settings := '{"data_dir":"' + JsonPath(PathsPage.Values[0]) + '","download_dir":"' + JsonPath(PathsPage.Values[1]) + '"}';
     if not SaveStringToFile(ExpandConstant('{app}\install-settings.json'), Utf8Encode(Settings), False) then RaiseException('Cannot save installation settings.');
-    if ImportPage.Values[0] <> '' then begin
+    if ImportChoicePage.Values[0] then begin
       Parameters := '--migrate-data="' + ImportPage.Values[0] + '" --data-dir="' + PathsPage.Values[0] + '"';
       if not Exec(ExpandConstant('{app}\rc505_rs.exe'), Parameters, ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then RaiseException('Cannot start data import.');
       if ExitCode <> 0 then RaiseException('Data import failed. Source data was preserved. Run rc505_rs.exe --migrate-data=SOURCE --data-dir=DESTINATION to inspect the error.');
