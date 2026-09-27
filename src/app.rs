@@ -119,6 +119,9 @@ impl MyApp {
         let launch = crate::app_support::launcher_config::load();
         let buffer_frames = launch.as_ref().map(|v| v.buffer_frames()).unwrap_or(128);
         let mut config = AppConfig::new(120, 85, 5);
+        if !std::env::args().any(|v| v == "--offline") {
+            config.system_config.refresh();
+        }
         if let Some(settings) = launch.as_ref() {
             config.beat_config.set_latency(settings.latency_comp_ms());
             if !settings.input_device.is_empty() {

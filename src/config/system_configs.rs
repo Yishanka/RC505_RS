@@ -8,36 +8,40 @@ pub struct SystemConfigs {
 }
 
 impl SystemConfigs {
+    /// Pure defaults: loading presets and offline replay must never touch a driver.
     pub fn new() -> Self {
+        Self {
+            input_device: EnumConfig::new("Input Device", String::new(), Vec::new()),
+            output_device: EnumConfig::new("Output Device", String::new(), Vec::new()),
+            sel_idx: Some(0),
+        }
+    }
+    /// Called explicitly by the interactive application's device setup path.
+    pub fn refresh(&mut self) {
         let host = cpal::default_host();
-
-        let in_devices: Vec<String> = host
+        self.input_device.options = host
             .input_devices()
             .into_iter()
             .flatten()
-            .map(|d| d.name().unwrap_or_default())
+            .filter_map(|d| d.name().ok())
             .collect();
-
-        let out_devices: Vec<String> = host
+        self.output_device.options = host
             .output_devices()
             .into_iter()
             .flatten()
-            .map(|d| d.name().unwrap_or_default())
+            .filter_map(|d| d.name().ok())
             .collect();
-
-        let def_in = host
-            .default_input_device()
-            .and_then(|d| d.name().ok())
-            .unwrap_or_default();
-        let def_out = host
-            .default_output_device()
-            .and_then(|d| d.name().ok())
-            .unwrap_or_default();
-
-        Self {
-            input_device: EnumConfig::new("Input Device", def_in, in_devices),
-            output_device: EnumConfig::new("Output Device", def_out, out_devices),
-            sel_idx: Some(0),
+        if self.input_device.value.is_empty() {
+            self.input_device.value = host
+                .default_input_device()
+                .and_then(|d| d.name().ok())
+                .unwrap_or_default();
+        }
+        if self.output_device.value.is_empty() {
+            self.output_device.value = host
+                .default_output_device()
+                .and_then(|d| d.name().ok())
+                .unwrap_or_default();
         }
     }
 }

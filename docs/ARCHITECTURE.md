@@ -4,6 +4,8 @@
 
 `engine/core.rs::RenderCore` is the single device-independent renderer. The output callback owns it; UI does not mutate track audio or advance transport. `SampleClock` uses a u64 frame counter and derives every beat boundary from the original rational tempo, avoiding cumulative rounding. Playback, capture, compensation tails, overdub and sequences use this clock. GUI state is a bounded `EngineView` snapshot.
 
+Configuration defaults are pure data. Device enumeration is an explicit interactive startup operation, never part of project/preset conversion or offline replay. This also lets the regression suite run on Windows machines without audio devices.
+
 The input callback sanitizes stereo frames and pushes them into an SPSC ring. The output callback adapts input clock drift with cubic interpolation, runs track FX to obtain pre-fader carriers, processes Input FX, writes recordings/overdubs, applies faders and emits the master mix. Monitor and loop audio share one processing domain. Queue starvation/overflow and callback duration are counted without callback logging.
 
 Control messages are bounded (128). Parameters/runtimes are constructed outside the callback, swapped on receipt and retired through the worker queue. The renderer has no egui dependency. No callback mutex or per-frame Vec remains. Memory reclamation, WAV I/O and serialization run on workers. The zero-allocation test covers five-track rendering, existing heavy FX, parameter exchange, snapshot sharing, overdub, undo and clear; this is not a hardware deadline guarantee.
