@@ -12,7 +12,7 @@ $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $releaseRoot = 'https://github.com/Yishanka/RC505_RS/releases/'
 function Read-Release {
-    $release = Invoke-RestMethod -Uri ($releaseRoot + 'latest/download/update.json') -Headers @{'User-Agent'='RC505-RS-Updater'}
+    $release = Invoke-RestMethod -Uri ($releaseRoot + 'latest/download/update.json') -Headers @{'User-Agent'='RC505-RS-Updater'} -TimeoutSec 30
     if ($release.schema -ne 1 -or $release.version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid update manifest version.' }
     if ($release.file -ne "RC505-RS-$($release.version)-windows-x64-setup.exe") { throw 'Invalid update asset name.' }
     $expected = $releaseRoot + "download/v$($release.version)/$($release.file)"
@@ -26,7 +26,7 @@ try {
         [IO.Directory]::CreateDirectory($DownloadDir) | Out-Null
         $destination = Join-Path $DownloadDir $release.file
         $temporary = $destination + '.partial'
-        Invoke-WebRequest -UseBasicParsing -Uri $release.url -OutFile $temporary -Headers @{'User-Agent'='RC505-RS-Updater'}
+        Invoke-WebRequest -UseBasicParsing -Uri $release.url -OutFile $temporary -Headers @{'User-Agent'='RC505-RS-Updater'} -TimeoutSec 180
         if ((Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash -ine $release.sha256) { throw 'Downloaded installer checksum mismatch.' }
         Move-Item -LiteralPath $temporary -Destination $destination -Force
         $release | ConvertTo-Json | Set-Content -LiteralPath ($destination + '.verified.json') -Encoding UTF8
@@ -42,7 +42,12 @@ try {
     $setup = Start-Process -FilePath $Installer -ArgumentList $arguments -PassThru -WindowStyle Hidden
     $setup.WaitForExit()
     if ($setup.ExitCode -ne 0) { throw "Installer failed with code $($setup.ExitCode). Previous data remains at $DataDir" }
-    Start-Process -FilePath (Join-Path $InstallDir 'rc505_rs.exe') -WindowStyle Hidden
+    $restartInfo = [Diagnostics.ProcessStartInfo]::new()
+    $restartInfo.FileName = Join-Path $InstallDir 'rc505_rs.exe'
+    $restartInfo.WorkingDirectory = $InstallDir
+    $restartInfo.UseShellExecute = $false
+    $restartInfo.CreateNoWindow = $true
+    [Diagnostics.Process]::Start($restartInfo) | Out-Null
 } catch {
     [Console]::Error.WriteLine($_.Exception.Message)
     if ($DownloadDir -and (Test-Path -LiteralPath $DownloadDir)) {

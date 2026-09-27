@@ -69,6 +69,10 @@ pub fn download() -> Result<PathBuf> {
     ))
 }
 pub fn install_after_exit(installer: &Path) -> Result<()> {
+    ensure!(
+        crate::app_support::paths::installed_settings().is_some(),
+        "Use an installed or portable release to install updates; development builds are left untouched"
+    );
     let executable = std::env::current_exe()?;
     let directory = executable.parent().context("Missing install directory")?;
     let mut command = command()?;
@@ -78,7 +82,9 @@ pub fn install_after_exit(installer: &Path) -> Result<()> {
         .arg("-InstallDir")
         .arg(directory)
         .arg("-DataDir")
-        .arg(crate::app_support::paths::appdata_root().context("Missing data directory")?)
+        .arg(std::path::absolute(
+            crate::app_support::paths::appdata_root().context("Missing data directory")?,
+        )?)
         .arg("-DownloadDir")
         .arg(crate::app_support::paths::downloads_dir())
         .arg("-WaitForProcess")
