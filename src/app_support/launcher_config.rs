@@ -6,6 +6,9 @@ const DEFAULT_LATENCY_COMP_MS: usize = 85;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LauncherConfig {
+    /// Missing in older versions: migrate to following the system, not a stale device name.
+    #[serde(default = "default_follow_output")]
+    pub follow_system_output: bool,
     #[serde(default)]
     pub language: super::language::Language,
     #[serde(default = "default_buffer")]
@@ -33,6 +36,7 @@ impl LauncherConfig {
 impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
+            follow_system_output: true,
             language: super::language::Language::default(),
             buffer_frames: 128,
             input_device: String::new(),
@@ -45,6 +49,9 @@ impl Default for LauncherConfig {
 
 fn default_buffer() -> u32 {
     128
+}
+fn default_follow_output() -> bool {
+    true
 }
 
 pub fn load() -> Option<LauncherConfig> {
@@ -71,4 +78,23 @@ pub fn save(config: &LauncherConfig) -> anyhow::Result<()> {
     drop(file);
     fs::rename(temporary, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn older_fixed_device_names_migrate_to_following_without_brand_rules() {
+        let old: LauncherConfig = serde_json::from_str(
+            r#"{"input_device":"mic","output_device":"Old USB device","latency_comp_ms":0}"#,
+        )
+        .unwrap();
+        assert!(old.follow_system_output);
+        let mut fixed = old;
+        fixed.follow_system_output = false;
+        let restored: LauncherConfig =
+            serde_json::from_str(&serde_json::to_string(&fixed).unwrap()).unwrap();
+        assert!(!restored.follow_system_output);
+        assert_eq!(restored.output_device, "Old USB device");
+    }
 }

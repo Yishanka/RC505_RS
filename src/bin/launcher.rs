@@ -40,7 +40,7 @@ impl Launcher {
                 .and_then(|d| d.name().ok())
                 .unwrap_or_default();
         }
-        if config.output_device.is_empty() {
+        if config.follow_system_output || config.output_device.is_empty() {
             config.output_device = host
                 .default_output_device()
                 .and_then(|d| d.name().ok())
@@ -107,7 +107,7 @@ impl eframe::App for Launcher {
             theme::card().show(ui,|ui|{
                 ui.heading(lang.text("Prepare your session"));ui.add_space(12.0);
                 ui.label(lang.text("Input device"));egui::ComboBox::from_id_source("input").width(ui.available_width()-16.0).selected_text(&self.config.input_device).show_ui(ui,|ui|{for value in &self.inputs{ui.selectable_value(&mut self.config.input_device,value.clone(),value);}});
-                ui.label(lang.text("Output device"));egui::ComboBox::from_id_source("output").width(ui.available_width()-16.0).selected_text(&self.config.output_device).show_ui(ui,|ui|{for value in &self.outputs{ui.selectable_value(&mut self.config.output_device,value.clone(),value);}});
+                ui.checkbox(&mut self.config.follow_system_output,lang.choose("Follow system output", "跟随系统输出设备")); ui.label(lang.text("Output device"));ui.add_enabled_ui(!self.config.follow_system_output, |ui| { egui::ComboBox::from_id_source("output").width(ui.available_width()-16.0).selected_text(&self.config.output_device).show_ui(ui,|ui|{for value in &self.outputs{ui.selectable_value(&mut self.config.output_device,value.clone(),value);}}); });
                 ui.add_space(12.0);ui.label(lang.text("Measure compensation inside RC505 RS → Audio. Project selection and data management live in the main application."));
             });
             ui.add_space(20.0);ui.horizontal(|ui|{if ui.button(lang.text("Open RC505 RS")).clicked(){self.launch(false);}if ui.button(lang.text("Open offline editor")).clicked(){self.launch(true);}});

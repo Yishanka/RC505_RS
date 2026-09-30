@@ -193,7 +193,12 @@ fn transport(ui: &mut egui::Ui, app: &mut MyApp) {
             let message = if app.status.is_empty() {
                 app.audio_status()
             } else {
-                app.status.clone()
+                format!(
+                    "{} · {}: {}",
+                    app.status,
+                    lang.choose("Output", "输出"),
+                    app.audio.curr_output_name()
+                )
             };
             ui.add(
                 egui::Label::new(
@@ -285,8 +290,31 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
             });
         }
         LeftPage::Audio => {
+            let mut follow = app.config.system_config.follow_system_output;
+            if nav::register(ui.checkbox(
+                &mut follow,
+                lang.choose("Follow system output", "跟随系统输出设备"),
+            ))
+            .changed()
+            {
+                app.set_follow_output(follow);
+            }
+            ui.label(format!(
+                "{}: {}",
+                lang.choose("Active output", "实际输出"),
+                if app.audio.online {
+                    app.audio.curr_output_name()
+                } else {
+                    lang.choose("Unavailable", "尚未连接")
+                }
+            ));
             parameters::choice(ui, &mut app.config.system_config.input_device);
-            parameters::choice(ui, &mut app.config.system_config.output_device);
+            ui.add_enabled_ui(!follow, |ui| {
+                parameters::choice(ui, &mut app.config.system_config.output_device)
+            });
+            if nav::button(ui, lang.choose("Refresh devices", "刷新设备列表")).clicked() {
+                app.config.system_config.refresh();
+            }
             ui.horizontal_wrapped(|ui| {
                 ui.label(lang.text("Buffer"));
                 nav::register(

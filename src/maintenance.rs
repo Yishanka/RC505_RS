@@ -11,6 +11,7 @@ pub fn cli() -> Option<Result<()>> {
                 | "--verify-data"
                 | "--check-update"
                 | "--download-update"
+                | "--audio-info"
         ) || [
             "--migrate-data=",
             "--install-update=",
@@ -24,6 +25,30 @@ pub fn cli() -> Option<Result<()>> {
     if args.iter().any(|a| a == "--version") {
         println!("RC505 RS {}", env!("CARGO_PKG_VERSION"));
         return Some(Ok(()));
+    }
+    if args.iter().any(|a| a == "--audio-info") {
+        return Some((|| {
+            use cpal::traits::{DeviceTrait, HostTrait};
+            let preferences = crate::app_support::launcher_config::load().unwrap_or_default();
+            let host = cpal::default_host();
+            let system_output = host.default_output_device().and_then(|d| d.name().ok());
+            let outputs: Vec<_> = host
+                .output_devices()?
+                .filter_map(|d| d.name().ok())
+                .collect();
+            let resolved = if preferences.follow_system_output {
+                system_output.clone()
+            } else {
+                Some(preferences.output_device.clone())
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"follow_system_output":preferences.follow_system_output,"system_output":system_output,"resolved_output":resolved,"saved_fixed_output":preferences.output_device,"available_outputs":outputs})
+                )?
+            );
+            Ok(())
+        })());
     }
     if args.iter().any(|a| a == "--installation-info") {
         return Some((|| {

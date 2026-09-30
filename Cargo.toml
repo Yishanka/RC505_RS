@@ -1,6 +1,6 @@
 [package]
 name = "rc505_rs"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 
 [features]
@@ -29,3 +29,6 @@ sha2 = "0.10"
 
 [build-dependencies]
 winres = "0.1.12"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.54", features = ["Win32_Media_Audio", "Win32_System_Com"] }

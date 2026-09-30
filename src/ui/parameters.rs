@@ -26,8 +26,13 @@ pub fn choice<T: Clone + PartialEq + std::fmt::Display>(
     config: &mut EnumConfig<T>,
 ) {
     let lang = crate::app_support::language::Language::current(ui.ctx());
+    let device = config.label.ends_with("Device");
+    if device {
+        ui.label(lang.text(&config.label));
+    }
     ui.horizontal(|ui| {
         let response = egui::ComboBox::from_id_source(&config.label)
+            .wrap(device)
             .selected_text(if config.label.ends_with("Device") {
                 config.value.to_string()
             } else {
@@ -57,7 +62,9 @@ pub fn choice<T: Clone + PartialEq + std::fmt::Display>(
                 config.next();
             }
         }
-        ui.label(lang.text(&config.label));
+        if !device {
+            ui.label(lang.text(&config.label));
+        }
     });
 }
 

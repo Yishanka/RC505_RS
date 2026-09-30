@@ -56,3 +56,5 @@ cargo run --bin rc505_rs -- --offline --data-dir=var/development
 [架构](docs/ARCHITECTURE.md) · [验证](docs/VALIDATION.md) · [硬件对照](docs/RC505_REFERENCE.md) · [开发约定](AGENTS.md)
 
 顶部 **中文 / EN** 可即时切换语言并记住设置。灰底键帽表示快捷键；`F6` 进入顶部栏。返回工程会先提示保存。
+
+**耳机与声卡输出**：默认跟随 Windows 系统输出，运行中更换默认设备也会自动切换；不按耳机品牌特判。左侧「音频」可查看实际输出，或取消「跟随系统输出设备」后手动固定声卡。详见[输出设备说明](docs/USER_GUIDE_CN.md#自动跟随输出设备025)。

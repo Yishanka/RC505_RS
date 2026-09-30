@@ -5,4 +5,6 @@ mod device_config;
 pub mod input_fx;
 pub mod latency;
 pub mod loop_audio;
+mod output_resampler;
+pub mod output_watch;
 pub mod track_fx;

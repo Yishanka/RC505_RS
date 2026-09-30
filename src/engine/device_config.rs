@@ -72,6 +72,52 @@ pub fn common_config(
     )
 }
 
+/// Select each endpoint independently when their native rate/layout differs.
+pub fn endpoint_config(
+    ranges: &[SupportedStreamConfigRange],
+    preferred: u32,
+    block: u32,
+    output: bool,
+) -> Result<StreamConfig> {
+    let mut candidates = Vec::new();
+    for range in ranges.iter().filter(|v| {
+        v.sample_format() == SampleFormat::F32
+            && (1..=if output { 32 } else { 2 }).contains(&v.channels())
+    }) {
+        let min = range.min_sample_rate().0.max(8000);
+        let max = range.max_sample_rate().0.min(192000);
+        if min > max {
+            continue;
+        }
+        let rate = preferred.clamp(min, max);
+        let buffer_size = match range.buffer_size() {
+            SupportedBufferSize::Range { min, max } if (*min..=*max).contains(&block) => {
+                BufferSize::Fixed(block)
+            }
+            _ => BufferSize::Default,
+        };
+        candidates.push(StreamConfig {
+            channels: range.channels(),
+            sample_rate: SampleRate(rate),
+            buffer_size,
+        });
+    }
+    candidates.sort_by_key(|c| {
+        (
+            c.sample_rate.0.abs_diff(preferred),
+            if c.channels == 2 {
+                0
+            } else {
+                c.channels as u32
+            },
+        )
+    });
+    candidates
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Device has no supported f32 audio format"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

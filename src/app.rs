@@ -64,6 +64,10 @@ pub enum JobResult {
     Error(String),
 }
 pub struct MyApp {
+    output_watch: Option<crate::engine::output_watch::OutputWatch>,
+    output_endpoint_id: String,
+    output_error_seen: u64,
+    next_output_retry: std::time::Instant,
     performance_keys: performance_keys::PerformanceKeys,
     fader_keys: [faders::KeyFader; 5],
     speed_keys: [faders::KeyFader; 5],
@@ -132,18 +136,23 @@ impl MyApp {
             if !settings.input_device.is_empty() {
                 config.system_config.input_device.value = settings.input_device.clone();
             }
-            if !settings.output_device.is_empty() {
+            config.system_config.follow_system_output = settings.follow_system_output;
+            if !settings.follow_system_output && !settings.output_device.is_empty() {
                 config.system_config.output_device.value = settings.output_device.clone();
             }
         }
         let audio = if std::env::args().any(|v| v == "--offline") {
             AudioIO::offline("Offline editing".into())
         } else {
-            AudioIO::with_buffer(
-                &config.system_config.input_device.value,
-                &config.system_config.output_device.value,
-                buffer_frames,
-            )
+            (if config.system_config.follow_system_output {
+                AudioIO::with_system_output(&config.system_config.input_device.value, buffer_frames)
+            } else {
+                AudioIO::with_buffer(
+                    &config.system_config.input_device.value,
+                    &config.system_config.output_device.value,
+                    buffer_frames,
+                )
+            })
             .unwrap_or_else(|e| AudioIO::offline(format!("Audio unavailable: {e}")))
         };
         let root = crate::app_support::paths::projects_dir();
@@ -170,6 +179,15 @@ impl MyApp {
             .and_then(|s| projects.iter().position(|p| p.name == s.last_project))
             .unwrap_or(0);
         Self {
+            output_endpoint_id: if config.system_config.follow_system_output && audio.online {
+                crate::engine::output_watch::default_id().unwrap_or_default()
+            } else {
+                String::new()
+            },
+            output_watch: (!std::env::args().any(|v| v == "--offline"))
+                .then(crate::engine::output_watch::OutputWatch::new),
+            output_error_seen: 0,
+            next_output_retry: std::time::Instant::now(),
             performance_keys: performance_keys::PerformanceKeys::default(),
             fader_keys: [faders::KeyFader::default(); 5],
             speed_keys: [faders::KeyFader::default(); 5],
@@ -364,9 +382,18 @@ impl MyApp {
                     self.status = error;
                 }
                 Response::Calibrated(value) => {
-                    self.measurement = Some(value);
-                    self.status =
-                        "Loopback measured. Review and apply the recommendation in Audio.".into();
+                    if value.output_generation
+                        == self
+                            .audio
+                            .diagnostics
+                            .output_generation
+                            .load(Ordering::Relaxed)
+                    {
+                        self.measurement = Some(value);
+                        self.status =
+                            "Loopback measured. Review and apply the recommendation in Audio."
+                                .into();
+                    }
                 }
                 Response::Captured(snapshot) => self.finish_reconnect(*snapshot),
             }
@@ -427,6 +454,8 @@ impl MyApp {
                         preferences.output_device =
                             self.config.system_config.output_device.value.clone();
                         preferences.buffer_frames = self.buffer_frames;
+                        preferences.follow_system_output =
+                            self.config.system_config.follow_system_output;
                         if !self.read_only {
                             if let Err(e) = crate::app_support::launcher_config::save(&preferences)
                             {
@@ -486,6 +515,7 @@ impl eframe::App for MyApp {
             }
         }
         self.poll();
+        self.follow_default_output();
         ctx.request_repaint_after(Duration::from_millis(16));
         if ctx.input(|i| i.viewport().close_requested())
             && !self.allow_window_close

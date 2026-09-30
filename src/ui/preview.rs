@@ -17,6 +17,13 @@ pub fn configure(app: &mut MyApp, mode: &str) {
         return;
     }
     app.active_project_idx = Some(0);
+    if mode.starts_with("performance") && mode.contains("audio") {
+        app.left_page = crate::app::LeftPage::Audio;
+        app.config.system_config.input_device.value =
+            "USB microphone — multichannel audio interface with a long device name".into();
+        app.config.system_config.output_device.value =
+            "System output — digital audio interface with a long device name".into();
+    }
     app.app_state = AppState::MainLoop;
     app.config.input_fx.set_slot_kind(0, 0, FxKind::Oscillator);
     app.config.input_fx.set_slot_kind(0, 1, FxKind::Filter);

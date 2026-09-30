@@ -29,6 +29,8 @@ pub struct Diagnostics {
     pub underrun: AtomicU64,
     pub overflow: AtomicU64,
     pub stream_errors: AtomicU64,
+    pub output_errors: AtomicU64,
+    pub output_generation: AtomicU64,
     pub maximum_callback_ns: AtomicU64,
     pub callback_frames: AtomicU64,
     pub queue_frames: AtomicU64,
@@ -221,7 +223,14 @@ impl Callback {
                     }
                 }
                 Control::Calibrate(value) => {
-                    if self.taking || !self.core.idle() || self.calibration.is_some() {
+                    if self.taking
+                        || !self.core.idle()
+                        || self.calibration.is_some()
+                        || value.as_ref().is_some_and(|probe| {
+                            probe.output_generation
+                                != self.diagnostics.output_generation.load(Ordering::Relaxed)
+                        })
+                    {
                         accepted = false;
                     } else {
                         std::mem::swap(&mut self.calibration, value);
@@ -300,9 +309,97 @@ impl Callback {
         }
     }
 }
+struct OutputState {
+    callback: Callback,
+    input_rx: HeapConsumer<Frame>,
+    drift: super::latency::InputAdapter,
+    converter: super::output_resampler::OutputResampler,
+    fade_remaining: usize,
+    fade_total: usize,
+}
+struct OutputPump {
+    state: Option<Box<OutputState>>,
+    pending: HeapConsumer<Box<OutputState>>,
+    returned: mpsc::Sender<Box<OutputState>>,
+}
+impl Drop for OutputPump {
+    fn drop(&mut self) {
+        // Stream teardown only; no mutex/channel send occurs during rendering.
+        if let Some(state) = self.state.take().or_else(|| self.pending.pop()) {
+            let _ = self.returned.send(state);
+        }
+    }
+}
+impl OutputPump {
+    fn process(
+        &mut self,
+        data: &mut [f32],
+        info: &cpal::OutputCallbackInfo,
+        channels: usize,
+        rate: u32,
+        diagnostics: &Diagnostics,
+    ) {
+        if self.state.is_none() {
+            self.state = self.pending.pop();
+        }
+        let Some(state) = self.state.as_mut() else {
+            data.fill(0.0);
+            return;
+        };
+        let started = Instant::now();
+        if let Some(duration) = info
+            .timestamp()
+            .playback
+            .duration_since(&info.timestamp().callback)
+        {
+            diagnostics
+                .output_latency_ns
+                .store(duration.as_nanos() as u64, Ordering::Relaxed);
+        }
+        state.callback.commands();
+        let frames = data.len() / channels;
+        diagnostics
+            .callback_frames
+            .store(frames as u64, Ordering::Relaxed);
+        diagnostics
+            .queue_frames
+            .store(state.input_rx.len() as u64, Ordering::Relaxed);
+        let engine_frames =
+            (frames as u64 * state.callback.core.sample_rate as u64).div_ceil(rate as u64) as usize;
+        state.drift.begin_block(state.input_rx.len(), engine_frames);
+        let callback = &mut state.callback;
+        let input = &mut state.input_rx;
+        let drift = &mut state.drift;
+        for frame in data.chunks_exact_mut(channels) {
+            let wet = state
+                .converter
+                .next(|| callback.frame(drift.next(input, diagnostics)));
+            let gain = 1.0 - state.fade_remaining as f32 / state.fade_total as f32;
+            state.fade_remaining = state.fade_remaining.saturating_sub(1);
+            frame.fill(0.0);
+            frame[0] = if channels == 1 {
+                (wet[0] + wet[1]) * 0.5 * gain
+            } else {
+                wet[0] * gain
+            };
+            if channels > 1 {
+                frame[1] = wet[1] * gain;
+            }
+        }
+        callback.flush();
+        callback.publish();
+        diagnostics
+            .maximum_callback_ns
+            .fetch_max(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+}
 pub struct AudioIO {
     input_stream: Option<cpal::Stream>,
     output_stream: Option<cpal::Stream>,
+    output_return_tx: mpsc::Sender<Box<OutputState>>,
+    output_return_rx: mpsc::Receiver<Box<OutputState>>,
+    parked_output: Option<Box<OutputState>>,
+    pub output_config: cpal::StreamConfig,
     pub config: cpal::StreamConfig,
     input_name: String,
     output_name: String,
@@ -328,24 +425,37 @@ impl AudioIO {
         Self::with_buffer(input, output, DEFAULT_BUFFER)
     }
     pub fn with_buffer(input: &str, output: &str, block: u32) -> Result<Self> {
-        let host = select_host(input, output)?;
+        Self::open(input, Some(output), block)
+    }
+    pub fn with_system_output(input: &str, block: u32) -> Result<Self> {
+        Self::open(input, None, block)
+    }
+    fn open(input: &str, output: Option<&str>, block: u32) -> Result<Self> {
+        let host = if let Some(output) = output {
+            select_host(input, output)?
+        } else {
+            cpal::default_host()
+        };
         let input_device = host
             .input_devices()?
             .find(|d| d.name().ok().as_deref() == Some(input))
             .context("Input device unavailable")?;
-        let output_device = host
-            .output_devices()?
-            .find(|d| d.name().ok().as_deref() == Some(output))
-            .context("Output device unavailable")?;
-        let config = super::device_config::common_config(
-            &input_device.supported_input_configs()?.collect::<Vec<_>>(),
-            &output_device
-                .supported_output_configs()?
-                .collect::<Vec<_>>(),
-            block,
-        )?;
-        let (mut audio, mut callback) = Self::bridge(config.clone());
-        let (mut input_tx, mut input_rx) = HeapRb::<Frame>::new(16_384).split();
+        let output_device = if let Some(name) = output {
+            host.output_devices()?
+                .find(|d| d.name().ok().as_deref() == Some(name))
+        } else {
+            host.default_output_device()
+        };
+        let inputs = input_device.supported_input_configs()?.collect::<Vec<_>>();
+        let outputs = output_device
+            .as_ref()
+            .and_then(|d| d.supported_output_configs().ok())
+            .map(|v| v.collect::<Vec<_>>())
+            .unwrap_or_default();
+        let config = super::device_config::common_config(&inputs, &outputs, block)
+            .or_else(|_| super::device_config::endpoint_config(&inputs, 48000, block, false))?;
+        let (mut audio, callback) = Self::bridge(config.clone());
+        let (mut input_tx, input_rx) = HeapRb::<Frame>::new(16_384).split();
         let diagnostics = audio.diagnostics.clone();
         let input_errors = audio.diagnostics.clone();
         let channels = config.channels as usize;
@@ -377,66 +487,129 @@ impl AudioIO {
             },
             None,
         )?;
-        let diagnostics = audio.diagnostics.clone();
-        let output_errors = diagnostics.clone();
-        let mut drift = super::latency::InputAdapter::new(block as usize);
-        let output_stream = output_device.build_output_stream(
-            &config,
-            move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
-                let started = Instant::now();
-                if let Some(duration) = info
-                    .timestamp()
-                    .playback
-                    .duration_since(&info.timestamp().callback)
-                {
-                    diagnostics
-                        .output_latency_ns
-                        .store(duration.as_nanos() as u64, Ordering::Relaxed);
-                }
-                callback.commands();
-                let frames = data.len() / channels;
-                diagnostics
-                    .callback_frames
-                    .store(frames as u64, Ordering::Relaxed);
-                diagnostics
-                    .queue_frames
-                    .store(input_rx.len() as u64, Ordering::Relaxed);
-                drift.begin_block(input_rx.len(), frames);
-                for frame in data.chunks_exact_mut(channels) {
-                    let dry = drift.next(&mut input_rx, &diagnostics);
-                    let wet = callback.frame(dry);
-                    frame[0] = if channels == 1 {
-                        (wet[0] + wet[1]) * 0.5
-                    } else {
-                        wet[0]
-                    };
-                    if channels > 1 {
-                        frame[1] = wet[1];
-                    }
-                }
-                callback.flush();
-                callback.publish();
-                diagnostics
-                    .maximum_callback_ns
-                    .fetch_max(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        audio.input_stream = Some(input_stream);
+        audio.input_name = input.into();
+        audio.parked_output = Some(Box::new(OutputState {
+            callback,
+            input_rx,
+            drift: super::latency::InputAdapter::new(block as usize),
+            converter: super::output_resampler::OutputResampler::new(
+                config.sample_rate.0,
+                config.sample_rate.0,
+            ),
+            fade_remaining: 0,
+            fade_total: 1,
+        }));
+        if let Some(device) = output_device {
+            if let Err(error) = audio.retarget_output(&device, block) {
+                audio.status = format!("Output unavailable; waiting to reconnect: {error}");
+            }
+        } else {
+            audio.status = "No system output device; waiting to reconnect".into();
+        }
+        Ok(audio)
+    }
+    /// Swap only the physical endpoint. The exact callback/renderer is moved,
+    /// including transport, pending actions, undo, FX history and replay state.
+    pub fn retarget_output(&mut self, device: &cpal::Device, block: u32) -> Result<()> {
+        let name = device.name()?;
+        let output_config = super::device_config::endpoint_config(
+            &device.supported_output_configs()?.collect::<Vec<_>>(),
+            self.config.sample_rate.0,
+            block,
+            true,
+        )?;
+        let (mut tx, rx) = HeapRb::<Box<OutputState>>::new(1).split();
+        let mut pump = OutputPump {
+            state: None,
+            pending: rx,
+            returned: self.output_return_tx.clone(),
+        };
+        let diagnostics = self.diagnostics.clone();
+        let errors = diagnostics.clone();
+        let channels = output_config.channels as usize;
+        let rate = output_config.sample_rate.0;
+        // Prepare/start the new endpoint with silence before releasing the old
+        // one. A failed build never destroys the running renderer.
+        let stream = device.build_output_stream(
+            &output_config,
+            move |data: &mut [f32], info| {
+                pump.process(data, info, channels, rate, &diagnostics);
             },
             move |_| {
-                output_errors.stream_errors.fetch_add(1, Ordering::Relaxed);
+                errors.stream_errors.fetch_add(1, Ordering::Relaxed);
+                errors.output_errors.fetch_add(1, Ordering::Relaxed);
             },
             None,
         )?;
-        input_stream.play()?;
-        output_stream.play()?;
-        audio.input_stream = Some(input_stream);
-        audio.output_stream = Some(output_stream);
-        audio.online = true;
-        audio.input_name = input.into();
-        audio.output_name = output.into();
-        audio.status = format!(
-            "{} Hz / {} ch / requested {} frames",
-            config.sample_rate.0, channels, block
+        stream.play()?;
+        self.output_stream.take(); // CPAL joins its callback; Drop returns ownership.
+        if self.parked_output.is_none() {
+            self.parked_output = Some(
+                self.output_return_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .context("Output callback did not return its state")?,
+            );
+        }
+        let mut state = self.parked_output.take().context("Missing output state")?;
+        state.converter =
+            super::output_resampler::OutputResampler::new(self.config.sample_rate.0, rate);
+        state.drift.reset_target(block as usize);
+        state.fade_total = (rate / 200).max(1) as usize;
+        state.fade_remaining = state.fade_total;
+        // A route change invalidates a loopback probe. Never apply its result.
+        state.callback.calibration.take();
+        self.diagnostics.calibrating.store(false, Ordering::Relaxed);
+        if let Some(input) = &self.input_stream {
+            if let Err(error) = input.play() {
+                self.parked_output = Some(state);
+                self.online = false;
+                return Err(error.into());
+            }
+        }
+        self.diagnostics
+            .output_generation
+            .fetch_add(1, Ordering::Relaxed);
+        if let Err(state) = tx.push(state) {
+            self.parked_output = Some(state);
+            self.online = false;
+            anyhow::bail!("Output handoff queue unavailable");
+        }
+        self.output_stream = Some(stream);
+        self.output_name = name;
+        self.output_config = output_config;
+        self.online = true;
+        self.status = format!(
+            "{} Hz engine → {} Hz / {} ch output",
+            self.config.sample_rate.0, rate, channels
         );
-        Ok(audio)
+        Ok(())
+    }
+    pub fn park_output(&mut self) {
+        if self.output_stream.is_none() {
+            return;
+        }
+        if let Some(input) = &self.input_stream {
+            let _ = input.pause();
+        }
+        self.output_stream.take();
+        self.diagnostics
+            .output_generation
+            .fetch_add(1, Ordering::Relaxed);
+        self.parked_output = self.output_return_rx.try_recv().ok();
+        self.online = false;
+        self.status = "No system output device; waiting to reconnect".into();
+        // Input during physical device loss cannot be reconstructed.
+        if self.diagnostics.taking.load(Ordering::Relaxed) {
+            self.diagnostics.take_failed.store(true, Ordering::Relaxed);
+        }
+        if let Some(state) = &mut self.parked_output {
+            state.callback.calibration.take();
+        }
+        self.diagnostics.calibrating.store(false, Ordering::Relaxed);
+    }
+    pub fn has_live_input(&self) -> bool {
+        self.input_stream.is_some()
     }
     pub fn offline(message: String) -> Self {
         let config = cpal::StreamConfig {
@@ -450,6 +623,7 @@ impl AudioIO {
         audio
     }
     fn bridge(config: cpal::StreamConfig) -> (Self, Callback) {
+        let (output_return_tx, output_return_rx) = mpsc::channel();
         let sr = config.sample_rate.0;
         let (commands, command_rx) = HeapRb::new(128).split();
         let (view_tx, views) = HeapRb::new(8).split();
@@ -527,6 +701,10 @@ impl AudioIO {
             Self {
                 input_stream: None,
                 output_stream: None,
+                output_return_tx,
+                output_return_rx,
+                parked_output: None,
+                output_config: config.clone(),
                 config,
                 input_name: String::new(),
                 output_name: String::new(),
@@ -552,6 +730,15 @@ impl AudioIO {
             callback.commands();
             callback.publish();
         }
+        if self.output_stream.is_none() {
+            if self.parked_output.is_none() {
+                self.parked_output = self.output_return_rx.try_recv().ok();
+            }
+            if let Some(state) = &mut self.parked_output {
+                state.callback.commands();
+                state.callback.publish();
+            }
+        }
         let mut view = None;
         while let Some(value) = self.views.pop() {
             view = Some(value);
@@ -571,7 +758,7 @@ impl AudioIO {
         &self.input_name
     }
     pub fn curr_output_name(&self) -> &str {
-        &self.output_name
+        if self.online { &self.output_name } else { "" }
     }
     pub fn suspend(&self) {
         if let Some(stream) = &self.input_stream {
@@ -693,4 +880,104 @@ fn select_host(_input: &str, _output: &str) -> Result<cpal::Host> {
         }
     }
     Ok(cpal::default_host())
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+    #[test]
+    fn handoff_returns_exact_recording_renderer_even_before_first_callback() {
+        let config = cpal::StreamConfig {
+            channels: 2,
+            sample_rate: cpal::SampleRate(8000),
+            buffer_size: cpal::BufferSize::Fixed(128),
+        };
+        let (_audio, mut callback) = AudioIO::bridge(config);
+        let mut pages = super::super::loop_audio::OfflinePages;
+        callback.core.action(Action::Trigger(0), &mut pages);
+        for _ in 0..200 {
+            callback.core.process([0.1, -0.1], &mut pages);
+        }
+        let original = (&*callback.core) as *const RenderCore;
+        let frames = callback.core.tracks[0].audio.len;
+        let (_, input_rx) = HeapRb::new(128).split();
+        let state = Box::new(OutputState {
+            callback,
+            input_rx,
+            drift: super::super::latency::InputAdapter::new(128),
+            converter: super::super::output_resampler::OutputResampler::new(8000, 8000),
+            fade_remaining: 0,
+            fade_total: 1,
+        });
+        let (mut tx, rx) = HeapRb::new(1).split();
+        assert!(tx.push(state).is_ok());
+        let (returned, receive) = mpsc::channel();
+        drop(OutputPump {
+            state: None,
+            pending: rx,
+            returned,
+        });
+        let mut state = receive.recv().unwrap();
+        assert_eq!((&*state.callback.core) as *const RenderCore, original);
+        assert_eq!(state.callback.core.clock.frame, 200);
+        assert_eq!(
+            state.callback.core.tracks[0].mode,
+            super::super::core::Mode::Recording
+        );
+        assert_eq!(state.callback.core.tracks[0].audio.len, frames);
+        state.callback.core.process([0.2, -0.2], &mut pages);
+        assert_eq!(state.callback.core.clock.frame, 201);
+        assert_eq!(state.callback.core.tracks[0].audio.len, frames + 1);
+    }
+    #[test]
+    #[ignore = "explicit local hardware test; opens streams silently, writes no audio"]
+    fn real_output_handoff_and_reconnect() {
+        let host = cpal::default_host();
+        let input = host
+            .input_devices()
+            .unwrap()
+            .find(|d| {
+                d.supported_input_configs().is_ok_and(|mut ranges| {
+                    ranges.any(|r| {
+                        r.channels() == 2
+                            && r.sample_format() == cpal::SampleFormat::F32
+                            && r.min_sample_rate().0 <= 48000
+                            && r.max_sample_rate().0 >= 48000
+                    })
+                })
+            })
+            .expect("Stereo input");
+        let mut audio = AudioIO::with_system_output(&input.name().unwrap(), 128).unwrap();
+        assert!(audio.online);
+        let original = audio.curr_output_name().to_owned();
+        let watch = super::super::output_watch::OutputWatch::new();
+        std::thread::sleep(Duration::from_millis(550));
+        let watched = watch.poll().unwrap().unwrap();
+        assert_eq!(watched.name, original);
+        assert!(!watched.id.is_empty());
+        let alternative = host
+            .output_devices()
+            .unwrap()
+            .find(|d| d.name().is_ok_and(|n| n != original))
+            .expect("Second output for handoff test");
+        std::thread::sleep(Duration::from_millis(100));
+        audio.retarget_output(&alternative, 128).unwrap();
+        assert_eq!(audio.curr_output_name(), alternative.name().unwrap());
+        audio.park_output();
+        assert!(!audio.online);
+        assert!(audio.parked_output.is_some());
+        let default = host.default_output_device().unwrap();
+        audio.retarget_output(&default, 128).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(audio.online);
+        assert_eq!(audio.curr_output_name(), original);
+        assert!(audio.diagnostics.callback_frames.load(Ordering::Relaxed) > 0);
+        assert_eq!(audio.diagnostics.output_errors.load(Ordering::Relaxed), 0);
+        eprintln!(
+            "Silent device handoff passed: {} -> {} -> {}",
+            original,
+            alternative.name().unwrap(),
+            audio.curr_output_name()
+        );
+    }
 }

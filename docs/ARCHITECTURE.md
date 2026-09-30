@@ -10,6 +10,14 @@ The input callback sanitizes stereo frames and pushes them into an SPSC ring. Th
 
 Control messages are bounded (128). Parameters/runtimes are constructed outside the callback, swapped on receipt and retired through the worker queue. The renderer has no egui dependency. No callback mutex or per-frame Vec remains. Memory reclamation, WAV I/O and serialization run on workers. The zero-allocation test covers five-track rendering, existing heavy FX, parameter exchange, snapshot sharing, overdub, undo and clear; this is not a hardware deadline guarantee.
 
+## Physical output routing (0.2.5)
+
+The global `follow_system_output` preference defaults to true, including migration of older preferences that contain only a concrete device name. A worker checks the Windows `eConsole` render endpoint every 500 ms. It compares opaque endpoint IDs, not friendly names or brands; fixed-device mode remains explicit. See Microsoft's [default endpoint API](https://learn.microsoft.com/en-us/windows/win32/api/mmdeviceapi/nf-mmdeviceapi-immdeviceenumerator-getdefaultaudioendpoint) and [endpoint identity API](https://learn.microsoft.com/en-us/windows/win32/api/mmdeviceapi/nf-mmdeviceapi-immdevice-getid).
+
+Output handoff prepares a silent candidate stream, releases the old stream, and transfers the exact `OutputState` through a bounded queue. The callback owner returns its state at stream teardown; the teardown channel is never used during per-frame rendering. No snapshot reload or transport reset is involved. Loop buffers, pending actions, recording mode, effect state and renderer frame numbering remain owned by the same renderer. If an output is absent, its state is parked and input capture paused; replay capture is marked incomplete after loss of input.
+
+The renderer stays at its original rate. A 64-tap, 256-phase windowed-sinc converter adapts only the physical output, with an exact bypass at equal rates. Coefficients are constructed outside callbacks; mono is downmixed and additional hardware channels are zeroed. Device changes invalidate loopback probes by a generation counter, preventing late results from being applied to a new route. Runtime driver teardown can still block or interrupt sound; this is not a guarantee against arbitrary driver failures.
+
 ## Audio pages and undo
 
 `LoopAudio` stores stereo f32 frames in shared 8192-frame pages (storage granularity, not device buffering). Page tables reserve five-minute capacity per track. A dedicated worker supplies prepared pages. Snapshots/undo share references; subsequent writes obtain a fresh page and copy only that page. Old references go to a bounded retirement queue. Pool exhaustion stops the affected recording and reports it, instead of growing a Vec in the callback. Five tracks at 48 kHz, five minutes each need about576 MB for one full audio generation; undo/COW snapshots can increase peak memory.

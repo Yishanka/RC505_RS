@@ -50,7 +50,11 @@ impl MyApp {
         self.request_exit(PendingExit::ToInit);
     }
     pub fn audio_status(&self) -> String {
-        self.audio.status.clone()
+        if self.audio.curr_output_name().is_empty() {
+            self.audio.status.clone()
+        } else {
+            format!("{} · {}", self.audio.curr_output_name(), self.audio.status)
+        }
     }
     pub fn create_project(&mut self) {
         if self.read_only || self.busy() {
@@ -140,6 +144,16 @@ impl MyApp {
     }
     pub fn apply_measurement(&mut self) {
         if let Some(value) = self.measurement {
+            if value.output_generation
+                != self
+                    .audio
+                    .diagnostics
+                    .output_generation
+                    .load(Ordering::Relaxed)
+            {
+                self.measurement = None;
+                return;
+            }
             self.config.beat_config.input_latency.value =
                 (value.frames as f64 * 1000.0 / value.sample_rate as f64).round() as usize;
             self.config.calibration = Some(crate::config::track_options::LatencyCalibration {
@@ -162,9 +176,13 @@ impl MyApp {
             return;
         }
         self.measurement = None;
-        self.send(Control::Calibrate(Some(Box::new(
-            crate::engine::latency::Calibration::new(self.audio.config.sample_rate.0),
-        ))));
+        let mut probe = crate::engine::latency::Calibration::new(self.audio.config.sample_rate.0);
+        probe.output_generation = self
+            .audio
+            .diagnostics
+            .output_generation
+            .load(Ordering::Relaxed);
+        self.send(Control::Calibrate(Some(Box::new(probe))));
         self.status =
             "Measuring three loopback probes; monitoring is muted for three seconds.".into();
     }

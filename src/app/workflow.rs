@@ -5,6 +5,99 @@ use crate::engine::{
 };
 
 impl MyApp {
+    pub fn set_follow_output(&mut self, follow: bool) {
+        self.config.system_config.follow_system_output = follow;
+        self.output_endpoint_id.clear();
+        self.next_output_retry = std::time::Instant::now();
+        if !self.read_only {
+            let mut preferences = crate::app_support::launcher_config::load().unwrap_or_default();
+            preferences.follow_system_output = follow;
+            if !follow {
+                preferences.output_device = self.config.system_config.output_device.value.clone();
+            }
+            if let Err(error) = crate::app_support::launcher_config::save(&preferences) {
+                self.status = error.to_string();
+            }
+        }
+    }
+    pub(super) fn follow_default_output(&mut self) {
+        let Some(result) = self.output_watch.as_ref().and_then(|watch| watch.poll()) else {
+            return;
+        };
+        if !self.config.system_config.follow_system_output
+            || self.reconnecting
+            || self.engine_transition
+            || !self.audio.has_live_input()
+        {
+            return;
+        }
+        if std::time::Instant::now() < self.next_output_retry {
+            return;
+        }
+        match result {
+            Ok(target) => {
+                let errors = self.audio.diagnostics.output_errors.load(Ordering::Relaxed);
+                if self.audio.online
+                    && target.id == self.output_endpoint_id
+                    && target.name == self.audio.curr_output_name()
+                    && errors == self.output_error_seen
+                {
+                    return;
+                }
+                match self
+                    .audio
+                    .retarget_output(&target.device, self.buffer_frames)
+                {
+                    Ok(()) => {
+                        self.output_endpoint_id = target.id;
+                        self.output_error_seen = errors;
+                        self.config.system_config.output_device.value = target.name.clone();
+                        if !self
+                            .config
+                            .system_config
+                            .output_device
+                            .options
+                            .contains(&target.name)
+                        {
+                            self.config
+                                .system_config
+                                .output_device
+                                .options
+                                .push(target.name.clone());
+                        }
+                        self.config.calibration = None;
+                        self.measurement = None;
+                        self.status = format!(
+                            "{}: {}",
+                            self.language
+                                .choose("Following system output", "已跟随系统输出"),
+                            target.name
+                        );
+                    }
+                    Err(error) => {
+                        self.audio.park_output();
+                        self.status = format!(
+                            "{}: {error}",
+                            self.language
+                                .choose("Cannot switch output; retrying", "输出切换失败，正在重试")
+                        );
+                        self.next_output_retry = std::time::Instant::now() + Duration::from_secs(2);
+                    }
+                }
+            }
+            Err(error) => {
+                self.audio.park_output();
+                self.output_endpoint_id.clear();
+                self.config.calibration = None;
+                self.measurement = None;
+                self.status = format!(
+                    "{}: {error}",
+                    self.language
+                        .choose("Waiting for system output", "等待系统输出设备")
+                );
+            }
+        }
+    }
     pub fn check_update(&mut self) {
         if self.busy() {
             return;
@@ -60,11 +153,18 @@ impl MyApp {
     pub(super) fn finish_reconnect(&mut self, mut snapshot: AudioSnapshot) {
         self.reconnecting = false;
         self.audio.suspend();
-        let result = AudioIO::with_buffer(
-            &self.config.system_config.input_device.value,
-            &self.config.system_config.output_device.value,
-            self.buffer_frames,
-        );
+        let result = if self.config.system_config.follow_system_output {
+            AudioIO::with_system_output(
+                &self.config.system_config.input_device.value,
+                self.buffer_frames,
+            )
+        } else {
+            AudioIO::with_buffer(
+                &self.config.system_config.input_device.value,
+                &self.config.system_config.output_device.value,
+                self.buffer_frames,
+            )
+        };
         let audio = match result {
             Ok(value) => value,
             Err(error) => {
@@ -74,6 +174,10 @@ impl MyApp {
             }
         };
         self.audio = audio;
+        if self.audio.online {
+            self.config.system_config.output_device.value =
+                self.audio.curr_output_name().to_owned();
+        }
         self.config.calibration = None;
         self.measurement = None;
         self.engine_transition = true;

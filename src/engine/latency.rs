@@ -12,6 +12,9 @@ pub struct InputAdapter {
     primed: bool,
 }
 impl InputAdapter {
+    pub fn reset_target(&mut self, target: usize) {
+        self.target = target.max(16);
+    }
     pub fn new(target: usize) -> Self {
         Self {
             history: [[0.0; 2]; 4],
@@ -72,12 +75,14 @@ impl InputAdapter {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Measurement {
+    pub output_generation: u64,
     pub frames: u32,
     pub sample_rate: u32,
     pub correlation: f64,
     pub spread: u32,
 }
 pub struct Calibration {
+    pub output_generation: u64,
     pub captured: Vec<f32>,
     signal: Vec<f32>,
     pattern: Vec<f32>,
@@ -102,6 +107,7 @@ impl Calibration {
             signal[start..start + pattern.len()].copy_from_slice(&pattern);
         }
         Self {
+            output_generation: 0,
             captured: vec![0.0; signal.len()],
             signal,
             pattern,
@@ -161,6 +167,7 @@ impl Calibration {
             "Latency is unstable across probes; check driver/buffer settings"
         );
         Ok(Measurement {
+            output_generation: self.output_generation,
             frames: lags[1],
             sample_rate: self.sample_rate,
             correlation: minimum,
