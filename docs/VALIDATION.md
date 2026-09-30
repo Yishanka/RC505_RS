@@ -75,6 +75,10 @@ Inno Setup6.7.3从官方Release下载，验证了有效Pyrsys B.V.签名。打�
 - 本次未改动音频 DSP。真实键盘连击手感、声卡延迟与听感仍需实际演奏验证；离线截图不作为音频测试。
 # 0.2.5 输出设备跟随验证（2026-09-30）
 
+- 提交 `0053c92` 和 `v0.2.5` 已推送；[主分支构建](https://github.com/Yishanka/RC505_RS/actions/runs/36669385538)、[发布构建](https://github.com/Yishanka/RC505_RS/actions/runs/36669385539) 均成功。[正式发布包](https://github.com/Yishanka/RC505_RS/releases/tag/v0.2.5) 已通过旧安装版更新器下载并安装到 `E:\SJTU\rc505`。
+- 安装后的 `--audio-info` 确认 `follow_system_output=true`，解析输出与系统默认均为 LG ULTRAFINE，旧配置中的 Realtek 名称没有锁定路由。通过 Windows Core Audio 会话 API 查询，已运行程序在默认输出上的会话为 Active、未静音、会话音量为 1；这不是耳机听感测试。
+- 29 个已有数据文件更新前后 SHA-256 全部一致（排除运行锁）；`E:\installer` 仅保留一份当前安装包。正式包 SHA-256：`7fb904279c014220b346817338ab2db8200924ff17bd234477a8b594fa66e10b`。
+
 - 两个 release 目标构建及安装器验证通过（无导入安装、覆盖安装、数据保留、GUI 子系统和单份下载缓存）。
 
 - `cargo check --all-targets --locked`、`cargo test --all-targets --locked` 通过：主程序 46 项、启动器 3 项；需要真实设备的一项测试默认忽略。测试覆盖旧配置迁移、渲染器所有权移交和继续录音、输出转换时长/DC/带外抑制、回调路径不分配内存。
