@@ -87,6 +87,9 @@ Inno Setup6.7.3从官方Release下载，验证了有效Pyrsys B.V.签名。打�
 - 中英文音频面板和启动器使用隔离数据目录检查实际渲染。没有以静音测试声称耳机听感、物理拔插全流程或任意驱动的无缝切换已验证。
 # 0.2.6 交互与导航验证（2026-10-01）
 
+- 提交 `72be270`、标签 `v0.2.6` 已推送；[主分支构建](https://github.com/Yishanka/RC505_RS/actions/runs/36857635975) 和 [发布构建](https://github.com/Yishanka/RC505_RS/actions/runs/36857636085) 均成功。[正式发布包](https://github.com/Yishanka/RC505_RS/releases/tag/v0.2.6) 已安装到 `E:\SJTU\rc505`，自动启动后响应正常，`--installation-info` 返回版本 0.2.6，未产生新的 panic 日志。
+- 发布刚完成时 `latest/download` 暂时返回 0.2.5 缓存，本次从不可变的 `v0.2.6` 官方下载地址获取安装器，核对清单与 SHA-256 后交由原安装版更新器安装。29 个已有数据文件哈希全部保持一致（排除运行锁）；下载目录仅保留一份当前安装包。正式安装包 SHA-256：`02a26de475abea60dd3b91b60d7e7b865431e113a58a48d647df29a0360d7452`。
+
 - 两个 release 目标及本地安装包构建通过；安装器再次验证无导入安装、覆盖安装、数据哨兵保留、GUI 子系统与单份安装包缓存。
 
 - 复现链路：先进入右侧小面板，再展开效果器，按 ↓。启用 egui 的 AccessKit 输出后，焦点指向本帧无障碍树中不存在的控件；Windows `accesskit_consumer::State::validate_global` 要求该节点存在，否则断言崩溃。修复保留无障碍支持，没有用禁用该功能掩盖问题。
