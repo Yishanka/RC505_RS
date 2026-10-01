@@ -67,7 +67,7 @@ pub fn configure(app: &mut MyApp, mode: &str) {
         app.editor.select(FxTarget::Track { bank: 0, slot: 0 });
     }
     app.editor.page = match mode {
-        "sequence" => EditorPage::Sequence,
+        "sequence" | "sequence-small" => EditorPage::Sequence,
         "filter" => EditorPage::Filter,
         "envelope" => EditorPage::Envelope,
         _ => EditorPage::Sound,
@@ -75,3 +75,23 @@ pub fn configure(app: &mut MyApp, mode: &str) {
 }
 
 pub use super::capture::capture;
+
+/// UI-only fixture; it does not pretend to record real audio.
+pub fn sample_visuals(app: &mut MyApp, mode: &str) {
+    if !mode.starts_with("performance-recording") {
+        return;
+    }
+    app.view.running = true;
+    app.view.sample_rate = 48000;
+    app.view.elapsed = if mode.ends_with("dim") { 12000 } else { 0 };
+    for (i, track) in app.view.tracks.iter_mut().enumerate().take(2) {
+        track.mode = if i == 0 {
+            crate::engine::core::Mode::Recording
+        } else {
+            crate::engine::core::Mode::Overdub
+        };
+        track.frames = 96000;
+        track.cursor = 24000;
+        track.wave = std::array::from_fn(|bin| ((bin as f32 * 0.8).sin() * 0.65).abs());
+    }
+}

@@ -19,6 +19,12 @@ mod utils;
 use app::MyApp;
 
 fn main() -> eframe::Result<()> {
+    app_support::diagnostics::install_panic_log();
+    #[cfg(debug_assertions)]
+    if std::env::args().any(|a| a == "--ui-regression") {
+        ui::regression::run();
+        return Ok(());
+    }
     if let Some(result) = maintenance::cli() {
         if let Err(error) = result {
             eprintln!("{error:#}");
@@ -26,7 +32,10 @@ fn main() -> eframe::Result<()> {
         }
         return Ok(());
     }
-    let small = std::env::args().any(|arg| arg.starts_with("--ui-preview=performance-small"));
+    let small = std::env::args().any(|arg| {
+        arg.starts_with("--ui-preview=performance-small")
+            || arg.starts_with("--ui-preview=sequence-small")
+    });
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_icon(ui::theme::window_icon())

@@ -15,7 +15,18 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp) {
     if app.editor.expanded {
         egui::ScrollArea::vertical()
             .id_source("expanded")
-            .show(ui, |ui| editor::draw(ui, app, true));
+            .show(ui, |ui| {
+                nav::begin(
+                    ui,
+                    Focus::Editor,
+                    app.focus == Focus::Editor && app.focus_request,
+                );
+                if app.focus == Focus::Editor {
+                    app.focus_request = false;
+                }
+                editor::draw(ui, app, true);
+                nav::end(ui);
+            });
         return;
     }
     egui::ScrollArea::vertical()
@@ -27,7 +38,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp) {
                 fixed_panel(&mut columns[1], app, Focus::Right, |ui, app| {
                     ui.horizontal(|ui| {
                         ui.strong(lang.text("FX EDITOR"));
-                        theme::keycap(ui, "D / F8");
+                        theme::keycap(ui, "F8");
                     });
                     editor::draw(ui, app, false);
                 });
@@ -102,11 +113,22 @@ fn transport(ui: &mut egui::Ui, app: &mut MyApp) {
             if nav::register(theme::action(ui, Icon::Help, lang.text("Help"), "F12")).clicked() {
                 app.help_open = true;
             }
-            if nav::register(theme::action(ui, Icon::Back, lang.text("Projects"), "Esc"))
-                .on_hover_text(
-                    lang.text("Esc: editor → performance → project browser (save prompt)."),
-                )
-                .clicked()
+            let project_key = if !app.editor.expanded
+                && app.focus == Focus::Performance
+                && !ui.ctx().wants_keyboard_input()
+            {
+                "Esc"
+            } else {
+                ""
+            };
+            if nav::register(theme::action(
+                ui,
+                Icon::Back,
+                lang.text("Projects"),
+                project_key,
+            ))
+            .on_hover_text(lang.text("Esc: editor → performance → project browser (save prompt)."))
+            .clicked()
             {
                 app.back_to_projects();
             }
@@ -188,6 +210,19 @@ fn transport(ui: &mut egui::Ui, app: &mut MyApp) {
                     Focus::Transport => lang.text("Top controls"),
                     Focus::Left => lang.text("Left controls"),
                     Focus::Right => lang.text("FX controls"),
+                    Focus::Editor => lang.choose("Expanded editor", "完整编辑器"),
+                },
+            );
+            theme::keycap(ui, "Esc");
+            theme::caption(
+                ui,
+                if app.editor.expanded
+                    || app.focus != Focus::Performance
+                    || ui.ctx().wants_keyboard_input()
+                {
+                    lang.text("Back to performance")
+                } else {
+                    lang.choose("Project browser", "返回工程选择")
                 },
             );
             let message = if app.status.is_empty() {
@@ -223,7 +258,7 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
         ] {
             nav::register(ui.selectable_value(&mut app.left_page, page, label));
         }
-        theme::keycap(ui, "A / F7");
+        theme::keycap(ui, "F7");
     });
     ui.separator();
     match app.left_page {
@@ -285,7 +320,7 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
                 });
                 clear_button(ui, app, index);
                 if nav::button(ui, lang.text("Expand selected FX")).clicked() {
-                    app.editor.expanded = true;
+                    app.open_editor(ui.ctx());
                 }
             });
         }
@@ -536,16 +571,28 @@ fn track(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
         Mode::Playing => (lang.text("PLAYING"), theme::ACCENT),
         Mode::Stopped => (lang.text("STOPPED"), theme::MUTED),
     };
+    let recording = matches!(view.mode, Mode::Recording | Mode::Overdub) && app.view.running;
+    let (beat, pulse) = super::beat::pulse(
+        app.view.elapsed,
+        app.view.sample_rate,
+        app.config.beat_config.current_bpm(),
+    );
+    let border = if selected {
+        theme::TRACK
+    } else {
+        Color32::from_gray(48)
+    };
+    let border = if recording {
+        egui::Color32::from(
+            egui::Rgba::from(border) * (1.0 - pulse * 0.7)
+                + egui::Rgba::from(color) * (pulse * 0.7),
+        )
+    } else {
+        border
+    };
     theme::card()
         .inner_margin(10.0)
-        .stroke(Stroke::new(
-            if selected { 2.0 } else { 1.0 },
-            if selected {
-                theme::TRACK
-            } else {
-                Color32::from_gray(48)
-            },
-        ))
+        .stroke(Stroke::new(if selected { 2.0 } else { 1.0 }, border))
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
             ui.spacing_mut().item_spacing.x = 6.0;
@@ -559,15 +606,36 @@ fn track(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
             {
                 app.track_sel = Some(index);
             }
-            ui.label(
-                egui::RichText::new(if view.pending {
-                    lang.text("QUEUED")
-                } else {
-                    state
-                })
-                .size(13.0)
-                .color(color),
-            );
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(if view.pending {
+                        lang.text("QUEUED")
+                    } else {
+                        state
+                    })
+                    .size(13.0)
+                    .color(color),
+                );
+                let (beat_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(60.0, 16.0), egui::Sense::hover());
+                if recording {
+                    for i in 0..4 {
+                        let center = egui::pos2(
+                            beat_rect.left() + 6.0 + i as f32 * 14.0,
+                            beat_rect.center().y,
+                        );
+                        ui.painter().circle_filled(
+                            center,
+                            if i == beat { 3.0 + 2.0 * pulse } else { 2.5 },
+                            if i == beat {
+                                color
+                            } else {
+                                Color32::from_gray(58)
+                            },
+                        );
+                    }
+                }
+            });
             let (rect, _) = ui
                 .allocate_exact_size(egui::vec2(ui.available_width(), 36.0), egui::Sense::hover());
             ui.painter().rect_filled(rect, 5.0, theme::BACKGROUND);

@@ -1,3 +1,4 @@
+mod beat;
 pub mod editor;
 pub mod help;
 pub mod init;
@@ -13,3 +14,6 @@ pub mod preview;
 
 #[cfg(debug_assertions)]
 pub mod capture;
+
+#[cfg(debug_assertions)]
+pub mod regression;

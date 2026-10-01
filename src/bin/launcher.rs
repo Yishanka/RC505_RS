@@ -117,6 +117,7 @@ impl eframe::App for Launcher {
     }
 }
 fn main() -> eframe::Result<()> {
+    app_support::diagnostics::install_panic_log();
     eframe::run_native(
         "RC505 RS · Audio setup",
         eframe::NativeOptions {

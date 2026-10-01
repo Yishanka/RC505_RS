@@ -36,7 +36,11 @@ Offline rendering runs the same `RenderCore` at the original sample rate. A regr
 
 ## UI and installation
 
-`app/actions.rs` shares commands between mouse and keyboard. `keyboard.rs` separates performance, text, full editor and panel focus. F6, A/F7 and D/F8 select top/left/right; navigation registers focusable controls. Momentary FX store their original bank/track/slot so release restores the correct target even after selection changes. Faders integrate elapsed time, with independent direction and rate controllers.
+`app/actions.rs` shares commands between mouse and keyboard. `keyboard.rs` separates performance, text, full editor and panel focus. F6, F7 and F8 select top/left/right; navigation registers focusable controls. Momentary FX store their original bank/track/slot so release restores the correct target even after selection changes. Faders integrate elapsed time, with independent direction and rate controllers.
+
+Navigation requests are deferred until the current scope has drawn its controls. The expanded editor owns a separate focus scope; it never traverses compact-panel IDs. Scene changes clear hidden widget focus, and navigation locks prevent double traversal by the app and egui. This preserves the Windows AccessKit invariant that the focus node exists in the current accessibility tree. The process-isolated UI regression enables accessibility and exercises editor navigation, tab changes and dialogs. Unexpected panics are logged to the chosen data directory's `logs/last-panic.log`.
+
+Recording/overdub beat indicators derive their four-beat phase from the engine's elapsed sample count. Piano roll owns a bounded two-axis viewport, with sticky keyboard/ruler headers and explicit middle-button panning; scrolling never doubles as note dragging.
 
 On Windows, `performance_keys.rs` bridges egui0.27's dropped/translated Shift symbols using key state for the explicitly bound performance keys. It checks both application focus and foreground process identity before polling, suppresses held keys when returning from editing, and modifies only the command router's input copy. The original text input stream is unchanged.
 

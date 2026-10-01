@@ -33,6 +33,7 @@ pub enum Focus {
     Transport,
     Left,
     Right,
+    Editor,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum LeftPage {
@@ -64,6 +65,7 @@ pub enum JobResult {
     Error(String),
 }
 pub struct MyApp {
+    last_ui_scene: Option<[u64; 12]>,
     output_watch: Option<crate::engine::output_watch::OutputWatch>,
     output_endpoint_id: String,
     output_error_seen: u64,
@@ -179,6 +181,7 @@ impl MyApp {
             .and_then(|s| projects.iter().position(|p| p.name == s.last_project))
             .unwrap_or(0);
         Self {
+            last_ui_scene: None,
             output_endpoint_id: if config.system_config.follow_system_output && audio.online {
                 crate::engine::output_watch::default_id().unwrap_or_default()
             } else {
@@ -504,6 +507,55 @@ impl eframe::App for MyApp {
         }
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.render_frame(ctx);
+    }
+}
+impl MyApp {
+    fn ui_scene(&self) -> [u64; 12] {
+        let target = self.editor.target.map_or(0, |target| match target {
+            crate::presets::FxTarget::Input { bank, slot } => {
+                1 + (bank * 4 + slot) * 16 + self.config.input_fx.slot_kind(bank, slot) as usize
+            }
+            crate::presets::FxTarget::Track { bank, slot } => {
+                512 + (bank * 4 + slot) * 16 + self.config.track_fx.slot_kind(bank, slot) as usize
+            }
+        });
+        [
+            matches!(self.app_state, AppState::Init) as u64,
+            self.editor.expanded as u64,
+            self.editor.page as u64,
+            target as u64,
+            self.help_open as u64,
+            self.help_tab as u64,
+            self.replay_browser as u64,
+            self.player_open as u64,
+            self.draft.is_some() as u64,
+            self.show_save_prompt as u64,
+            self.project_name_mode.is_some() as u64,
+            self.language as u64,
+        ]
+    }
+    fn release_hidden_focus(&mut self, ctx: &egui::Context) {
+        ctx.memory_mut(|m| m.stop_text_input());
+        self.focus_request = self.focus != Focus::Performance
+            && !self.show_save_prompt
+            && !self.help_open
+            && !self.player_open
+            && !self.replay_browser;
+    }
+    pub(crate) fn render_frame(&mut self, ctx: &egui::Context) {
+        let scene = self.ui_scene();
+        if self.last_ui_scene.is_some_and(|old| old != scene) {
+            self.release_hidden_focus(ctx);
+        }
+        // Expanded and compact editors have different widget IDs and focus scopes.
+        if self.editor.expanded
+            && matches!(self.focus, Focus::Performance | Focus::Left | Focus::Right)
+        {
+            self.focus_panel(ctx, Focus::Editor);
+        } else if !self.editor.expanded && self.focus == Focus::Editor {
+            self.focus_panel(ctx, Focus::Performance);
+        }
         let lang = self.language;
         self.language.apply(ctx);
         #[cfg(debug_assertions)]
@@ -515,6 +567,12 @@ impl eframe::App for MyApp {
             }
         }
         self.poll();
+        #[cfg(debug_assertions)]
+        if let Some(mode) =
+            std::env::args().find_map(|a| a.strip_prefix("--ui-preview=").map(str::to_owned))
+        {
+            ui::preview::sample_visuals(self, &mode);
+        }
         self.follow_default_output();
         ctx.request_repaint_after(Duration::from_millis(16));
         if ctx.input(|i| i.viewport().close_requested())
@@ -537,7 +595,12 @@ impl eframe::App for MyApp {
         ui::help::draw(ctx, self);
         ui::replays::draw(ctx, self);
         if self.show_save_prompt {
-            egui::Window::new(lang.text("Save before leaving")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER,egui::Vec2::ZERO).show(ctx,|ui|{
+            let title = if matches!(self.pending_exit, Some(PendingExit::CloseWindow)) {
+                lang.choose("Save before closing RC505 RS", "关闭 RC505 RS 前保存")
+            } else {
+                lang.choose("Save before returning to projects", "返回工程选择前保存")
+            };
+            egui::Window::new(title).id(egui::Id::new("save-session-dialog")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER,egui::Vec2::ZERO).show(ctx,|ui|{
                 ui.label(lang.text("Choose what to keep in this project."));
                 ui.add_enabled_ui(!self.busy(),|ui|{
                     if ui.button(lang.text("Save configuration and audio snapshot")).clicked(){self.exit_after_save=true;self.save_snapshot();}
@@ -551,6 +614,11 @@ impl eframe::App for MyApp {
             });
         }
         self.sync_config();
+        let scene_after = self.ui_scene();
+        if scene_after != scene {
+            self.release_hidden_focus(ctx);
+        }
+        self.last_ui_scene = Some(scene_after);
         if self.close_window_queued {
             self.close_window_queued = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);

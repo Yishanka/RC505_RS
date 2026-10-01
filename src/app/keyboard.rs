@@ -21,8 +21,10 @@ impl MyApp {
     pub(super) fn handle_input(&mut self, ctx: &egui::Context) {
         let mut input = ctx.input(Clone::clone);
         let text = ctx.wants_keyboard_input();
+        let popup_open = ctx.memory(|m| m.any_popup_open());
         let performance = input.focused
             && !text
+            && !popup_open
             && !self.editor.expanded
             && !self.help_open
             && !self.player_open
@@ -117,6 +119,10 @@ impl MyApp {
         if self.performance_locked() {
             return;
         }
+        // A menu owns its arrows and Escape until it closes.
+        if ctx.memory(|m| m.any_popup_open()) {
+            return;
+        }
         if input.modifiers.ctrl && pressed(&input, Key::S) {
             if input.modifiers.shift {
                 self.save_snapshot();
@@ -125,26 +131,33 @@ impl MyApp {
             }
             return;
         }
-        if pressed(&input, Key::F6) {
+        if input.modifiers.is_none() && pressed(&input, Key::F6) {
             self.focus_panel(ctx, Focus::Transport);
             return;
         }
-        if pressed(&input, Key::F7)
-            || (!text
-                && !self.editor.expanded
-                && input.modifiers.is_none()
-                && pressed(&input, Key::A))
-        {
+        if input.modifiers.is_none() && pressed(&input, Key::F7) && !self.editor.expanded {
             self.focus_panel(ctx, Focus::Left);
             return;
         }
-        if pressed(&input, Key::F8)
-            || (!text
-                && !self.editor.expanded
-                && input.modifiers.is_none()
-                && pressed(&input, Key::D))
+        if input.modifiers.is_none() && pressed(&input, Key::F8) {
+            self.focus_panel(
+                ctx,
+                if self.editor.expanded {
+                    Focus::Editor
+                } else {
+                    Focus::Right
+                },
+            );
+            return;
+        }
+        if self.editor.expanded
+            && input.modifiers.ctrl
+            && !input.modifiers.alt
+            && pressed(&input, Key::Tab)
         {
-            self.focus_panel(ctx, Focus::Right);
+            self.editor.cycle_page(&self.config, input.modifiers.shift);
+            self.focus_panel(ctx, Focus::Editor);
+            consume_navigation_keys(ctx);
             return;
         }
         if pressed(&input, Key::Escape) {
@@ -165,22 +178,19 @@ impl MyApp {
             return;
         }
         if self.focus != Focus::Performance {
-            let next = input.key_pressed(Key::ArrowDown)
-                || input.key_pressed(Key::Tab) && !input.modifiers.shift;
-            let previous = input.key_pressed(Key::ArrowUp)
-                || input.key_pressed(Key::Tab) && input.modifiers.shift;
+            let no_command =
+                !input.modifiers.ctrl && !input.modifiers.alt && !input.modifiers.mac_cmd;
+            let editing = ctx
+                .memory(|m| m.focused())
+                .is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some());
+            let next = no_command
+                && ((!editing && input.key_pressed(Key::ArrowDown))
+                    || input.key_pressed(Key::Tab) && !input.modifiers.shift);
+            let previous = no_command
+                && ((!editing && input.key_pressed(Key::ArrowUp))
+                    || input.key_pressed(Key::Tab) && input.modifiers.shift);
             if next || previous {
-                ctx.input_mut(|i| {
-                    i.events.retain(|e| {
-                        !matches!(
-                            e,
-                            egui::Event::Key {
-                                key: Key::Tab | Key::ArrowUp | Key::ArrowDown,
-                                ..
-                            }
-                        )
-                    })
-                });
+                consume_navigation_keys(ctx);
                 ui::navigation::advance(ctx, self.focus, if next { 1 } else { -1 });
             }
             return;
@@ -347,4 +357,18 @@ impl MyApp {
             }
         }
     }
+}
+
+fn consume_navigation_keys(ctx: &egui::Context) {
+    ctx.input_mut(|i| {
+        i.events.retain(|e| {
+            !matches!(
+                e,
+                egui::Event::Key {
+                    key: Key::Tab | Key::ArrowUp | Key::ArrowDown,
+                    ..
+                }
+            )
+        })
+    });
 }

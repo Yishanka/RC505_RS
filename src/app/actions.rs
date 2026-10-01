@@ -133,14 +133,19 @@ impl MyApp {
     pub fn focus_panel(&mut self, ctx: &egui::Context, focus: Focus) {
         self.focus = focus;
         self.focus_request = true;
-        if focus != Focus::Performance {
-            self.editor.expanded = false;
-        }
         if let Some(id) = ctx.memory(|m| m.focused()) {
             ctx.memory_mut(|m| m.surrender_focus(id));
         }
         self.fader_keys.fill(faders::KeyFader::default());
         self.speed_keys.fill(faders::KeyFader::default());
+    }
+    pub fn open_editor(&mut self, ctx: &egui::Context) {
+        self.editor.expanded = true;
+        self.focus_panel(ctx, Focus::Editor);
+    }
+    pub fn close_editor(&mut self, ctx: &egui::Context) {
+        self.editor.expanded = false;
+        self.focus_panel(ctx, Focus::Performance);
     }
     pub fn apply_measurement(&mut self) {
         if let Some(value) = self.measurement {

@@ -44,6 +44,23 @@ impl Default for EditorState {
 }
 
 impl EditorState {
+    pub fn cycle_page(&mut self, config: &AppConfig, backward: bool) {
+        let synth = matches!(self.target,Some(FxTarget::Input{bank,slot}) if matches!(config.input_fx.banks[bank].slots[slot].fx,Some(InputFx::Oscillator(_)|InputFx::MyDelay(_))));
+        if synth {
+            let pages = [
+                EditorPage::Sound,
+                EditorPage::Sequence,
+                EditorPage::Envelope,
+                EditorPage::Filter,
+                EditorPage::FilterEnvelope,
+            ];
+            let index = pages
+                .iter()
+                .position(|page| *page == self.page)
+                .unwrap_or(0);
+            self.page = pages[(index + if backward { pages.len() - 1 } else { 1 }) % pages.len()];
+        }
+    }
     pub fn select(&mut self, target: FxTarget) {
         if self.target != Some(target) {
             self.piano.reset_history();
@@ -65,15 +82,28 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
                     "Select an FX slot below to edit. Expand opens a full sound-design workspace.",
                 ),
             );
+            if full
+                && super::navigation::register(theme::action(
+                    ui,
+                    theme::Icon::Back,
+                    lang.text("Back to performance"),
+                    "Esc",
+                ))
+                .clicked()
+            {
+                app.close_editor(ui.ctx());
+            }
         });
         return;
     };
     let beats = app.beats();
+    let mut header_kind_changed = false;
     theme::card().show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             let (bank,slot) = match target { FxTarget::Input{bank,slot}|FxTarget::Track{bank,slot}=>(bank,slot) };
             let target_text=format!("{} / {} / {}",lang.text(if matches!(target,FxTarget::Input{..}) {"INPUT FX"} else {"TRACK FX"}),bank+1,['A','B','C','D'][slot]);
             ui.label(egui::RichText::new(target_text).color(theme::ACCENT).strong());
+            if full {header_kind_changed=kind_picker(ui,&mut app.config,target);}
             match target {
                 FxTarget::Input {bank,slot} => { super::navigation::register(ui.checkbox(&mut app.config.input_fx.banks[bank].slots[slot].is_enabled,lang.text("Enabled"))); }
                 FxTarget::Track {bank,slot} => {
@@ -82,8 +112,8 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
                 }
             }
             if full {
-                if theme::action(ui, theme::Icon::Back, lang.text("Back to performance"), "Esc").clicked() { app.editor.expanded = false; }
-            } else if super::navigation::register(theme::action(ui, theme::Icon::Expand, lang.text("Expand"), "")).clicked() { app.editor.expanded = true; }
+                if super::navigation::register(theme::action(ui, theme::Icon::Back, lang.text("Back to performance"), "Esc")).clicked() { app.close_editor(ui.ctx()); }
+            } else if super::navigation::register(theme::action(ui, theme::Icon::Expand, lang.text("Expand"), "")).clicked() { app.open_editor(ui.ctx()); }
             if super::navigation::register(ui.selectable_label(app.previewing, lang.text("Sequence preview"))).on_hover_text(lang.text("Run the sequencer clock without recording. Oscillator threshold still applies; use 0 for ungated preview.")).clicked() { app.toggle_preview(); }
         });
         let active = match target { FxTarget::Input{bank,..}=>bank==app.config.input_fx.sel_bank_idx, FxTarget::Track{bank,..}=>bank==app.config.track_fx.sel_bank_idx };
@@ -116,7 +146,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
             ui.separator();
         }
         ui.push_id(target.label(), |ui| {
-            let changed = kind_picker(ui, &mut app.config, target);
+            let changed = if full {header_kind_changed} else {kind_picker(ui, &mut app.config, target)};
             if changed { app.editor.piano.reset_history(); app.editor.page = EditorPage::Sound; }
             let synth = matches!(target, FxTarget::Input { bank, slot } if matches!(app.config.input_fx.banks[bank].slots[slot].fx, Some(InputFx::Oscillator(_)|InputFx::MyDelay(_))));
             if full && synth {
@@ -124,11 +154,12 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
                     for (page,label) in [(EditorPage::Sound,lang.text("Sound")),(EditorPage::Sequence,lang.text("Piano roll")),(EditorPage::Envelope,lang.text("Amp envelope")),(EditorPage::Filter,lang.text("Filter")),(EditorPage::FilterEnvelope,lang.text("Filter envelope"))] {
                         ui.selectable_value(&mut app.editor.page,page,label);
                     }
+                    theme::keycap(ui,"Ctrl+Tab");
                 });
                 ui.separator();
             }
             if !full && synth && super::navigation::button(ui,lang.text("Open piano roll")).clicked() {
-                app.editor.page = EditorPage::Sequence; app.editor.expanded = true;
+                app.editor.page = EditorPage::Sequence; app.open_editor(ui.ctx());
             }
             let page = if full { app.editor.page } else { EditorPage::Sound };
             match target {
