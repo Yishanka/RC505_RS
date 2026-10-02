@@ -7,6 +7,7 @@ pub mod navigation;
 pub mod parameters;
 pub mod performance;
 pub mod piano_roll;
+pub mod replay_panel;
 pub mod replays;
 pub mod theme;
 pub mod visualizer;

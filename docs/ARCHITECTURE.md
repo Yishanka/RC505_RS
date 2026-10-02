@@ -59,6 +59,15 @@ Existing DSP/control semantics are independently implemented from public referen
 
 Formal transport, metronome and private audition are separate state. Starting the click starts transport; disabling the click leaves transport running. Audition has an independently prepared DSP runtime, pinned bank/slot/track and private sample counter. It bypasses slot enable and trigger thresholds. Callback mixes the precomputed click and audition after `RenderCore::process`, so neither enters track buffers or offline replay output. Starting capture retires audition and resets formal DSP/transport. Capture eligibility checks stopped tracks, not the global transport flag.
 
-The final output feeds a fixed 64-bin chronological peak meter, one bin per 10 ms. Per-frame work is constant; no FFT, allocation or locks. UI draws a low-alpha backdrop from its bounded view snapshot.
+The final output feeds an 8192-frame SPSC visualization queue. A dedicated worker runs stereo Hann-window radix-2 FFTs at about 30 Hz (4096/8192/16384 samples by renderer rate), merges channel power without phase cancellation, maps 64 logarithmic bands and smooths release. Twiddles, permutation and work buffers are prepared off-thread. Callback work stays constant and may drop visual samples instead of waiting. Disabling the background stops sample submission and FFT work; fully silent windows skip FFT.
 
 Calibration first persists a monitoring guard, then requests silence. Only after callback acknowledgement may the user confirm electrical loopback and request probes. Completion/failure never restores monitoring. Output handoff preserves the guard; startup reloads it. Explicit cable-disconnected confirmation clears it. Physical sockets and hardware direct monitoring cannot be detected by the application.
+
+
+## Replay presentation and appearance (0.2.8)
+
+Offline rendering also records bounded-rate `EngineView` samples and sample-stamped configuration deltas in `replay/visuals.rs`. These cache the visible audio state without a second live DSP pass. `ui/replay_panel.rs` owns a boxed, isolated display configuration and editor. It maps the player's sample cursor to the replay source rate, applies deltas and draws the shared performance workspace in read-only mode. The live model is restored before configuration synchronization; no display operation is sent back as a performance edit. Closing the temporary panel retains the live project's buffers and parameters. Old replays have no pointer/focus/window-layout history.
+
+Replay delete/discard validates ownership and canonical managed paths, then renames the folder into its project's `replay-trash`. Restore uses a fresh identity and never overwrites a live replay; exported WAVs stay independent. Project deletion uses the existing project trash and now has a direct button.
+
+ThemeColor is a global, serde-defaulted launcher preference (Mint/Rose/Ember). The UI palette lives in `theme.rs`; custom graphics read the current palette from egui instead of fixed accent constants. It is not part of project configuration or replay events, and the icon is unchanged.

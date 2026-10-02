@@ -21,15 +21,16 @@ pub fn draw(ctx: &egui::Context, app: &mut MyApp) {
                     ("F6 focuses the top bar; F7 the left panel; F8 the right panel. Tab or Up/Down chooses a control; Left/Right adjusts it; Enter activates it.","F6 进入顶部栏，F7 进入左面板，F8 进入右面板。Tab 或上下键选择控件，左右键调整，Enter 操作。"),
                     ("Esc leaves an editor or panel first. From performance, Esc returns to the project browser after a save prompt. Alt+F4 closes the application.","Esc 先离开编辑器或面板；在演奏界面再按 Esc，会提示保存并返回工程选择页。Alt+F4 关闭软件。"),
                     ("Hold Delete for 0.75 seconds or press it twice within 350 ms to clear selected-track audio (recoverable with track Undo). A single short press does nothing. Changing tracks or focus cancels the gesture.","长按 Delete 0.75 秒，或在 350 毫秒内双击，清空所选轨音频，可用轨道撤销恢复。单次短按不删除；切换轨道或焦点会取消手势。"),
+                    ("Theme selects Mint, Rose or Ember across the application. Audio can disable the background FFT spectrum. The icon stays unchanged.","顶部主题切换薄荷绿、雾粉、橙红，全软件统一，图标不变。音频页可关闭后台 FFT 频谱。"),
                     ("Grey keycaps show keyboard shortcuts. Icons and adjacent text describe actions. 中文 / EN changes the interface language and remembers your choice.","灰底键帽表示快捷键，图标与旁边文字表示动作。顶部 中文 / EN 可切换界面语言并记住选择。"),
                 ] { ui.label(lang.choose(en,zh)); ui.add_space(10.0); }
             }
             1=>{
                 ui.heading(lang.choose("Where the sound goes", "声音从哪里来，到哪里去"));
                 theme::card().show(ui,|ui| {
-                    ui.colored_label(theme::ACCENT,lang.choose("Audio input → Input FX → recording / overdub + monitoring", "声卡输入 → 输入效果 → 录音 / 叠录，同时监听"));
+                    ui.colored_label(theme::accent(ui),lang.choose("Audio input → Input FX → recording / overdub + monitoring", "声卡输入 → 输入效果 → 录音 / 叠录，同时监听"));
                     ui.add_space(15.0);
-                    ui.colored_label(theme::TRACK,lang.choose("Recorded loops → Track FX → track faders → master output", "循环音频 → 轨道效果 → 各轨推子 → 总混音 → 声卡输出"));
+                    ui.colored_label(theme::secondary(ui),lang.choose("Recorded loops → Track FX → track faders → master output", "循环音频 → 轨道效果 → 各轨推子 → 总混音 → 声卡输出"));
                 });
                 for (en,zh) in [
                     ("Vocoder track carriers are taken after Track FX and before faders. Lowering a fader does not silence its carrier or erase recorded audio.","声码器轨道载波取自轨道效果之后、推子之前。推低音量不会关闭载波，也不会抹掉录音。"),
@@ -73,8 +74,8 @@ pub fn draw(ctx: &egui::Context, app: &mut MyApp) {
                     ("Configuration saves parameters, sequences, track modes and fader speeds while keeping the last audio snapshot reference.","保存配置会保存参数、序列、轨道模式和推子速度，保留上一次音频快照引用。"),
                     ("Configuration + audio saves five tracks as lossless 32-bit float WAV, undo state and a versioned manifest. The project pointer changes only after background writes complete; older revisions remain.","配置与音频快照保存五轨无损 32-bit float WAV、撤销状态和版本化清单。后台写入完成后才更新工程指针，旧版本保留。"),
                     ("Start replay capture with all tracks stopped. Existing loops remain; FX tails and the clock reset. Capture records dry input and accepted commands at exact engine sample positions, not the master output.","五轨停止时开始回放录制。保留已有循环，重置效果尾音与时钟；录制原始输入及引擎实际接受操作的采样位置，不是直接录制主输出。"),
-                    ("After capture, name and save the take, export a WAV, or keep a draft. WAV export uses the same DSP renderer. Takes are limited to 30 minutes; each track to 5 minutes.","结束后可命名保存回放、导出 WAV 或保留草稿。WAV 由同一 DSP 渲染器计算；单次回放限 30 分钟，单轨音频限 5 分钟。"),
-                    ("Top bar Replays / F10 opens the library. Play verifies SHA-256, renders and starts a dedicated player. Space pauses or resumes; live input is muted. Import the final state into the source project or a new project only. Previous snapshot revisions remain.","顶部回放库 / F10 打开列表，点击播放自动校验、重算并打开独立播放器。空格暂停 / 继续，现场输入静音。最终状态仅可导入来源工程或新工程；保留旧快照版本。"),
+                    ("After capture, name and save the take, export a WAV, keep a draft or discard it into replay trash. WAV export uses the same DSP renderer. Takes are limited to 30 minutes; each track to 5 minutes.","结束后可命名保存回放、导出 WAV、保留草稿或丢弃到回放回收站。WAV 由同一 DSP 渲染器计算；单次回放限 30 分钟，单轨音频限 5 分钟。"),
+                    ("Top bar Replays / F10 opens the library with Play, Export, Delete and Restore. Play opens a temporary performance panel showing recorded track, fader and FX states. Space pauses or resumes; live input is muted. Import the final state into the source project or a new project only. Previous snapshot revisions remain.","顶部回放库 / F10 提供播放、导出、删除和恢复。播放打开临时演奏面板，显示录制时的轨道、推子、效果和参数。空格暂停 / 继续，现场输入静音。最终状态仅可导入来源工程或新工程；保留旧快照版本。"),
                     ("Replay files require the matching renderer version and source sample rate. Input gaps or queue overflow invalidate a capture. Resolve the replay draft before leaving the project.","回放要求匹配渲染器版本与原采样率。输入缺失或队列溢出会使录制报错；离开工程前需要处理回放草稿。"),
                 ] { ui.label(lang.choose(en,zh)); ui.add_space(10.0); }
             }

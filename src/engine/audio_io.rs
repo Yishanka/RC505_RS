@@ -51,6 +51,7 @@ pub struct Player {
     pub playing: bool,
 }
 pub enum Control {
+    Spectrum(bool),
     CalibrationHold(bool),
     Audition(Option<Box<super::audition::Audition>>),
     AuditionUpdate(Box<super::audition::AuditionParameters>),
@@ -118,7 +119,7 @@ impl PageAllocator for RealtimePages {
 struct Callback {
     audition: Option<Box<super::audition::Audition>>,
     metronome: super::metronome::Metronome,
-    visual: super::visual_meter::VisualMeter,
+    visual: super::spectrum::SpectrumFeed,
     core: Box<RenderCore>,
     commands: HeapConsumer<Control>,
     worker: HeapProducer<WorkerMessage>,
@@ -165,6 +166,7 @@ impl Callback {
             let at = self.core.clock.frame;
             let mut accepted = true;
             match &mut command {
+                Control::Spectrum(value) => self.visual.set_enabled(*value),
                 Control::CalibrationHold(value) => {
                     if *value
                         && (!self.core.tracks_stopped()
@@ -402,7 +404,7 @@ impl Callback {
         }
         if self.views.free_len() > 0 {
             let mut view = self.core.view();
-            view.output_wave = self.visual.snapshot();
+            view.output_spectrum = self.visual.snapshot();
             let _ = self.views.push(view);
         }
     }
@@ -778,7 +780,7 @@ impl AudioIO {
         let callback = Callback {
             audition: None,
             metronome: super::metronome::Metronome::new(sr),
-            visual: super::visual_meter::VisualMeter::new(sr),
+            visual: super::spectrum::SpectrumFeed::new(sr, stop.clone()),
             core: Box::new(RenderCore::new(sr)),
             commands: command_rx,
             worker: worker_tx,

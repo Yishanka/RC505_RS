@@ -626,7 +626,7 @@ pub fn draw(
                     0.0,
                     Color32::from_black_alpha(130),
                 );
-                painter.vline(edge, grid.y_range(), Stroke::new(2.0, theme::ACCENT));
+                painter.vline(edge, grid.y_range(), Stroke::new(2.0, theme::accent(ui)));
             }
             let note_rect = |event: NoteEvent| {
                 let y = grid.top()
@@ -648,7 +648,7 @@ pub fn draw(
                     if selected {
                         Color32::from_rgb(199, 246, 226)
                     } else {
-                        theme::ACCENT
+                        theme::accent(ui)
                     },
                 );
                 if r.width() > 28.0 {

@@ -102,7 +102,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
         theme::control_row(ui, |ui| {
             let (bank,slot) = match target { FxTarget::Input{bank,slot}|FxTarget::Track{bank,slot}=>(bank,slot) };
             let target_text=format!("{} / {} / {}",lang.text(if matches!(target,FxTarget::Input{..}) {"INPUT FX"} else {"TRACK FX"}),bank+1,['A','B','C','D'][slot]);
-            ui.label(egui::RichText::new(target_text).color(theme::ACCENT).strong());
+            ui.label(egui::RichText::new(target_text).color(theme::accent(ui)).strong());
             if full {header_kind_changed=kind_picker(ui,&mut app.config,target);}
             match target {
                 FxTarget::Input {bank,slot} => { super::navigation::register(ui.checkbox(&mut app.config.input_fx.banks[bank].slots[slot].is_enabled,lang.text("Enabled"))); }
@@ -538,6 +538,6 @@ fn waveform(ui: &mut egui::Ui, waveform: crate::config::osc_configs::Waveform) {
         .collect();
     ui.painter().add(egui::Shape::line(
         points,
-        egui::Stroke::new(2.0, theme::ACCENT),
+        egui::Stroke::new(2.0, theme::accent(ui)),
     ));
 }

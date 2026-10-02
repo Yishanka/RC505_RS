@@ -169,8 +169,10 @@ pub fn filter(ui: &mut egui::Ui, config: &mut FilterConfigs, full: bool) {
                 )
             })
             .collect();
-        ui.painter()
-            .add(egui::Shape::line(points, Stroke::new(2.0, theme::ACCENT)));
+        ui.painter().add(egui::Shape::line(
+            points,
+            Stroke::new(2.0, theme::accent(ui)),
+        ));
         theme::caption(
             ui,
             lang.text("Linear response includes dry/wet; drive and envelope motion are not shown."),
@@ -262,8 +264,10 @@ pub fn envelope(ui: &mut egui::Ui, config: &mut EnvelopeConfigs) {
             )
         })
         .collect();
-    ui.painter()
-        .add(egui::Shape::line(points, Stroke::new(2.0, theme::ACCENT)));
+    ui.painter().add(egui::Shape::line(
+        points,
+        Stroke::new(2.0, theme::accent(ui)),
+    ));
     let off_x = plot.left() + plot.width() * gate_ms / total_ms;
     ui.painter()
         .vline(off_x, plot.y_range(), Stroke::new(1.0, theme::MUTED));

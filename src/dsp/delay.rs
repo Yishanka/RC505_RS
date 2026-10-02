@@ -27,6 +27,9 @@ pub struct DelayDspState {
     hp_x: [f32; 2],
     fb_lp_l: f32,
     fb_lp_r: f32,
+    smoothing: f32,
+    lp_cache: (f32, f32),
+    hp_cache: (f32, f32),
 }
 
 impl DelayDspState {
@@ -47,6 +50,9 @@ impl DelayDspState {
             hp_x: [0.0; 2],
             fb_lp_l: 0.0,
             fb_lp_r: 0.0,
+            smoothing: smoothing_coeff(sr, 25.0),
+            lp_cache: (f32::NAN, 0.0),
+            hp_cache: (f32::NAN, 0.0),
         }
     }
 
@@ -56,6 +62,9 @@ impl DelayDspState {
             return;
         }
         self.sample_rate = sr;
+        self.smoothing = smoothing_coeff(sr, 25.0);
+        self.lp_cache.0 = f32::NAN;
+        self.hp_cache.0 = f32::NAN;
         let max_delay_samples = ((DELAY_TIME_MAX_MS / 1000.0) * sr).ceil() as usize + 2;
         self.buffer_l = vec![0.0; max_delay_samples.max(2)];
         self.buffer_r = vec![0.0; max_delay_samples.max(2)];
@@ -93,7 +102,7 @@ pub fn process_sample(
     let target_direct = p.direct.clamp(0.0, 1.0);
     let target_effect = p.effect.clamp(0.0, 1.0);
 
-    let smooth_coeff = smoothing_coeff(sr, 25.0);
+    let smooth_coeff = state.smoothing;
     state.smooth_time_samples += (target_time_samples - state.smooth_time_samples) * smooth_coeff;
     state.smooth_feedback += (target_feedback - state.smooth_feedback) * smooth_coeff;
     state.smooth_damp_hz += (target_damp_hz - state.smooth_damp_hz) * smooth_coeff;
@@ -106,13 +115,25 @@ pub fn process_sample(
     let delayed_l = read_interp(&state.buffer_l, state.write_idx as f32 - delay_samples);
     let delayed_r = read_interp(&state.buffer_r, state.write_idx as f32 - delay_samples);
 
-    let lp_alpha = one_pole_alpha(state.smooth_damp_hz, sr);
+    if state.lp_cache.0 != state.smooth_damp_hz {
+        state.lp_cache = (
+            state.smooth_damp_hz,
+            one_pole_alpha(state.smooth_damp_hz, sr),
+        );
+    }
+    let lp_alpha = state.lp_cache.1;
     state.fb_lp_l += (delayed_l - state.fb_lp_l) * lp_alpha;
     state.fb_lp_r += (delayed_r - state.fb_lp_r) * lp_alpha;
 
     let mut feedback = [state.fb_lp_l, state.fb_lp_r];
     if p.low_cut_hz > 0.0 {
-        let a = (-2.0 * std::f32::consts::PI * p.low_cut_hz.clamp(10.0, 1000.0) / sr).exp();
+        if state.hp_cache.0 != p.low_cut_hz {
+            state.hp_cache = (
+                p.low_cut_hz,
+                (-2.0 * std::f32::consts::PI * p.low_cut_hz.clamp(10.0, 1000.0) / sr).exp(),
+            );
+        }
+        let a = state.hp_cache.1;
         for ch in 0..2 {
             let x = feedback[ch];
             state.hp_y[ch] = a * (state.hp_y[ch] + x - state.hp_x[ch]);
@@ -153,9 +174,12 @@ fn read_interp(buffer: &[f32], read_pos: f32) -> f32 {
     }
     let len = buffer.len() as f32;
     let wrapped = read_pos.rem_euclid(len);
-    let idx0 = wrapped.floor() as usize;
+    // f32::rem_euclid can round a tiny negative position up to `len`.
+    // Normalize the integer index separately, retaining the original fraction.
+    let base = wrapped.floor();
+    let idx0 = base as usize % buffer.len();
     let idx1 = (idx0 + 1) % buffer.len();
-    let frac = wrapped - idx0 as f32;
+    let frac = wrapped - base;
     buffer[idx0] * (1.0 - frac) + buffer[idx1] * frac
 }
 
@@ -169,4 +193,60 @@ fn one_pole_alpha(cutoff_hz: f32, sample_rate: f32) -> f32 {
 fn smoothing_coeff(sample_rate: f32, time_ms: f32) -> f32 {
     let tau = (time_ms.max(1.0) / 1000.0).max(1.0 / sample_rate.max(1.0));
     (1.0 - (-1.0 / (sample_rate.max(1.0) * tau)).exp()).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn one_millisecond_bass_and_near_zero_read_position_remain_valid() {
+        let mut state = DelayDspState::new(48000.0);
+        let p = DelayParams {
+            time_ms: 1.0,
+            feedback: 0.95,
+            high_damp_hz: 8000.0,
+            direct: 1.0,
+            effect: 1.0,
+            low_cut_hz: 20.0,
+        };
+        for frame in 0..100_000 {
+            let bass = (frame as f32 * std::f32::consts::TAU * 50.0 / 48000.0).sin() * 0.9;
+            let (l, r) = process_sample(&mut state, p, 48000.0, bass, -bass);
+            assert!(l.is_finite() && r.is_finite());
+        }
+        let buffer = vec![0.25; 96002];
+        assert!((read_interp(&buffer, -0.000004) - 0.25).abs() < 1e-6);
+    }
+    #[test]
+    fn short_delay_automation_is_bounded_and_allocation_free() {
+        for sr in [8000.0, 44100.0, 48000.0, 96000.0, 192000.0] {
+            let mut state = DelayDspState::new(sr);
+            let count = crate::test_alloc::count(|| {
+                for n in 0..200_000 {
+                    let time_ms = match n / 10000 % 4 {
+                        0 => 2000.0,
+                        1 => 1.0,
+                        2 => 1.01,
+                        _ => 20.0,
+                    };
+                    let p = DelayParams {
+                        time_ms,
+                        feedback: 0.95,
+                        high_damp_hz: 8000.0,
+                        direct: 1.0,
+                        effect: 1.0,
+                        low_cut_hz: 0.0,
+                    };
+                    let input = if n < 100_000 {
+                        (n as f32 * 0.05).sin() * 0.95
+                    } else {
+                        0.0
+                    };
+                    let (l, r) = process_sample(&mut state, p, sr, input, -input);
+                    assert!(l.is_finite() && r.is_finite() && l.abs() <= 2.0 && r.abs() <= 2.0);
+                }
+            });
+            assert_eq!(count, 0);
+        }
+    }
 }

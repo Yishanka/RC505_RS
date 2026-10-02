@@ -157,7 +157,7 @@ pub struct TrackView {
 #[derive(Clone, Copy)]
 pub struct EngineView {
     pub metronome: bool,
-    pub output_wave: [f32; super::visual_meter::BARS],
+    pub output_spectrum: [f32; super::spectrum::BARS],
     pub frame: u64,
     pub elapsed: u64,
     pub running: bool,
@@ -172,7 +172,7 @@ impl Default for EngineView {
     fn default() -> Self {
         Self {
             metronome: false,
-            output_wave: [0.0; super::visual_meter::BARS],
+            output_spectrum: [0.0; super::spectrum::BARS],
             frame: 0,
             elapsed: 0,
             running: false,
@@ -763,7 +763,7 @@ impl RenderCore {
         });
         let view = EngineView {
             metronome: self.metronome,
-            output_wave: [0.0; super::visual_meter::BARS],
+            output_spectrum: [0.0; super::spectrum::BARS],
             frame: self.clock.frame,
             elapsed: self.clock.elapsed(),
             running: self.clock.origin.is_some(),

@@ -9,9 +9,12 @@ use eframe::egui::{self, Color32, Stroke};
 use std::sync::atomic::Ordering;
 
 pub fn draw(ui: &mut egui::Ui, app: &mut MyApp) {
-    let lang = crate::app_support::language::Language::current(ui.ctx());
     transport(ui, app);
     ui.add_space(6.0);
+    workspace(ui, app);
+}
+pub fn workspace(ui: &mut egui::Ui, app: &mut MyApp) {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
     if app.editor.expanded {
         egui::ScrollArea::vertical()
             .id_source("expanded")
@@ -34,13 +37,29 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp) {
         .id_source("performance")
         .show(ui, |ui| {
             ui.columns(2, |columns| {
-                fixed_panel(&mut columns[0], app, Focus::Left, |ui, app| left(ui, app));
+                fixed_panel(&mut columns[0], app, Focus::Left, |ui, app| {
+                    if app.player_open {
+                        super::replay_panel::track_details(ui, app);
+                    } else {
+                        left(ui, app);
+                    }
+                });
                 fixed_panel(&mut columns[1], app, Focus::Right, |ui, app| {
                     ui.horizontal(|ui| {
-                        ui.strong(lang.text("FX EDITOR"));
-                        theme::keycap(ui, "F8");
+                        ui.strong(if app.player_open {
+                            lang.choose("Recorded FX", "回放效果参数")
+                        } else {
+                            lang.text("FX EDITOR")
+                        });
+                        if !app.player_open {
+                            theme::keycap(ui, "F8");
+                        }
                     });
-                    editor::draw(ui, app, false);
+                    if app.player_open {
+                        super::replay_panel::parameter_details(ui, app);
+                    } else {
+                        editor::draw(ui, app, false);
+                    }
                 });
             });
             ui.add_space(8.0);
@@ -65,7 +84,7 @@ fn fixed_panel(
     let frame = theme::card().inner_margin(12.0).stroke(Stroke::new(
         1.0,
         if app.focus == focus {
-            theme::ACCENT
+            theme::accent(ui)
         } else {
             Color32::from_rgb(43, 53, 67)
         },
@@ -500,11 +519,12 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
             let mut visual = app.visualizer_enabled;
             if nav::register(ui.checkbox(
                 &mut visual,
-                lang.choose("Animated output background", "输出音柱背景"),
+                lang.choose("Output spectrum background", "输出频谱背景"),
             ))
             .changed()
             {
                 app.visualizer_enabled = visual;
+                app.send(crate::engine::audio_io::Control::Spectrum(visual));
                 if !app.read_only {
                     let mut pref = crate::app_support::launcher_config::load().unwrap_or_default();
                     pref.visualizer_enabled = visual;
@@ -515,6 +535,14 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
 
         LeftPage::Session => {
             ui.strong(app.project_name());
+            if nav::button(
+                ui,
+                lang.choose("Manage projects…", "工程管理（返回选择页）"),
+            )
+            .clicked()
+            {
+                app.back_to_projects();
+            }
             theme::control_row(ui, |ui| {
                 if nav::button(ui, lang.text("Save configuration")).clicked() {
                     app.save_now();
@@ -588,9 +616,9 @@ fn rack(ui: &mut egui::Ui, app: &mut MyApp, track_fx: bool) {
         ui.horizontal(|ui| {
             ui.colored_label(
                 if track_fx {
-                    theme::TRACK
+                    theme::secondary(ui)
                 } else {
-                    theme::ACCENT
+                    theme::accent(ui)
                 },
                 if track_fx {
                     lang.text("TRACK FX")
@@ -599,7 +627,11 @@ fn rack(ui: &mut egui::Ui, app: &mut MyApp, track_fx: bool) {
                 },
             );
             for i in 0..4 {
-                ui.selectable_value(&mut bank, i, format!("{}", i + 1));
+                if app.player_open {
+                    let _ = ui.selectable_label(bank == i, format!("{}", i + 1));
+                } else {
+                    ui.selectable_value(&mut bank, i, format!("{}", i + 1));
+                }
             }
         });
         if track_fx {
@@ -628,6 +660,7 @@ fn rack(ui: &mut egui::Ui, app: &mut MyApp, track_fx: bool) {
                         ),
                     )
                     .clicked()
+                    && !app.player_open
                 {
                     app.editor.select(target);
                 }
@@ -638,6 +671,20 @@ fn rack(ui: &mut egui::Ui, app: &mut MyApp, track_fx: bool) {
                     &mut app.config.input_fx.banks[bank].slots[slot].is_enabled
                 };
                 column.horizontal(|ui| {
+                    if app.player_open {
+                        ui.colored_label(
+                            if *enabled {
+                                theme::accent(ui)
+                            } else {
+                                theme::MUTED
+                            },
+                            lang.choose(
+                                if *enabled { "● On" } else { "○ Off" },
+                                if *enabled { "● 启用" } else { "○ 关闭" },
+                            ),
+                        );
+                        return;
+                    }
                     ui.add_enabled(
                         name != "Empty",
                         egui::Checkbox::new(enabled, lang.text("On")),
@@ -653,7 +700,14 @@ fn rack(ui: &mut egui::Ui, app: &mut MyApp, track_fx: bool) {
                 });
             }
         });
-        theme::caption(ui, lang.text("Shift: hold effect · Alt: bank · Ctrl: edit"));
+        theme::caption(
+            ui,
+            if app.player_open {
+                lang.choose("Recorded FX switches", "录制时的效果开关")
+            } else {
+                lang.text("Shift: hold effect · Alt: bank · Ctrl: edit")
+            },
+        );
     });
 }
 fn track(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
@@ -664,7 +718,7 @@ fn track(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
         Mode::Empty => (lang.text("EMPTY"), theme::MUTED),
         Mode::Recording => (lang.text("RECORDING"), Color32::from_rgb(255, 109, 118)),
         Mode::Overdub => (lang.text("OVERDUB"), Color32::from_rgb(255, 196, 106)),
-        Mode::Playing => (lang.text("PLAYING"), theme::ACCENT),
+        Mode::Playing => (lang.text("PLAYING"), theme::accent(ui)),
         Mode::Stopped => (lang.text("STOPPED"), theme::MUTED),
     };
     let recording = matches!(view.mode, Mode::Recording | Mode::Overdub) && app.view.running;
@@ -674,7 +728,7 @@ fn track(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
         app.config.beat_config.current_bpm(),
     );
     let border = if selected {
-        theme::TRACK
+        theme::secondary(ui)
     } else {
         Color32::from_gray(48)
     };
@@ -699,6 +753,7 @@ fn track(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
                     egui::RichText::new(format!("{} {}", lang.text("Track"), index + 1)).strong(),
                 )
                 .clicked()
+                && !app.player_open
             {
                 app.track_sel = Some(index);
             }
@@ -755,6 +810,39 @@ fn track(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
                 ui,
                 format!("{:.2} s", view.frames as f64 / app.view.sample_rate as f64),
             );
+            if app.player_open {
+                let level = crate::app::faders::decibels(app.config.track_levels[index]);
+                ui.add(
+                    egui::ProgressBar::new((level + 60.0) / 60.0)
+                        .desired_height(10.0)
+                        .fill(color),
+                );
+                ui.label(format!("{level:.1} dB"));
+                let option = &app.config.track_options[index];
+                theme::caption(
+                    ui,
+                    lang.choose(
+                        if option.reverse { "Reverse" } else { "Forward" },
+                        if option.reverse {
+                            "倒放"
+                        } else {
+                            "正向播放"
+                        },
+                    ),
+                );
+                theme::caption(
+                    ui,
+                    lang.choose(
+                        if option.one_shot { "One shot" } else { "Loop" },
+                        if option.one_shot {
+                            "单次播放"
+                        } else {
+                            "循环播放"
+                        },
+                    ),
+                );
+                return;
+            }
             ui.spacing_mut().slider_width = (ui.available_width() - 4.0).max(40.0);
             let mut level = crate::app::faders::decibels(app.config.track_levels[index]);
             if ui

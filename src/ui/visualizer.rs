@@ -1,4 +1,4 @@
-use crate::engine::visual_meter::BARS;
+use crate::engine::spectrum::BARS;
 use eframe::egui;
 pub fn draw(ui: &egui::Ui, bars: &[f32; BARS]) {
     let rect = ui.max_rect();
@@ -13,10 +13,9 @@ pub fn draw(ui: &egui::Ui, bars: &[f32; BARS]) {
             egui::pos2(rect.left() + (i as f32 + 0.5) * width, center),
             egui::vec2((width - 3.0).max(1.0), height),
         );
-        ui.painter().rect_filled(
-            bar,
-            2.0,
-            egui::Color32::from_rgba_unmultiplied(85, 221, 190, 26),
-        );
+        ui.painter().rect_filled(bar, 2.0, {
+            let color = super::theme::accent(ui);
+            egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 26)
+        });
     }
 }

@@ -1,7 +1,75 @@
 use eframe::egui::{self, Color32};
 
-pub const ACCENT: Color32 = Color32::from_rgb(85, 221, 190);
-pub const TRACK: Color32 = Color32::from_rgb(139, 167, 255);
+use crate::app_support::appearance::ThemeColor;
+pub fn accent(ui: &egui::Ui) -> Color32 {
+    ui.visuals().selection.stroke.color
+}
+pub fn secondary(ui: &egui::Ui) -> Color32 {
+    ui.visuals().widgets.hovered.bg_stroke.color
+}
+pub fn set_palette(ctx: &egui::Context, color: ThemeColor) {
+    let key = egui::Id::new("theme-color");
+    if ctx.data(|d| d.get_temp::<ThemeColor>(key)) == Some(color) {
+        return;
+    }
+    ctx.data_mut(|d| d.insert_temp(key, color));
+    let (main, other) = match color {
+        ThemeColor::Mint => (
+            Color32::from_rgb(125, 194, 175),
+            Color32::from_rgb(160, 177, 214),
+        ),
+        ThemeColor::Rose => (
+            Color32::from_rgb(208, 156, 179),
+            Color32::from_rgb(180, 164, 213),
+        ),
+        ThemeColor::Ember => (
+            Color32::from_rgb(219, 157, 132),
+            Color32::from_rgb(209, 182, 143),
+        ),
+    };
+    let mut style = (*ctx.style()).clone();
+    style.visuals.selection.bg_fill = main.gamma_multiply(0.32);
+    style.visuals.selection.stroke = egui::Stroke::new(1.0, main);
+    style.visuals.widgets.active.bg_fill = main.gamma_multiply(0.4);
+    style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, main);
+    style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, other);
+    ctx.set_style(style);
+}
+pub fn theme_switch(ui: &mut egui::Ui, color: &mut ThemeColor) -> bool {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
+    let before = *color;
+    ui.scope(|ui| {
+        ui.style_mut().wrap = Some(false);
+        let title = match color {
+            ThemeColor::Mint => lang.choose("Mint", "薄荷绿"),
+            ThemeColor::Rose => lang.choose("Rose", "雾粉"),
+            ThemeColor::Ember => lang.choose("Ember", "橙红"),
+        };
+        ui.menu_button(
+            format!("{} · {title}", lang.choose("Theme", "主题")),
+            |ui| {
+                for (value, en, zh) in [
+                    (ThemeColor::Mint, "Mint", "薄荷绿"),
+                    (ThemeColor::Rose, "Rose", "雾粉"),
+                    (ThemeColor::Ember, "Ember", "橙红"),
+                ] {
+                    if ui
+                        .selectable_value(color, value, lang.choose(en, zh))
+                        .clicked()
+                    {
+                        ui.close_menu();
+                    }
+                }
+            },
+        );
+    });
+    if *color != before {
+        set_palette(ui.ctx(), *color);
+        true
+    } else {
+        false
+    }
+}
 pub const MUTED: Color32 = Color32::from_rgb(139, 153, 171);
 pub const PANEL: Color32 = Color32::from_rgb(25, 31, 41);
 pub const BACKGROUND: Color32 = Color32::from_rgb(15, 20, 28);
@@ -14,12 +82,9 @@ pub fn apply(ctx: &egui::Context) {
     style.visuals.override_text_color = Some(Color32::from_rgb(215, 224, 236));
     style.visuals.extreme_bg_color = BACKGROUND;
     style.visuals.selection.bg_fill = Color32::from_rgb(37, 94, 86);
-    style.visuals.selection.stroke = egui::Stroke::new(1.0, ACCENT);
     style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(37, 45, 58);
     style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(49, 65, 77);
     style.visuals.widgets.active.bg_fill = Color32::from_rgb(42, 101, 94);
-    style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, ACCENT);
-    style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, TRACK);
     style.visuals.widgets.inactive.rounding = egui::Rounding::same(6.0);
     style.visuals.widgets.hovered.rounding = egui::Rounding::same(6.0);
     style.visuals.widgets.active.rounding = egui::Rounding::same(6.0);
@@ -43,6 +108,8 @@ pub fn apply(ctx: &egui::Context) {
     style.spacing.slider_width = 180.0;
     style.spacing.scroll = egui::style::ScrollStyle::solid();
     ctx.set_style(style);
+    ctx.data_mut(|d| d.remove::<ThemeColor>(egui::Id::new("theme-color")));
+    set_palette(ctx, ThemeColor::Mint);
     for path in [r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\simhei.ttf"] {
         if let Ok(bytes) = std::fs::read(path) {
             let mut fonts = egui::FontDefinitions::default();
@@ -93,7 +160,7 @@ pub fn brand(ui: &mut egui::Ui) {
         egui::RichText::new("RC505 RS")
             .size(23.0)
             .strong()
-            .color(ACCENT),
+            .color(accent(ui)),
     );
 }
 
@@ -265,7 +332,7 @@ pub fn action(ui: &mut egui::Ui, icon: Icon, label: &str, key: &str) -> egui::Re
                         center + egui::vec2(6.0, 0.0),
                         center + egui::vec2(-5.0, 6.0),
                     ],
-                    ACCENT,
+                    accent(ui),
                     egui::Stroke::NONE,
                 ));
             }

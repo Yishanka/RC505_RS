@@ -10,10 +10,16 @@ use crate::{
 
 pub fn configure(app: &mut MyApp, mode: &str) {
     let mode = mode.strip_suffix("-en").unwrap_or(mode);
+    if mode.contains("rose") {
+        app.theme = crate::app_support::appearance::ThemeColor::Rose;
+    }
+    if mode.contains("ember") {
+        app.theme = crate::app_support::appearance::ThemeColor::Ember;
+    }
     if std::env::args().any(|a| a.ends_with("-en")) {
         app.language = crate::app_support::language::Language::English;
     }
-    if mode == "projects" {
+    if mode.starts_with("projects") {
         return;
     }
     app.active_project_idx = Some(0);
@@ -87,14 +93,66 @@ pub fn configure(app: &mut MyApp, mode: &str) {
         "envelope" => EditorPage::Envelope,
         _ => EditorPage::Sound,
     };
+    if mode.starts_with("playback") {
+        let mut view = crate::engine::core::EngineView::default();
+        view.running = true;
+        view.elapsed = 48000;
+        view.sample_rate = 48000;
+        for (i, track) in view.tracks.iter_mut().enumerate().take(3) {
+            track.mode = if i == 1 {
+                crate::engine::core::Mode::Overdub
+            } else {
+                crate::engine::core::Mode::Playing
+            };
+            track.frames = 96000;
+            track.cursor = 24000;
+            track.wave = std::array::from_fn(|x| ((x as f32 * 0.39 + i as f32).sin() * 0.7).abs());
+        }
+        app.config.input_fx.banks[0].slots[0].is_enabled = true;
+        app.config.track_levels[0] = 0.55;
+        let visuals = crate::replay::ReplayVisuals {
+            name: "BASS SESSION / 01".into(),
+            sample_rate: 48000,
+            frames: 192000,
+            initial: crate::project::data_from_config(&app.config),
+            configs: Vec::new(),
+            views: vec![crate::replay::VisualFrame {
+                frame: 0,
+                view,
+                last_action: Some((0, crate::engine::core::Action::Trigger(1))),
+            }],
+        };
+        app.replay_panel = Some(Box::new(super::replay_panel::ReplayPanel::new(
+            std::sync::Arc::new(visuals),
+        )));
+        app.player_open = true;
+        app.editor.expanded = false;
+    }
+    if mode.starts_with("replays") {
+        app.replay_list = vec![(
+            std::path::PathBuf::from("var/preview-replay"),
+            "BASS SESSION / 测试回放：一段较长的名字".into(),
+        )];
+    }
+    if mode.starts_with("draft") {
+        app.draft = Some(std::path::PathBuf::from("var/preview-draft"));
+        app.editor.expanded = false;
+        app.take_name = "BASS SESSION / 01".into();
+    }
 }
 
 pub use super::capture::capture;
 
 /// UI-only fixture; it does not pretend to record real audio.
 pub fn sample_visuals(app: &mut MyApp, mode: &str) {
+    if mode.starts_with("playback") {
+        app.audio
+            .diagnostics
+            .player_frame
+            .store(24000, std::sync::atomic::Ordering::Relaxed);
+    }
     if mode.starts_with("performance-recording") {
-        app.view.output_wave = std::array::from_fn(|i| ((i as f32 * 0.29).sin() * 0.7).abs());
+        app.view.output_spectrum = std::array::from_fn(|i| ((i as f32 * 0.29).sin() * 0.7).abs());
     }
     if !mode.starts_with("performance-recording") {
         return;

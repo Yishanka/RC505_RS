@@ -4,6 +4,7 @@ pub mod faders;
 mod keyboard;
 mod monitoring;
 mod performance_keys;
+mod replay_management;
 mod workflow;
 use crate::{
     config::AppConfig,
@@ -51,7 +52,7 @@ pub struct HeldFx {
     pub previous: bool,
 }
 pub enum JobResult {
-    PlayerReady(Vec<[f32; 2]>),
+    PlayerReady(Vec<[f32; 2]>, Arc<crate::replay::ReplayVisuals>),
     Update(crate::updater::Release),
     UpdateDownloaded(PathBuf),
     Loaded {
@@ -67,6 +68,8 @@ pub enum JobResult {
     Error(String),
 }
 pub struct MyApp {
+    pub replay_panel: Option<Box<ui::replay_panel::ReplayPanel>>,
+    pub theme: crate::app_support::appearance::ThemeColor,
     pub audition_target: Option<(crate::presets::FxTarget, usize)>,
     pub calibration_open: bool,
     pub loopback_connected: bool,
@@ -136,6 +139,7 @@ impl MyApp {
     pub fn new() -> Self {
         let launch = crate::app_support::launcher_config::load();
         let language = launch.as_ref().map(|v| v.language).unwrap_or_default();
+        let theme = launch.as_ref().map(|v| v.theme).unwrap_or_default();
         let guard = launch.as_ref().is_some_and(|v| v.calibration_guard);
         let visualizer_enabled = launch.as_ref().is_none_or(|v| v.visualizer_enabled);
         let buffer_frames = launch.as_ref().map(|v| v.buffer_frames()).unwrap_or(128);
@@ -170,6 +174,7 @@ impl MyApp {
         if guard {
             let _ = audio.send(Control::CalibrationHold(true));
         }
+        let _ = audio.send(Control::Spectrum(visualizer_enabled));
         let root = crate::app_support::paths::projects_dir();
         let _ = std::fs::create_dir_all(&root);
         let lock = std::fs::OpenOptions::new()
@@ -194,6 +199,8 @@ impl MyApp {
             .and_then(|s| projects.iter().position(|p| p.name == s.last_project))
             .unwrap_or(0);
         Self {
+            replay_panel: None,
+            theme,
             audition_target: None,
             calibration_open: guard,
             loopback_connected: false,
@@ -276,6 +283,13 @@ impl MyApp {
             || self.audio.diagnostics.calibrating.load(Ordering::Relaxed)
     }
     pub fn language_switch(&mut self, ui: &mut egui::Ui) {
+        if ui::theme::theme_switch(ui, &mut self.theme) && !self.read_only {
+            let mut preferences = crate::app_support::launcher_config::load().unwrap_or_default();
+            preferences.theme = self.theme;
+            if let Err(e) = crate::app_support::launcher_config::save(&preferences) {
+                self.status = e.to_string();
+            }
+        }
         if ui::navigation::register(ui::theme::language_switch(ui, &mut self.language)).changed()
             && !self.read_only
         {
@@ -380,6 +394,7 @@ impl MyApp {
         self.send(Control::Player(None));
         self.stop_audition();
         self.player_open = false;
+        self.replay_panel = None;
         self.send(Control::Action(crate::engine::core::Action::Panic));
         self.send(Control::Enable(false));
         self.previewing = false;
@@ -460,8 +475,11 @@ impl MyApp {
             self.job = None;
             self.engine_transition = false;
             match result {
-                JobResult::PlayerReady(samples) => {
+                JobResult::PlayerReady(samples, visuals) => {
                     if self.replay_autoplay && !self.show_save_prompt {
+                        self.replay_panel =
+                            Some(Box::new(ui::replay_panel::ReplayPanel::new(visuals)));
+                        self.replay_browser = false;
                         self.player_open = self.send(Control::Player(Some(Box::new(
                             crate::engine::audio_io::Player {
                                 samples,
@@ -626,6 +644,7 @@ impl MyApp {
             self.focus_panel(ctx, Focus::Performance);
         }
         let lang = self.language;
+        ui::theme::set_palette(ctx, self.theme);
         self.language.apply(ctx);
         #[cfg(debug_assertions)]
         if let Some(mode) =
@@ -656,11 +675,12 @@ impl MyApp {
         self.handle_input(ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.visualizer_enabled {
-                ui::visualizer::draw(ui, &self.view.output_wave);
+                ui::visualizer::draw(ui, &self.view.output_spectrum);
             }
             ui.set_enabled(!self.show_save_prompt);
             match self.app_state {
                 AppState::Init => ui::init::draw_init(ui, self),
+                _ if self.player_open => ui::replay_panel::draw(ui, self),
                 _ => ui::performance::draw(ui, self),
             }
         });

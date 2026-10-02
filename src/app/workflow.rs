@@ -184,6 +184,7 @@ impl MyApp {
             }
         };
         self.audio = audio;
+        self.send(Control::Spectrum(self.visualizer_enabled));
         if self.audio.online {
             self.config.system_config.output_device.value =
                 self.audio.curr_output_name().to_owned();
@@ -363,7 +364,7 @@ impl MyApp {
             Err(e) => self.status = e.to_string(),
         }
     }
-    pub fn discard_take(&mut self) {
+    pub fn keep_take(&mut self) {
         // Keep the valid draft in the on-disk replay browser for crash recovery;
         // discarding here dismisses the prompt, it never recursively deletes data.
         self.draft = None;
@@ -417,6 +418,7 @@ impl MyApp {
             return;
         };
         let path = result.wav.clone();
+        let visuals = result.visuals.clone();
         let rate = self.audio.config.sample_rate.0;
         let (tx, rx) = mpsc::channel();
         self.job = Some(rx);
@@ -429,19 +431,34 @@ impl MyApp {
                     reader.spec() == crate::session::wav_spec(source_rate),
                     "Invalid rendered WAV format"
                 );
-                let samples = reader.samples::<f32>().collect::<Result<Vec<_>, _>>()?;
                 anyhow::ensure!(
-                    samples.iter().all(|v| v.is_finite()),
-                    "Invalid rendered samples"
+                    source_rate == visuals.sample_rate
+                        && reader.duration() as u64 == visuals.frames,
+                    "Rendered audio no longer matches the replay timeline"
                 );
-                let frames = samples
-                    .chunks_exact(2)
-                    .map(|v| [v[0], v[1]])
-                    .collect::<Vec<_>>();
-                Ok(crate::session::resample_frames(&frames, source_rate, rate))
+                let mut frames = Vec::with_capacity(reader.duration() as usize);
+                let mut samples = reader.samples::<f32>();
+                while let Some(left) = samples.next() {
+                    let frame = [
+                        left?,
+                        samples
+                            .next()
+                            .ok_or_else(|| anyhow::anyhow!("Truncated stereo audio"))??,
+                    ];
+                    anyhow::ensure!(
+                        frame.iter().all(|v| v.is_finite()),
+                        "Invalid rendered samples"
+                    );
+                    frames.push(frame);
+                }
+                if source_rate == rate {
+                    Ok(frames)
+                } else {
+                    Ok(crate::session::resample_frames(&frames, source_rate, rate))
+                }
             })();
             let _ = tx.send(match result {
-                Ok(samples) => JobResult::PlayerReady(samples),
+                Ok(samples) => JobResult::PlayerReady(samples, visuals),
                 Err(e) => JobResult::Error(e.to_string()),
             });
         });
@@ -450,6 +467,7 @@ impl MyApp {
         self.replay_autoplay = false;
         self.send(Control::Player(None));
         self.player_open = false;
+        self.replay_panel = None;
     }
     pub fn import_rendered(&mut self, new_project: bool) {
         if self.busy()

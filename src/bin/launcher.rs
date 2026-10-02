@@ -86,6 +86,7 @@ impl Launcher {
 impl eframe::App for Launcher {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.config.language.apply(ctx);
+        theme::set_palette(ctx, self.config.theme);
         let lang = crate::app_support::language::Language::current(ctx);
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
         #[cfg(debug_assertions)]
@@ -98,6 +99,7 @@ impl eframe::App for Launcher {
         }
         egui::CentralPanel::default().show(ctx,|ui|{
             ui.add_space(16.0);ui.horizontal(|ui|{theme::brand(ui);theme::caption(ui,lang.text("AUDIO SETUP"));
+            if theme::theme_switch(ui,&mut self.config.theme){let _=app_support::launcher_config::save(&self.config);}
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if theme::language_switch(ui, &mut self.config.language).changed() {
                         if let Err(error) = app_support::launcher_config::save(&self.config) { self.status=error.to_string(); }

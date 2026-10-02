@@ -47,7 +47,7 @@ pub fn draw_init(ui: &mut egui::Ui, app: &mut MyApp) {
                         }
                     });
                 ui.separator();
-                ui.horizontal(|ui| {
+                theme::control_row(ui, |ui| {
                     if ui
                         .add_enabled(
                             !app.busy() && !app.projects.is_empty(),
@@ -67,21 +67,30 @@ pub fn draw_init(ui: &mut egui::Ui, app: &mut MyApp) {
                             app.project_name_mode = Some(ProjectNameMode::Rename);
                         }
                     }
-                    ui.menu_button(lang.text("Manage"), |ui| {
-                        if ui.button(lang.text("Move selected to Trash")).clicked() {
+                    ui.add_enabled_ui(!app.read_only && !app.busy(), |ui| {
+                        if theme::action(
+                            ui,
+                            theme::Icon::Trash,
+                            lang.choose("Delete project", "删除工程"),
+                            "",
+                        )
+                        .on_hover_text(lang.choose(
+                            "Moves the selected project and its audio into project trash.",
+                            "将所选工程及音频移入工程回收站，可恢复。",
+                        ))
+                        .clicked()
+                        {
                             app.trash_project();
-                            ui.close_menu();
                         }
                         if ui.button(lang.text("Restore last deleted")).clicked() {
                             app.restore_project();
-                            ui.close_menu();
                         }
                     });
                 });
             });
             ui.add_space(12.0);
             ui.add(egui::Label::new(lang.text(&app.status)).wrap(true));
-            theme::caption(ui, app.audio_status());
+            theme::caption(ui, lang.text(&app.audio_status()));
             if let Some(mode) = app.project_name_mode {
                 egui::Window::new(if mode == ProjectNameMode::Add {
                     lang.text("New project")

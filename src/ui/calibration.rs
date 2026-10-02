@@ -18,7 +18,7 @@ pub fn draw(ctx: &egui::Context, app: &mut MyApp) {
                 ui.strong(lang.choose("1. Mute monitoring before connecting a cable","1. 先静音，再接线"));
                 ui.label(lang.choose("Use line-level output and input. A microphone array or headphones held near a mic are not this measurement path. Disable hardware direct monitoring.","需要线路输出和线路输入。内置麦克风阵列、将耳机靠近麦克风都不是这里的测量路径。请关闭声卡硬件直通监听。"));
                 let reason=app.calibration_reason();
-                ui.colored_label(if reason.is_none(){super::theme::ACCENT}else{egui::Color32::YELLOW},lang.choose(if reason.is_none(){"Software ready; confirm physical loopback next."}else{"Not ready to test:"},if reason.is_none(){"软件条件已满足，仍需确认实际回环接线。"}else{"暂不能测试："}));
+                ui.colored_label(if reason.is_none(){super::theme::accent(ui)}else{egui::Color32::YELLOW},lang.choose(if reason.is_none(){"Software ready; confirm physical loopback next."}else{"Not ready to test:"},if reason.is_none(){"软件条件已满足，仍需确认实际回环接线。"}else{"暂不能测试："}));
                 if let Some(reason)=reason {ui.label(lang.text(reason));}
                 if ui.add_enabled(reason.is_none(),egui::Button::new(lang.choose("Prepare test — mute monitoring","准备测试：静音监听"))).clicked(){app.prepare_calibration();}
             } else {

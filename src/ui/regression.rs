@@ -202,7 +202,29 @@ pub fn run() {
         app.tracks_stopped(),
         "Clock alone does not make stopped tracks busy"
     );
+    super::preview::configure(&mut app, "playback-rose");
+    let before = serde_json::to_vec(&crate::project::data_from_config(&app.config)).unwrap();
+    for _ in 0..4 {
+        frame(&ctx, &mut app, &mut time, vec![]);
+    }
+    assert_eq!(
+        before,
+        serde_json::to_vec(&crate::project::data_from_config(&app.config)).unwrap(),
+        "Replay panel must not change live configuration"
+    );
+    press(&ctx, &mut app, &mut time, Key::ArrowDown, Modifiers::NONE);
+    press(&ctx, &mut app, &mut time, Key::Escape, Modifiers::NONE);
+    assert!(!app.player_open && app.replay_panel.is_none());
     app.app_state = AppState::Init;
+    app.active_project_idx = None;
+    let count = app.projects.len();
+    let identity = app.projects[0].file.clone();
+    app.sel_project_idx = 0;
+    app.trash_project();
+    assert_eq!(app.projects.len(), count - 1);
+    app.restore_project();
+    assert_eq!(app.projects.len(), count);
+    assert!(app.projects.iter().any(|p| p.file == identity));
     app.project_name_mode = Some(ProjectNameMode::Add);
     frame(&ctx, &mut app, &mut time, vec![]);
     press(&ctx, &mut app, &mut time, Key::Escape, Modifiers::NONE);
