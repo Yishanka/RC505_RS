@@ -39,6 +39,63 @@ impl Language {
     }
 }
 const TRANSLATIONS: &[(&str, &str)] = &[
+    (
+        "Connect audio before testing",
+        "音频未连接，请先检查设备并重新连接",
+    ),
+    (
+        "Read-only editor cannot persist the monitoring safety guard",
+        "当前是只读实例，无法保存监听保护状态",
+    ),
+    ("Finish replay recording first", "请先结束回放录制"),
+    (
+        "Stop the player and audition first",
+        "请先关闭回放播放器并停止独立试听",
+    ),
+    (
+        "Stop the performance and all five tracks first",
+        "请先停止演出和所有轨道",
+    ),
+    ("Wait for the current operation", "请等待当前操作完成"),
+    (
+        "Disconnect the loopback cable and restore monitoring first",
+        "请先拔掉回环线并恢复监听",
+    ),
+    ("Connect audio before auditioning", "请先连接音频设备再试听"),
+    ("Close the replay player first", "请先关闭回放播放器"),
+    (
+        "Add notes to the piano roll first",
+        "请先在钢琴卷帘中添加音符",
+    ),
+    (
+        "Record track audio before auditioning its step filter",
+        "请先录入轨道音频，再试听步进滤波",
+    ),
+    (
+        "Save the replay or keep it as a draft first",
+        "请先保存回放或选择保留为草稿",
+    ),
+    (
+        "Replay recording is starting or finishing",
+        "回放正在准备或收尾，请稍候",
+    ),
+    ("This editor is read-only", "当前编辑器为只读实例"),
+    (
+        "Connect audio before recording a replay",
+        "请先连接音频设备再录制回放",
+    ),
+    (
+        "Stop all five tracks before recording a replay",
+        "请先停止五条轨道，再录制回放",
+    ),
+    (
+        "Finish track recording or overdub before ending the replay",
+        "请先结束轨道录音或叠录，再结束回放录制",
+    ),
+    (
+        "Prepare and confirm the loopback cable first",
+        "请先进入静音准备并确认回环接线",
+    ),
     ("Sin", "正弦波"),
     ("Sqr", "方波"),
     ("Tri", "三角波"),
@@ -173,6 +230,10 @@ const TRANSLATIONS: &[(&str, &str)] = &[
         "0 小节为手动结束；倒放或单次播放时不支持叠录",
     ),
     ("Undo", "撤销"),
+    (
+        "Hold Delete for 0.75 s or double-press within 350 ms. Clear can be undone from track history.",
+        "长按 Delete 0.75 秒或在 350 毫秒内双击。可用轨道撤销恢复清空前的音频。",
+    ),
     ("Redo", "重做"),
     ("Clear audio", "清空音频"),
     (

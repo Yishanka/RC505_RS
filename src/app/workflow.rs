@@ -65,6 +65,7 @@ impl MyApp {
                                 .options
                                 .push(target.name.clone());
                         }
+                        self.loopback_connected = false;
                         self.config.calibration = None;
                         self.measurement = None;
                         self.status = format!(
@@ -88,6 +89,7 @@ impl MyApp {
             Err(error) => {
                 self.audio.park_output();
                 self.output_endpoint_id.clear();
+                self.loopback_connected = false;
                 self.config.calibration = None;
                 self.measurement = None;
                 self.status = format!(
@@ -140,6 +142,14 @@ impl MyApp {
         }
     }
     pub fn reconnect(&mut self) {
+        if self.calibration_held() {
+            self.status = self
+                .language
+                .text("Disconnect the loopback cable and restore monitoring first")
+                .into();
+            return;
+        }
+        self.stop_audition();
         if self.busy() || !self.stopped() || self.taking() {
             return;
         }
@@ -178,6 +188,7 @@ impl MyApp {
             self.config.system_config.output_device.value =
                 self.audio.curr_output_name().to_owned();
         }
+        self.loopback_connected = false;
         self.config.calibration = None;
         self.measurement = None;
         self.engine_transition = true;
@@ -282,18 +293,8 @@ impl MyApp {
         }
     }
     pub fn start_take(&mut self) {
-        if self.busy()
-            || self.taking()
-            || self.draft.is_some()
-            || self.read_only
-            || !self.audio.online
-        {
-            return;
-        }
-        if !self.stopped() {
-            self.status =
-                "Stop all tracks before starting a replay take. Existing loops will be retained."
-                    .into();
+        if let Some(reason) = self.take_block_reason() {
+            self.status = self.language.text(reason).into();
             return;
         }
         let Some(entry) = self
@@ -310,6 +311,7 @@ impl MyApp {
         let mut core = Box::new(RenderCore::new(sr));
         core.configure(&mut Parameters::from_config(&self.config, sr));
         let command = Control::BeginTake {
+            retired_audition: None,
             core,
             snapshot: Box::new(AudioSnapshot::empty(sr)),
             root: root
@@ -318,7 +320,8 @@ impl MyApp {
             project_id: entry.file,
             data: project::data_from_config(&self.config),
         };
-        self.send(command);
+        self.take_pending = self.send(command);
+        self.take_ending = false;
         self.status = "Replay armed: perform with track and FX controls.".into();
     }
     pub fn finish_take(&mut self) {
@@ -334,6 +337,7 @@ impl MyApp {
         }
         if self.taking() && !self.take_pending {
             self.take_pending = self.send(Control::EndTake);
+            self.take_ending = self.take_pending;
             self.status = "Finalizing replay input and checksums...".into();
         }
     }
@@ -341,9 +345,16 @@ impl MyApp {
         let Some(path) = self.draft.as_ref() else {
             return;
         };
+        let previous_path = path.clone();
         match crate::replay::save_as(path, &self.take_name) {
             Ok(path) => {
                 self.draft = None;
+                if let Some((root, result)) = &mut self.rendered {
+                    if *root == previous_path {
+                        *root = path.clone();
+                        result.name = self.take_name.trim().into();
+                    }
+                }
                 self.status = format!("Replay saved: {}", path.display());
                 if let Some(i) = self.active_project_idx {
                     self.replay_list = crate::replay::list(&self.projects[i]);
@@ -362,6 +373,7 @@ impl MyApp {
         }
     }
     pub fn render_replay(&mut self, root: PathBuf) {
+        self.replay_autoplay = false;
         if self.busy() || self.taking() {
             return;
         }
@@ -385,42 +397,67 @@ impl MyApp {
         });
     }
     pub fn play_rendered(&mut self) {
-        if !self.stopped() || self.taking() || !self.audio.online {
+        if self.busy() {
             return;
         }
+        if !self.tracks_stopped() || self.taking() || !self.audio.online || self.calibration_held()
+        {
+            self.status = self
+                .language
+                .choose(
+                    "Stop tracks and restore monitoring before replay playback.",
+                    "请先停止五轨、连接音频设备并恢复监听，再播放回放。",
+                )
+                .into();
+            return;
+        }
+        self.stop_audition();
+        self.replay_autoplay = true;
         let Some((_, result)) = &self.rendered else {
             return;
         };
-        let loaded = (|| -> anyhow::Result<Vec<[f32; 2]>> {
-            let mut reader = hound::WavReader::open(&result.wav)?;
-            let source_rate = reader.spec().sample_rate;
-            let values = reader.samples::<f32>().collect::<Result<Vec<_>, _>>()?;
-            let frames: Vec<_> = values.chunks_exact(2).map(|f| [f[0], f[1]]).collect();
-            Ok(crate::session::resample_frames(
-                &frames,
-                source_rate,
-                self.audio.config.sample_rate.0,
-            ))
-        })();
-        match loaded {
-            Ok(samples) => {
-                self.player_open = self.send(Control::Player(Some(Box::new(
-                    crate::engine::audio_io::Player {
-                        samples,
-                        cursor: 0,
-                        playing: false,
-                    },
-                ))));
-            }
-            Err(e) => self.status = e.to_string(),
-        }
+        let path = result.wav.clone();
+        let rate = self.audio.config.sample_rate.0;
+        let (tx, rx) = mpsc::channel();
+        self.job = Some(rx);
+        self.engine_transition = true;
+        std::thread::spawn(move || {
+            let result = (|| -> anyhow::Result<Vec<[f32; 2]>> {
+                let mut reader = hound::WavReader::open(path)?;
+                let source_rate = reader.spec().sample_rate;
+                anyhow::ensure!(
+                    reader.spec() == crate::session::wav_spec(source_rate),
+                    "Invalid rendered WAV format"
+                );
+                let samples = reader.samples::<f32>().collect::<Result<Vec<_>, _>>()?;
+                anyhow::ensure!(
+                    samples.iter().all(|v| v.is_finite()),
+                    "Invalid rendered samples"
+                );
+                let frames = samples
+                    .chunks_exact(2)
+                    .map(|v| [v[0], v[1]])
+                    .collect::<Vec<_>>();
+                Ok(crate::session::resample_frames(&frames, source_rate, rate))
+            })();
+            let _ = tx.send(match result {
+                Ok(samples) => JobResult::PlayerReady(samples),
+                Err(e) => JobResult::Error(e.to_string()),
+            });
+        });
     }
     pub fn close_player(&mut self) {
+        self.replay_autoplay = false;
         self.send(Control::Player(None));
         self.player_open = false;
     }
     pub fn import_rendered(&mut self, new_project: bool) {
-        if self.busy() || self.taking() || !self.stopped() || self.read_only {
+        if self.busy()
+            || self.taking()
+            || !self.tracks_stopped()
+            || self.read_only
+            || self.calibration_held()
+        {
             return;
         }
         let Some((root, result)) = self.rendered.as_ref() else {
@@ -459,6 +496,8 @@ impl MyApp {
         };
         let mut snapshot = AudioSnapshot::empty(result.snapshot.sample_rate);
         for i in 0..5 {
+            result.snapshot.histories[i].copy_into(&mut snapshot.histories[i], &mut OfflinePages);
+            snapshot.has_histories = true;
             result.snapshot.tracks[i].share_into(&mut snapshot.tracks[i], &mut OfflinePages);
             result.snapshot.undo[i].share_into(&mut snapshot.undo[i], &mut OfflinePages);
         }

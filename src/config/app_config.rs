@@ -3,6 +3,7 @@
 use crate::config::{BeatConfigs, InputFxConfigs, SystemConfigs, TrackFxConfigs};
 
 pub struct AppConfig {
+    pub metronome_volume: f32,
     pub calibration: Option<super::track_options::LatencyCalibration>,
     pub track_options: Vec<super::track_options::TrackOptions>,
     pub input_routing: super::track_options::InputRouting,
@@ -17,6 +18,7 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn new(bpm: usize, latency_comp: usize, track_count: usize) -> Self {
         Self {
+            metronome_volume: 0.35,
             calibration: None,
             track_options: vec![super::track_options::TrackOptions::default(); track_count],
             input_routing: super::track_options::InputRouting::Legacy,

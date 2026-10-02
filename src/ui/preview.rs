@@ -25,6 +25,18 @@ pub fn configure(app: &mut MyApp, mode: &str) {
             "System output — digital audio interface with a long device name".into();
     }
     app.app_state = AppState::MainLoop;
+    if mode.starts_with("calibration") {
+        app.calibration_open = true;
+    }
+    if mode == "calibration-held" {
+        app.audio
+            .diagnostics
+            .calibration_hold
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    if mode.starts_with("replays") {
+        app.replay_browser = true;
+    }
     app.config.input_fx.set_slot_kind(0, 0, FxKind::Oscillator);
     app.config.input_fx.set_slot_kind(0, 1, FxKind::Filter);
     app.config.input_fx.set_slot_kind(0, 2, FxKind::Vocoder);
@@ -49,7 +61,10 @@ pub fn configure(app: &mut MyApp, mode: &str) {
         osc.envelope.release_ms.value = 300;
     }
     app.editor.select(FxTarget::Input { bank: 0, slot: 0 });
-    app.editor.expanded = !mode.starts_with("performance") && mode != "help";
+    app.editor.expanded = !mode.starts_with("performance")
+        && !mode.starts_with("calibration")
+        && !mode.starts_with("replays")
+        && mode != "help";
     if mode == "help" {
         app.help_open = true;
         app.help_tab = 2;
@@ -78,6 +93,9 @@ pub use super::capture::capture;
 
 /// UI-only fixture; it does not pretend to record real audio.
 pub fn sample_visuals(app: &mut MyApp, mode: &str) {
+    if mode.starts_with("performance-recording") {
+        app.view.output_wave = std::array::from_fn(|i| ((i as f32 * 0.29).sin() * 0.7).abs());
+    }
     if !mode.starts_with("performance-recording") {
         return;
     }

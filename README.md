@@ -12,7 +12,11 @@ Start at the project browser. Check audio devices, set tempo, press **1–5** to
 
 Features include per-track key faders and speeds, momentary FX, piano roll, visual filters/envelopes, snapshot persistence, sample-stamped replays, independent playback/export, overdub undo/redo, reverse, one-shot, stop modes, fixed recording lengths and quantization. Input FX can preserve legacy routing or follow slot order. No new FX types were added in this release.
 
+The metronome starts performance; independent FX audition uses its own clock. Both are monitor-only and excluded from recorded loops and replay exports. Track recording/overdub/clear history supports up to eight steps (page-budget bounded): **Alt+1–5** undo, **Ctrl+Alt+1–5** redo. Piano-roll history uses **Ctrl+Z/Y**. **F9** captures a replay; **F10** opens the replay library and player. Loop length is explicit, so note edits cannot silently extend it.
+
 Replay stores dry input and ordered commands, then executes the same DSP for export. It starts from stopped tracks with clean FX state. Five-minute track and thirty-minute take limits keep memory and WAV sizes bounded. Physical latency still requires measurement; the built-in loopback test recommends compensation only after three consistent probes.
+
+The calibration wizard explains physical line-loopback requirements. Mute before connecting the cable; disconnect before explicitly restoring monitoring. Measurement failure, device changes and application restart keep the monitoring guard active.
 
 ```powershell
 cargo check --all-targets

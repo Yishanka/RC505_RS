@@ -96,10 +96,10 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
         });
         return;
     };
-    let beats = app.beats();
+    let beats = app.editor_beats();
     let mut header_kind_changed = false;
     theme::card().show(ui, |ui| {
-        ui.horizontal_wrapped(|ui| {
+        theme::control_row(ui, |ui| {
             let (bank,slot) = match target { FxTarget::Input{bank,slot}|FxTarget::Track{bank,slot}=>(bank,slot) };
             let target_text=format!("{} / {} / {}",lang.text(if matches!(target,FxTarget::Input{..}) {"INPUT FX"} else {"TRACK FX"}),bank+1,['A','B','C','D'][slot]);
             ui.label(egui::RichText::new(target_text).color(theme::ACCENT).strong());
@@ -114,8 +114,18 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
             if full {
                 if super::navigation::register(theme::action(ui, theme::Icon::Back, lang.text("Back to performance"), "Esc")).clicked() { app.close_editor(ui.ctx()); }
             } else if super::navigation::register(theme::action(ui, theme::Icon::Expand, lang.text("Expand"), "")).clicked() { app.open_editor(ui.ctx()); }
-            if super::navigation::register(ui.selectable_label(app.previewing, lang.text("Sequence preview"))).on_hover_text(lang.text("Run the sequencer clock without recording. Oscillator threshold still applies; use 0 for ungated preview.")).clicked() { app.toggle_preview(); }
+            if crate::engine::audition::supports(&app.config,target) {
+                let reason=app.audition_reason();
+                let response=super::navigation::register(ui.add_enabled(app.previewing || reason.is_none(),egui::Button::new(lang.choose(if app.previewing {"Stop audition"} else {"Audition"},if app.previewing {"停止试听"} else {"独立试听"}))));
+                let response=response.on_hover_text(lang.choose("Private preview clock; bypasses the slot enable switch and oscillator threshold. Not recorded in tracks or replay audio.","使用独立时钟，不受槽位开关和振荡器阈值限制；不录入轨道或回放音频。"));
+                if response.clicked() {app.toggle_audition();}
+                if let Some(reason)=reason {response.on_disabled_hover_text(lang.text(reason));}
+            }
+
         });
+        if full && crate::engine::audition::supports(&app.config,target) {
+            theme::caption(ui,lang.choose("Audition has its own clock and is monitor-only. MyDelay needs live input; Track Filter needs a recorded loop.","独立试听使用自己的时钟，只进入监听。MyDelay 需要实时输入；轨道滤波需要已有循环音频。"));
+        }
         let active = match target { FxTarget::Input{bank,..}=>bank==app.config.input_fx.sel_bank_idx, FxTarget::Track{bank,..}=>bank==app.config.track_fx.sel_bank_idx };
         if !active {
             ui.horizontal(|ui| {
@@ -124,7 +134,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
             });
         }
         if full {
-            ui.horizontal_wrapped(|ui| {
+            theme::control_row(ui, |ui| {
                 ui.label(lang.text("Preset"));
                 ui.add(egui::TextEdit::singleline(&mut app.editor.preset_name).hint_text(lang.text("Name for a new preset")).desired_width(180.0));
                 if ui.button(lang.text("Save as new")).clicked() {
@@ -150,7 +160,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
             if changed { app.editor.piano.reset_history(); app.editor.page = EditorPage::Sound; }
             let synth = matches!(target, FxTarget::Input { bank, slot } if matches!(app.config.input_fx.banks[bank].slots[slot].fx, Some(InputFx::Oscillator(_)|InputFx::MyDelay(_))));
             if full && synth {
-                ui.horizontal_wrapped(|ui| {
+                theme::control_row(ui, |ui| {
                     for (page,label) in [(EditorPage::Sound,lang.text("Sound")),(EditorPage::Sequence,lang.text("Piano roll")),(EditorPage::Envelope,lang.text("Amp envelope")),(EditorPage::Filter,lang.text("Filter")),(EditorPage::FilterEnvelope,lang.text("Filter envelope"))] {
                         ui.selectable_value(&mut app.editor.page,page,label);
                     }
@@ -263,11 +273,9 @@ fn input_parameters(
                 number(ui, &mut osc.level, 0, 100, false);
                 number(ui, &mut osc.threshold, 0, 100, false);
                 if full {
-                    choice(ui, &mut osc.note.note);
-                    choice(ui, &mut osc.note.octave);
                     theme::caption(
                         ui,
-                        "With no running sequence the oscillator uses this note. Threshold 0 allows continuous sound.",
+                        lang.choose("Write notes in the piano roll. The sequencer runs during performance; audition has its own clock.","在钢琴卷帘中编写音符。序列随演出运行，独立试听使用自己的时钟。"),
                     );
                     waveform(ui, osc.waveform.value);
                 }
@@ -282,8 +290,6 @@ fn input_parameters(
                 number(ui, &mut delay.level, 0, 100, false);
                 number(ui, &mut delay.threshold, 0, 100, false);
                 if full {
-                    choice(ui, &mut delay.note.note);
-                    choice(ui, &mut delay.note.octave);
                     theme::caption(
                         ui,
                         lang.text("Captures a short input fragment and repeats it at the selected pitch. This custom effect needs incoming audio."),
@@ -468,7 +474,7 @@ fn track_parameters(ui: &mut egui::Ui, fx: &mut TrackFx, full: bool) {
                         let mut seq = filter.seq.seq().to_vec();
                         let steps = filter.seq.step_len_seq().to_vec();
                         let mut changed = false;
-                        ui.horizontal_wrapped(|ui| {
+                        theme::control_row(ui, |ui| {
                             for (start, len) in
                                 steps.iter().enumerate().filter(|(_, len)| **len > 0)
                             {
@@ -497,7 +503,13 @@ fn track_parameters(ui: &mut egui::Ui, fx: &mut TrackFx, full: bool) {
 
 fn waveform(ui: &mut egui::Ui, waveform: crate::config::osc_configs::Waveform) {
     use crate::config::osc_configs::Waveform;
-    theme::caption(ui, "WAVEFORM / ideal shape, two cycles");
+    theme::caption(
+        ui,
+        crate::app_support::language::Language::current(ui.ctx()).choose(
+            "WAVEFORM / ideal shape, two cycles",
+            "波形 / 理想形状，两个周期",
+        ),
+    );
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), 170.0),
         egui::Sense::hover(),

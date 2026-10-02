@@ -6,6 +6,10 @@ const DEFAULT_LATENCY_COMP_MS: usize = 85;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LauncherConfig {
+    #[serde(default)]
+    pub calibration_guard: bool,
+    #[serde(default = "default_follow_output")]
+    pub visualizer_enabled: bool,
     /// Missing in older versions: migrate to following the system, not a stale device name.
     #[serde(default = "default_follow_output")]
     pub follow_system_output: bool,
@@ -36,6 +40,8 @@ impl LauncherConfig {
 impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
+            calibration_guard: false,
+            visualizer_enabled: true,
             follow_system_output: true,
             language: super::language::Language::default(),
             buffer_frames: 128,
@@ -90,11 +96,17 @@ mod tests {
         )
         .unwrap();
         assert!(old.follow_system_output);
+        assert!(!old.calibration_guard);
+        assert!(old.visualizer_enabled);
         let mut fixed = old;
         fixed.follow_system_output = false;
+        fixed.calibration_guard = true;
+        fixed.visualizer_enabled = false;
         let restored: LauncherConfig =
             serde_json::from_str(&serde_json::to_string(&fixed).unwrap()).unwrap();
         assert!(!restored.follow_system_output);
+        assert!(restored.calibration_guard);
+        assert!(!restored.visualizer_enabled);
         assert_eq!(restored.output_device, "Old USB device");
     }
 }

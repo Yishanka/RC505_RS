@@ -179,6 +179,29 @@ pub fn run() {
     press(&ctx, &mut app, &mut time, Key::Tab, Modifiers::CTRL);
     assert!(app.editor.expanded);
     press(&ctx, &mut app, &mut time, Key::Escape, Modifiers::NONE);
+    // F9 remains discoverable from focused widgets/editors and reports why it
+    // cannot start offline; it must not disappear behind the text-input gate.
+    app.open_editor(&ctx);
+    frame(&ctx, &mut app, &mut time, vec![]);
+    press(&ctx, &mut app, &mut time, Key::F9, Modifiers::NONE);
+    assert_eq!(
+        app.status,
+        app.language.text("Connect audio before recording a replay")
+    );
+    press(&ctx, &mut app, &mut time, Key::F10, Modifiers::NONE);
+    assert!(app.replay_browser);
+    press(&ctx, &mut app, &mut time, Key::Escape, Modifiers::NONE);
+    assert!(!app.replay_browser);
+    app.calibration_open = true;
+    frame(&ctx, &mut app, &mut time, vec![]);
+    press(&ctx, &mut app, &mut time, Key::ArrowDown, Modifiers::NONE);
+    press(&ctx, &mut app, &mut time, Key::Escape, Modifiers::NONE);
+    assert!(!app.calibration_open);
+    app.view.running = true;
+    assert!(
+        app.tracks_stopped(),
+        "Clock alone does not make stopped tracks busy"
+    );
     app.app_state = AppState::Init;
     app.project_name_mode = Some(ProjectNameMode::Add);
     frame(&ctx, &mut app, &mut time, vec![]);

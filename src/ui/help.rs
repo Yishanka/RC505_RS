@@ -16,10 +16,11 @@ pub fn draw(ctx: &egui::Context, app: &mut MyApp) {
                     ("Choose a project, then check devices in Audio. Projects always open stopped.","选择工程，在「音频」面板检查设备。工程总是从停止状态打开。"),
                     ("1–5: record, finish, play, overdub. F1–F5 or Shift+1–5 stop individual tracks.","1–5：录音、结束、播放、叠录。F1–F5 或 Shift+1–5 停止对应轨。"),
                     ("Click a track title, use Left/Right, or Ctrl+1–5 to select a track. Track controls edit reverse, one shot, stop behavior, quantization and length.","点击轨道标题、左右方向键或 Ctrl+1–5 选择轨道；左面板可调整倒放、单次播放、停止方式、量化与长度。"),
+                    ("Metronome starts performance; volume is beside it. Audition uses a private clock. Both are monitor-only, excluded from tracks and exported replay audio.","节拍器启动正式演奏，旁边调节音量。独立试听使用私有时钟；二者只进入监听，不录入轨道或回放导出音频。"),
                     ("Select an FX slot for quick editing. Expand opens the full preset editor, pinned to that bank and slot.","选择效果槽快速调整；展开后可完整编辑预设。编辑目标固定为该效果组与槽位。"),
                     ("F6 focuses the top bar; F7 the left panel; F8 the right panel. Tab or Up/Down chooses a control; Left/Right adjusts it; Enter activates it.","F6 进入顶部栏，F7 进入左面板，F8 进入右面板。Tab 或上下键选择控件，左右键调整，Enter 操作。"),
                     ("Esc leaves an editor or panel first. From performance, Esc returns to the project browser after a save prompt. Alt+F4 closes the application.","Esc 先离开编辑器或面板；在演奏界面再按 Esc，会提示保存并返回工程选择页。Alt+F4 关闭软件。"),
-                    ("Hold Delete for 0.75 seconds or press it twice within 350 ms to clear selected-track audio and undo history. A single short press does nothing. Changing tracks or focus cancels the gesture.","长按 Delete 0.75 秒，或在 350 毫秒内双击，清空所选轨音频及撤销历史。单次短按不删除；切换轨道或焦点会取消手势。"),
+                    ("Hold Delete for 0.75 seconds or press it twice within 350 ms to clear selected-track audio (recoverable with track Undo). A single short press does nothing. Changing tracks or focus cancels the gesture.","长按 Delete 0.75 秒，或在 350 毫秒内双击，清空所选轨音频，可用轨道撤销恢复。单次短按不删除；切换轨道或焦点会取消手势。"),
                     ("Grey keycaps show keyboard shortcuts. Icons and adjacent text describe actions. 中文 / EN changes the interface language and remembers your choice.","灰底键帽表示快捷键，图标与旁边文字表示动作。顶部 中文 / EN 可切换界面语言并记住选择。"),
                 ] { ui.label(lang.choose(en,zh)); ui.add_space(10.0); }
             }
@@ -44,7 +45,7 @@ pub fn draw(ctx: &egui::Context, app: &mut MyApp) {
                         ("F1–F5 / Shift+1–5","Stop track; press again to stop immediately while queued","停止对应轨；等待停止时再按立即停止"),
                         ("Space / Shift+Space","Start or stop all / immediately stop all","全部启停 / 立即停止全部"),
                         ("← → / Ctrl+1–5","Select a track","选择轨道"),
-                        ("Alt+1–5","Track overdub undo / redo","对应轨叠录撤销 / 重做"),
+                        ("Alt+1–5 / Ctrl+Alt+1–5","Track undo / redo (up to 8 steps)","对应轨撤销 / 重做（最多 8 步）"),
                         ("Ctrl+Z / Ctrl+Y","Selected track undo / redo; note history inside piano roll","所选轨撤销 / 重做；钢琴卷帘中为音符撤销 / 重做"),
                         ("Delete","Clear selected track: hold 0.75 s OR double-press within 350 ms","清空所选轨：长按 0.75 秒，或 350 毫秒内双击"),
                         ("Q W E R / U I O P","Toggle input / selected track FX slots","切换输入 / 所选轨道效果槽"),
@@ -58,7 +59,7 @@ pub fn draw(ctx: &egui::Context, app: &mut MyApp) {
                         ("Esc","Editor / panel → performance → project browser (save prompt)","编辑器 / 面板 → 演奏界面 → 工程选择页（提示保存）"),
                         ("T","Tap tempo while stopped","停止时击拍定速"),
                         ("Ctrl+S / Ctrl+Shift+S","Save configuration / configuration and audio snapshot","保存配置 / 配置与音频快照"),
-                        ("F9 / F12","Start or end replay capture / help","开始或结束回放录制 / 帮助"),
+                        ("F9 / F10 / F12","Replay capture / replay library / help","回放录制 / 回放库 / 帮助"),
                         ("Alt+F4","Close application (save prompt)","关闭软件（提示保存）"),
                     ] { theme::keycap(ui,key); ui.label(lang.choose(en,zh)); ui.end_row(); }
                 });
@@ -73,7 +74,7 @@ pub fn draw(ctx: &egui::Context, app: &mut MyApp) {
                     ("Configuration + audio saves five tracks as lossless 32-bit float WAV, undo state and a versioned manifest. The project pointer changes only after background writes complete; older revisions remain.","配置与音频快照保存五轨无损 32-bit float WAV、撤销状态和版本化清单。后台写入完成后才更新工程指针，旧版本保留。"),
                     ("Start replay capture with all tracks stopped. Existing loops remain; FX tails and the clock reset. Capture records dry input and accepted commands at exact engine sample positions, not the master output.","五轨停止时开始回放录制。保留已有循环，重置效果尾音与时钟；录制原始输入及引擎实际接受操作的采样位置，不是直接录制主输出。"),
                     ("After capture, name and save the take, export a WAV, or keep a draft. WAV export uses the same DSP renderer. Takes are limited to 30 minutes; each track to 5 minutes.","结束后可命名保存回放、导出 WAV 或保留草稿。WAV 由同一 DSP 渲染器计算；单次回放限 30 分钟，单轨音频限 5 分钟。"),
-                    ("Replay library verifies SHA-256 and opens a dedicated player. Space pauses or resumes; live input is muted. Import the final state into the source project or a new project only. Previous snapshot revisions remain.","回放库校验 SHA-256 并提供独立播放器。空格暂停 / 继续，现场输入静音。最终状态仅可导入来源工程或新工程；保留旧快照版本。"),
+                    ("Top bar Replays / F10 opens the library. Play verifies SHA-256, renders and starts a dedicated player. Space pauses or resumes; live input is muted. Import the final state into the source project or a new project only. Previous snapshot revisions remain.","顶部回放库 / F10 打开列表，点击播放自动校验、重算并打开独立播放器。空格暂停 / 继续，现场输入静音。最终状态仅可导入来源工程或新工程；保留旧快照版本。"),
                     ("Replay files require the matching renderer version and source sample rate. Input gaps or queue overflow invalidate a capture. Resolve the replay draft before leaving the project.","回放要求匹配渲染器版本与原采样率。输入缺失或队列溢出会使录制报错；离开工程前需要处理回放草稿。"),
                 ] { ui.label(lang.choose(en,zh)); ui.add_space(10.0); }
             }
@@ -83,7 +84,7 @@ pub fn draw(ctx: &egui::Context, app: &mut MyApp) {
                     ("Recording and quantization follow the output sample clock. Configuration changes apply at audio callback boundaries. Keyboard input still has OS and UI scheduling latency.","录放与量化跟随输出采样时钟，配置在音频回调边界应用。键盘输入仍有操作系统和界面调度延迟。"),
                     ("Start at 128 buffer frames and inspect gaps, overflow and peak callback time. Smaller buffers may reduce latency but increase dropouts. Drivers may ignore requested sizes.","可从 128 帧缓冲开始，观察缺帧、溢出与回调峰值。更小缓冲可能减少延迟，也更容易断音。驱动可能忽略请求值。"),
                     ("Clock adaptation limits drift between input and output devices; it cannot remove converter, driver or USB buffering latency.","输入时钟适配可限制输入输出设备间的漂移，无法消除转换器、驱动或 USB 缓冲延迟。"),
-                    ("For a recommendation, connect output L to input L, disconnect speakers, stop all tracks and choose Measure loopback. All three probes must pass correlation and consistency checks. Compensation is stored in integer samples.","获得补偿建议需要将左输出连接左输入、断开扬声器、停止所有轨道，再点击测量回环延迟。三次探测的相关性与一致性均通过后才允许应用，补偿以整数采样保存。"),
+                    ("Open Audio / calibration, stop performance and prepare MUTED monitoring before connecting line output L to line input L. Disable hardware direct monitoring. After measurement, disconnect the cable before restoring monitoring. Failure and restart stay muted.","打开音频 / 校准，停止演奏并先静音，再接线路左输出到线路左输入；关闭硬件直通。测后先拔线，再确认恢复监听。失败及重启保持静音；内置麦克风/蓝牙耳机无法完成此线路测试。"),
                     ("Compensation aligns recordings; it does not reduce audible monitoring delay. Recalibrate after changing devices, sample rate or buffer size.","补偿调整录音对齐，不降低耳朵听到的监听延迟。更换设备、采样率或缓冲后需重新测量。"),
                 ] { ui.label(lang.choose(en,zh)); ui.add_space(10.0); }
             }

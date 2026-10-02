@@ -118,6 +118,16 @@ mod tests {
         assert!(config.events().is_empty());
         state.undo(&mut config);
         assert_eq!(config.events()[0].len, 6);
+        state.undo(&mut config);
+        assert_eq!(config.events()[0].len, 3);
+        state.undo(&mut config);
+        assert_eq!(config.events()[0].start, 0);
+        state.undo(&mut config);
+        assert!(config.events().is_empty());
+        for _ in 0..4 {
+            state.redo(&mut config);
+        }
+        assert!(config.events().is_empty());
     }
 }
 
@@ -324,11 +334,17 @@ pub fn draw(
     elapsed_beats: Option<f64>,
 ) {
     let lang = crate::app_support::language::Language::current(ui.ctx());
+    // Finish a drag whose release happened while this page was hidden.
+    if ui.input(|i| !i.pointer.primary_down() && !i.pointer.any_released()) {
+        if let Some(drag) = state.drag.take() {
+            state.remember(drag.before, config);
+        }
+    }
     let before = Snapshot::capture(config);
     let mut history_action = false;
     let mut fit = false;
     let mut jump_pitch = None;
-    ui.horizontal_wrapped(|ui| {
+    theme::control_row(ui, |ui| {
         ui.strong(lang.text("PIANO ROLL"));
         let snap_name = match state.snap {
             1 => "1/48",
@@ -377,7 +393,7 @@ pub fn draw(
             config.replace_events(bars * TICKS_PER_BAR, &config.events());
         }
     });
-    ui.horizontal_wrapped(|ui| {
+    theme::control_row(ui, |ui| {
         if ui
             .add_enabled(!state.undo.is_empty(), egui::Button::new(lang.text("Undo")))
             .clicked()
@@ -479,13 +495,19 @@ pub fn draw(
             ui.label(format!("{} {}", lang.text("Selected"), event.pitch));
             let old = event;
             ui.label(lang.text("Start tick"));
-            ui.add(egui::DragValue::new(&mut event.start).clamp_range(0..=MAX_TICKS - 1));
+            ui.add(
+                egui::DragValue::new(&mut event.start)
+                    .clamp_range(0..=config.seq().len().saturating_sub(event.len)),
+            );
             ui.label(lang.text("Length"));
-            ui.add(egui::DragValue::new(&mut event.len).clamp_range(1..=MAX_TICKS - event.start));
+            ui.add(
+                egui::DragValue::new(&mut event.len)
+                    .clamp_range(1..=config.seq().len().saturating_sub(event.start).max(1)),
+            );
             if event != old {
                 let before = Snapshot::capture(config);
                 config.remove_event(old.start);
-                config.insert_event(event);
+                config.insert_within_loop(event);
                 state.selected = Some(event.start);
                 state.remember(before, config);
             }
@@ -523,7 +545,7 @@ pub fn draw(
             .map(|n| n.pitch.pitch_index())
             .max()
             .unwrap_or(60);
-        row_height = ((height - 41.0) / (high - low + 3) as f32).clamp(10.0, 18.0);
+        row_height = ((height - 41.0) / (high - low + 3) as f32).clamp(14.0, 18.0);
         state.row_height = row_height;
         let top = ((low + high) as f32 * 0.5 + (height - 41.0) / (2.0 * row_height)).min(119.0);
         state.scroll = vec2(0.0, (119.0 - top).max(0.0) * row_height);
@@ -596,6 +618,15 @@ pub fn draw(
                         ),
                     );
                 }
+            }
+            if !config.seq().is_empty() && config.seq().len() < length {
+                let edge = grid.left() + config.seq().len() as f32 * state.zoom;
+                painter.rect_filled(
+                    Rect::from_min_max(pos2(edge, grid.top()), grid.max),
+                    0.0,
+                    Color32::from_black_alpha(130),
+                );
+                painter.vline(edge, grid.y_range(), Stroke::new(2.0, theme::ACCENT));
             }
             let note_rect = |event: NoteEvent| {
                 let y = grid.top()
@@ -735,12 +766,13 @@ pub fn draw(
                         if config.seq().is_empty() {
                             config.replace_events(length, &[]);
                         }
-                        config.insert_event(NoteEvent {
+                        if config.insert_within_loop(NoteEvent {
                             start: tick,
                             len: state.snap,
                             pitch: NoteOct::from_pitch_index(pitch),
-                        });
-                        state.selected = Some(tick);
+                        }) {
+                            state.selected = Some(tick);
+                        }
                         state.remember(old, config);
                     }
                 }
@@ -753,11 +785,11 @@ pub fn draw(
                 let mut event = drag.note;
                 if drag.resize {
                     event.len = (event.len as i32 + delta)
-                        .clamp(1, (MAX_TICKS - event.start) as i32)
+                        .clamp(1, (config.seq().len().max(1) - event.start) as i32)
                         as usize;
                 } else {
                     event.start = (event.start as i32 + delta)
-                        .clamp(0, (MAX_TICKS - event.len) as i32)
+                        .clamp(0, config.seq().len().saturating_sub(event.len) as i32)
                         as usize;
                     let semitones = ((drag.origin.y - pos.y + drag.scroll_origin.y - scroll.y)
                         / row_height)
@@ -768,7 +800,7 @@ pub fn draw(
                 }
                 drag.before.restore(config);
                 config.remove_event(drag.note.start);
-                config.insert_event(event);
+                config.insert_within_loop(event);
                 state.selected = Some(event.start);
             }
             if response.drag_stopped() {

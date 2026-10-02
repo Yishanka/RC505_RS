@@ -2,6 +2,7 @@ mod actions;
 pub(crate) mod clear_gesture;
 pub mod faders;
 mod keyboard;
+mod monitoring;
 mod performance_keys;
 mod workflow;
 use crate::{
@@ -50,6 +51,7 @@ pub struct HeldFx {
     pub previous: bool,
 }
 pub enum JobResult {
+    PlayerReady(Vec<[f32; 2]>),
     Update(crate::updater::Release),
     UpdateDownloaded(PathBuf),
     Loaded {
@@ -65,7 +67,12 @@ pub enum JobResult {
     Error(String),
 }
 pub struct MyApp {
-    last_ui_scene: Option<[u64; 12]>,
+    pub audition_target: Option<(crate::presets::FxTarget, usize)>,
+    pub calibration_open: bool,
+    pub loopback_connected: bool,
+    pub visualizer_enabled: bool,
+    pub replay_autoplay: bool,
+    last_ui_scene: Option<[u64; 16]>,
     output_watch: Option<crate::engine::output_watch::OutputWatch>,
     output_endpoint_id: String,
     output_error_seen: u64,
@@ -100,6 +107,7 @@ pub struct MyApp {
     close_window_queued: bool,
     pub saving: bool,
     pub take_pending: bool,
+    take_ending: bool,
     pub draft: Option<PathBuf>,
     pub take_name: String,
     pub replay_list: Vec<(PathBuf, String)>,
@@ -128,6 +136,8 @@ impl MyApp {
     pub fn new() -> Self {
         let launch = crate::app_support::launcher_config::load();
         let language = launch.as_ref().map(|v| v.language).unwrap_or_default();
+        let guard = launch.as_ref().is_some_and(|v| v.calibration_guard);
+        let visualizer_enabled = launch.as_ref().is_none_or(|v| v.visualizer_enabled);
         let buffer_frames = launch.as_ref().map(|v| v.buffer_frames()).unwrap_or(128);
         let mut config = AppConfig::new(120, 85, 5);
         if !std::env::args().any(|v| v == "--offline") {
@@ -143,7 +153,7 @@ impl MyApp {
                 config.system_config.output_device.value = settings.output_device.clone();
             }
         }
-        let audio = if std::env::args().any(|v| v == "--offline") {
+        let mut audio = if std::env::args().any(|v| v == "--offline") {
             AudioIO::offline("Offline editing".into())
         } else {
             (if config.system_config.follow_system_output {
@@ -157,6 +167,9 @@ impl MyApp {
             })
             .unwrap_or_else(|e| AudioIO::offline(format!("Audio unavailable: {e}")))
         };
+        if guard {
+            let _ = audio.send(Control::CalibrationHold(true));
+        }
         let root = crate::app_support::paths::projects_dir();
         let _ = std::fs::create_dir_all(&root);
         let lock = std::fs::OpenOptions::new()
@@ -181,6 +194,11 @@ impl MyApp {
             .and_then(|s| projects.iter().position(|p| p.name == s.last_project))
             .unwrap_or(0);
         Self {
+            audition_target: None,
+            calibration_open: guard,
+            loopback_connected: false,
+            visualizer_enabled,
+            replay_autoplay: false,
             last_ui_scene: None,
             output_endpoint_id: if config.system_config.follow_system_output && audio.online {
                 crate::engine::output_watch::default_id().unwrap_or_default()
@@ -225,6 +243,7 @@ impl MyApp {
             close_window_queued: false,
             saving: false,
             take_pending: false,
+            take_ending: false,
             draft: None,
             take_name: String::new(),
             replay_list: Vec::new(),
@@ -295,13 +314,34 @@ impl MyApp {
         }
     }
     fn sync_config(&mut self) -> bool {
+        if self.previewing
+            && (self.audition_target != self.audition_selection()
+                || self
+                    .editor
+                    .target
+                    .is_none_or(|t| !crate::engine::audition::supports(&self.config, t)))
+        {
+            self.stop_audition();
+        }
         let data = project::data_from_config(&self.config);
         let Ok(bytes) = serde_json::to_vec(&data) else {
             return false;
         };
         if self.last_config != bytes {
             match self.audio.configure(&self.config) {
-                Ok(()) => self.last_config = bytes,
+                Ok(()) => {
+                    self.last_config = bytes;
+                    if let Some((target, track)) = self.audition_target.filter(|_| self.previewing)
+                    {
+                        if let Some(params) = crate::engine::audition::AuditionParameters::new(
+                            &self.config,
+                            target,
+                            track,
+                        ) {
+                            self.send(Control::AuditionUpdate(Box::new(params)));
+                        }
+                    }
+                }
                 Err(error) => {
                     self.status = error.to_string();
                     return false;
@@ -311,6 +351,7 @@ impl MyApp {
         true
     }
     fn request_exit(&mut self, target: PendingExit) {
+        self.replay_autoplay = false;
         if self.taking() || self.take_pending || self.draft.is_some() {
             self.status = "Finish and save or discard the replay take first.".into();
             return;
@@ -337,6 +378,7 @@ impl MyApp {
             self.update_after_save = false;
         }
         self.send(Control::Player(None));
+        self.stop_audition();
         self.player_open = false;
         self.send(Control::Action(crate::engine::core::Action::Panic));
         self.send(Control::Enable(false));
@@ -360,6 +402,10 @@ impl MyApp {
         if let Some(view) = self.audio.poll() {
             self.view = view;
         }
+        self.previewing = self.audio.diagnostics.auditioning.load(Ordering::Relaxed);
+        if self.taking() && !self.take_ending {
+            self.take_pending = false;
+        }
         let responses: Vec<_> = self.audio.responses().collect();
         for response in responses {
             match response {
@@ -372,6 +418,7 @@ impl MyApp {
                 }
                 Response::Take(path) => {
                     self.take_pending = false;
+                    self.take_ending = false;
                     self.draft = Some(path);
                     self.take_name =
                         format!("Take {}", chrono::Local::now().format("%Y-%m-%d %H-%M"));
@@ -381,6 +428,7 @@ impl MyApp {
                     self.update_after_save = false;
                     self.saving = false;
                     self.take_pending = false;
+                    self.take_ending = false;
                     self.exit_after_save = false;
                     self.status = error;
                 }
@@ -412,6 +460,18 @@ impl MyApp {
             self.job = None;
             self.engine_transition = false;
             match result {
+                JobResult::PlayerReady(samples) => {
+                    if self.replay_autoplay && !self.show_save_prompt {
+                        self.player_open = self.send(Control::Player(Some(Box::new(
+                            crate::engine::audio_io::Player {
+                                samples,
+                                cursor: 0,
+                                playing: true,
+                            },
+                        ))));
+                    }
+                    self.replay_autoplay = false;
+                }
                 JobResult::Update(release) => {
                     self.status = if crate::updater::newer(&release.version) {
                         format!("Update {} available.", release.version)
@@ -425,6 +485,7 @@ impl MyApp {
                     self.update_installer = Some(path);
                 }
                 JobResult::Loaded { index, data, core } => {
+                    self.stop_audition();
                     let input = self.config.system_config.input_device.value.clone();
                     let output = self.config.system_config.output_device.value.clone();
                     project::apply_data_to_config(&mut self.config, data);
@@ -479,8 +540,12 @@ impl MyApp {
                 JobResult::Rendered { root, result } => {
                     self.status = format!("Rendered WAV: {}", result.wav.display());
                     self.rendered = Some((root, result));
+                    if std::mem::take(&mut self.replay_autoplay) {
+                        self.play_rendered();
+                    }
                 }
                 JobResult::Error(error) => {
+                    self.replay_autoplay = false;
                     self.update_after_save = false;
                     self.saving = false;
                     self.exit_after_save = false;
@@ -511,7 +576,7 @@ impl eframe::App for MyApp {
     }
 }
 impl MyApp {
-    fn ui_scene(&self) -> [u64; 12] {
+    fn ui_scene(&self) -> [u64; 16] {
         let target = self.editor.target.map_or(0, |target| match target {
             crate::presets::FxTarget::Input { bank, slot } => {
                 1 + (bank * 4 + slot) * 16 + self.config.input_fx.slot_kind(bank, slot) as usize
@@ -533,6 +598,10 @@ impl MyApp {
             self.show_save_prompt as u64,
             self.project_name_mode.is_some() as u64,
             self.language as u64,
+            self.calibration_open as u64,
+            self.calibration_held() as u64,
+            self.audio.diagnostics.calibrating.load(Ordering::Relaxed) as u64,
+            self.measurement.is_some() as u64,
         ]
     }
     fn release_hidden_focus(&mut self, ctx: &egui::Context) {
@@ -586,6 +655,9 @@ impl MyApp {
         }
         self.handle_input(ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
+            if self.visualizer_enabled {
+                ui::visualizer::draw(ui, &self.view.output_wave);
+            }
             ui.set_enabled(!self.show_save_prompt);
             match self.app_state {
                 AppState::Init => ui::init::draw_init(ui, self),
@@ -594,6 +666,7 @@ impl MyApp {
         });
         ui::help::draw(ctx, self);
         ui::replays::draw(ctx, self);
+        ui::calibration::draw(ctx, self);
         if self.show_save_prompt {
             let title = if matches!(self.pending_exit, Some(PendingExit::CloseWindow)) {
                 lang.choose("Save before closing RC505 RS", "关闭 RC505 RS 前保存")

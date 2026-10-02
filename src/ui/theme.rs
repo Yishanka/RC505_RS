@@ -60,7 +60,7 @@ pub fn apply(ctx: &egui::Context) {
 
 pub fn card() -> egui::Frame {
     egui::Frame::none()
-        .fill(PANEL)
+        .fill(Color32::from_rgba_unmultiplied(25, 31, 41, 232))
         .rounding(10.0)
         .inner_margin(16.0)
         .stroke(egui::Stroke::new(1.0, Color32::from_rgb(43, 53, 67)))
@@ -129,18 +129,37 @@ pub fn language_switch(
 
 /// Keycaps are hints, not additional clickable controls.
 pub fn keycap(ui: &mut egui::Ui, key: &str) {
-    egui::Frame::none()
-        .fill(Color32::from_rgb(53, 61, 74))
-        .rounding(4.0)
-        .inner_margin(egui::vec2(5.0, 2.0))
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(key)
-                    .monospace()
-                    .size(12.0)
-                    .color(Color32::from_gray(220)),
-            );
-        });
+    let text = ui.painter().layout_no_wrap(
+        key.into(),
+        egui::FontId::monospace(12.0),
+        Color32::from_gray(220),
+    );
+    let (rect, response) =
+        ui.allocate_exact_size(text.size() + egui::vec2(10.0, 4.0), egui::Sense::hover());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, key));
+    ui.painter()
+        .rect_filled(rect, 4.0, Color32::from_rgb(53, 61, 74));
+    ui.painter().galley(
+        rect.min + egui::vec2(5.0, 2.0),
+        text,
+        Color32::from_gray(220),
+    );
+}
+
+/// Give controls a common row center before layout. Labels in a wrapped row
+/// otherwise use egui's paragraph layout and sit above adjacent buttons.
+pub fn control_row<R>(
+    ui: &mut egui::Ui,
+    draw: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), 34.0),
+        egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
+        |ui| {
+            ui.style_mut().wrap = Some(false);
+            draw(ui)
+        },
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -181,16 +200,38 @@ pub fn action(ui: &mut egui::Ui, icon: Icon, label: &str, key: &str) -> egui::Re
     } else {
         cap.size().x + 18.0
     };
-    let width = text.size().x + icon_width + key_width + 20.0;
+    let compact = label.is_empty() && key.is_empty();
+    let width = if compact {
+        30.0
+    } else {
+        text.size().x + icon_width + key_width + 20.0
+    };
     let response = ui.add(egui::Button::new("").min_size(egui::vec2(width, 34.0)));
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, label));
+    let lang = crate::app_support::language::Language::current(ui.ctx());
+    let accessible = if label.is_empty() {
+        lang.text(match icon {
+            Icon::Stop => "Stop",
+            Icon::Play => "Play",
+            Icon::Undo => "Undo",
+            Icon::Redo => "Redo",
+            Icon::Record => "Record",
+            _ => "Action",
+        })
+    } else {
+        label
+    };
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, accessible));
     if ui.is_rect_visible(response.rect) {
         let color = if ui.is_enabled() {
             ui.visuals().text_color()
         } else {
             MUTED
         };
-        let center = egui::pos2(response.rect.left() + 17.0, response.rect.center().y);
+        let center = if compact {
+            response.rect.center()
+        } else {
+            egui::pos2(response.rect.left() + 17.0, response.rect.center().y)
+        };
         let stroke = egui::Stroke::new(1.5, color);
         let p = ui.painter();
         match icon {

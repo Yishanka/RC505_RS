@@ -26,6 +26,9 @@ const PACKET: usize = 256;
 pub const DEFAULT_BUFFER: u32 = 128;
 #[derive(Default)]
 pub struct Diagnostics {
+    pub calibration_hold: AtomicBool,
+    pub auditioning: AtomicBool,
+    pub audition_frame: AtomicU64,
     pub underrun: AtomicU64,
     pub overflow: AtomicU64,
     pub stream_errors: AtomicU64,
@@ -48,6 +51,9 @@ pub struct Player {
     pub playing: bool,
 }
 pub enum Control {
+    CalibrationHold(bool),
+    Audition(Option<Box<super::audition::Audition>>),
+    AuditionUpdate(Box<super::audition::AuditionParameters>),
     Config {
         parameters: Box<Parameters>,
         data: Arc<ProjectData>,
@@ -61,6 +67,7 @@ pub enum Control {
     },
     Capture(Box<AudioSnapshot>),
     BeginTake {
+        retired_audition: Option<Box<super::audition::Audition>>,
         core: Box<RenderCore>,
         snapshot: Box<AudioSnapshot>,
         root: PathBuf,
@@ -101,7 +108,7 @@ impl PageAllocator for RealtimePages {
         self.available.pop()
     }
     fn retire(&mut self, page: Page) {
-        // Larger than every page in ten maximum-length 192 kHz loops. Never
+        // Sized for tracks, snapshots and bounded history page references. Never
         // fall back to deallocation on the realtime thread if exhausted.
         if let Err(page) = self.retired.push(page) {
             std::mem::forget(page);
@@ -109,6 +116,9 @@ impl PageAllocator for RealtimePages {
     }
 }
 struct Callback {
+    audition: Option<Box<super::audition::Audition>>,
+    metronome: super::metronome::Metronome,
+    visual: super::visual_meter::VisualMeter,
     core: Box<RenderCore>,
     commands: HeapConsumer<Control>,
     worker: HeapProducer<WorkerMessage>,
@@ -155,9 +165,50 @@ impl Callback {
             let at = self.core.clock.frame;
             let mut accepted = true;
             match &mut command {
+                Control::CalibrationHold(value) => {
+                    if *value
+                        && (!self.core.tracks_stopped()
+                            || self.taking
+                            || self.player.is_some()
+                            || self.audition.is_some())
+                    {
+                        accepted = false;
+                    } else if !*value && self.calibration.is_some() {
+                        accepted = false;
+                    } else {
+                        self.diagnostics
+                            .calibration_hold
+                            .store(*value, Ordering::Relaxed);
+                        if *value {
+                            self.core.action(Action::Panic, &mut self.pages);
+                        }
+                    }
+                }
+                Control::Audition(value) => {
+                    if value.is_some()
+                        && (self.taking
+                            || self.diagnostics.calibration_hold.load(Ordering::Relaxed)
+                            || self.player.is_some())
+                    {
+                        accepted = false;
+                    } else {
+                        std::mem::swap(&mut self.audition, value);
+                        self.diagnostics
+                            .auditioning
+                            .store(self.audition.is_some(), Ordering::Relaxed);
+                    }
+                }
+                Control::AuditionUpdate(params) => {
+                    if let Some(audition) = &mut self.audition {
+                        audition.update(params);
+                    }
+                }
+
                 Control::Config { parameters, .. } => self.core.configure(parameters),
                 Control::Action(action) => {
-                    if self.calibration.is_some() || self.player.is_some() {
+                    if self.diagnostics.calibration_hold.load(Ordering::Relaxed)
+                        || self.player.is_some()
+                    {
                         accepted = false;
                     } else {
                         self.core.action(*action, &mut self.pages)
@@ -173,14 +224,22 @@ impl Callback {
                 }
                 Control::Snapshot { snapshot, .. } => self.core.snapshot(snapshot, &mut self.pages),
                 Control::Capture(snapshot) => self.core.snapshot(snapshot, &mut self.pages),
-                Control::BeginTake { core, snapshot, .. } => {
-                    if !self.core.idle()
+                Control::BeginTake {
+                    core,
+                    snapshot,
+                    retired_audition,
+                    ..
+                } => {
+                    if !self.core.tracks_stopped()
                         || self.taking
                         || self.player.is_some()
                         || self.calibration.is_some()
+                        || self.diagnostics.calibration_hold.load(Ordering::Relaxed)
                     {
                         accepted = false;
                     } else {
+                        std::mem::swap(&mut self.audition, retired_audition);
+                        self.diagnostics.auditioning.store(false, Ordering::Relaxed);
                         self.core.snapshot(snapshot, &mut self.pages);
                         core.restore(snapshot);
                         core.snapshot(snapshot, &mut self.pages);
@@ -208,9 +267,16 @@ impl Callback {
                 }
                 Control::Enable(value) => self.enabled = *value,
                 Control::Player(value) => {
-                    if self.taking || !self.core.idle() {
+                    if self.taking
+                        || !self.core.tracks_stopped()
+                        || self.diagnostics.calibration_hold.load(Ordering::Relaxed)
+                        || self.audition.is_some()
+                    {
                         accepted = false;
                     } else {
+                        if value.is_some() {
+                            self.core.action(Action::Panic, &mut self.pages);
+                        }
                         std::mem::swap(&mut self.player, value);
                     }
                 }
@@ -223,7 +289,10 @@ impl Callback {
                     }
                 }
                 Control::Calibrate(value) => {
-                    if self.taking
+                    if !self.diagnostics.calibration_hold.load(Ordering::Relaxed)
+                        || self.player.is_some()
+                        || self.audition.is_some()
+                        || self.taking
                         || !self.core.idle()
                         || self.calibration.is_some()
                         || value.as_ref().is_some_and(|probe| {
@@ -246,6 +315,11 @@ impl Callback {
         }
     }
     fn frame(&mut self, dry: Frame) -> Frame {
+        let result = self.render_frame(dry);
+        self.visual.push(result);
+        result
+    }
+    fn render_frame(&mut self, dry: Frame) -> Frame {
         if let Some(calibration) = &mut self.calibration {
             if calibration.finished() {
                 if self.worker.free_len() > 0 {
@@ -260,6 +334,9 @@ impl Callback {
                 return [0.0; 2];
             }
             return calibration.process(dry);
+        }
+        if self.diagnostics.calibration_hold.load(Ordering::Relaxed) {
+            return [0.0; 2];
         }
         if let Some(player) = &mut self.player {
             let frame = if player.playing && player.cursor < player.samples.len() {
@@ -293,7 +370,21 @@ impl Callback {
                 self.flush();
             }
         }
-        let result = self.core.process(dry, &mut self.pages);
+        let click = self.metronome.next(
+            self.core.metronome && self.core.clock.origin.is_some(),
+            self.core.clock.elapsed(),
+            self.core.sample_rate,
+            self.core.bpm,
+            self.core.metronome_volume,
+        );
+        let mut result = self.core.process(dry, &mut self.pages);
+        if let Some(audition) = &mut self.audition {
+            let preview = audition.next(dry, &self.core);
+            result[0] += preview[0];
+            result[1] += preview[1];
+        }
+        result[0] = (result[0] + click).clamp(-1.0, 1.0);
+        result[1] = (result[1] + click).clamp(-1.0, 1.0);
         if self.taking
             && (self.core.exhausted
                 || self.diagnostics.underrun.load(Ordering::Relaxed) != self.take_underrun
@@ -304,8 +395,15 @@ impl Callback {
         result
     }
     fn publish(&mut self) {
+        if let Some(audition) = &self.audition {
+            self.diagnostics
+                .audition_frame
+                .store(audition.frame, Ordering::Relaxed);
+        }
         if self.views.free_len() > 0 {
-            let _ = self.views.push(self.core.view());
+            let mut view = self.core.view();
+            view.output_wave = self.visual.snapshot();
+            let _ = self.views.push(view);
         }
     }
 }
@@ -632,7 +730,7 @@ impl AudioIO {
         for _ in 0..256 {
             let _ = page_tx.push(Arc::new([[0.0; 2]; PAGE_FRAMES]));
         }
-        let (retire_tx, mut retire_rx) = HeapRb::<Page>::new(131_072).split();
+        let (retire_tx, mut retire_rx) = HeapRb::<Page>::new(1_048_576).split();
         let stop = Arc::new(AtomicBool::new(false));
         let pool_stop = stop.clone();
         std::thread::Builder::new()
@@ -678,6 +776,9 @@ impl AudioIO {
             })
             .expect("audio worker thread");
         let callback = Callback {
+            audition: None,
+            metronome: super::metronome::Metronome::new(sr),
+            visual: super::visual_meter::VisualMeter::new(sr),
             core: Box::new(RenderCore::new(sr)),
             commands: command_rx,
             worker: worker_tx,
@@ -885,6 +986,124 @@ fn select_host(_input: &str, _output: &str) -> Result<cpal::Host> {
 #[cfg(test)]
 mod output_tests {
     use super::*;
+    fn callback() -> (AudioIO, Callback) {
+        AudioIO::bridge(cpal::StreamConfig {
+            channels: 2,
+            sample_rate: cpal::SampleRate(8000),
+            buffer_size: cpal::BufferSize::Fixed(128),
+        })
+    }
+    #[test]
+    fn failed_calibration_stays_muted_until_explicit_release() {
+        let (mut audio, mut cb) = callback();
+        cb.enabled = true;
+        audio.send(Control::CalibrationHold(true)).unwrap();
+        cb.commands();
+        assert_eq!(cb.frame([0.5; 2]), [0.0; 2]);
+        audio
+            .send(Control::Calibrate(Some(Box::new(
+                super::super::latency::Calibration::new(8000),
+            ))))
+            .unwrap();
+        cb.commands();
+        for _ in 0..24002 {
+            cb.frame([0.0; 2]);
+        }
+        assert!(!cb.diagnostics.calibrating.load(Ordering::Relaxed));
+        assert!(cb.diagnostics.calibration_hold.load(Ordering::Relaxed));
+        assert_eq!(cb.frame([0.5; 2]), [0.0; 2]);
+        audio.send(Control::Enable(false)).unwrap();
+        audio.send(Control::Enable(true)).unwrap();
+        cb.commands();
+        assert_eq!(cb.frame([0.5; 2]), [0.0; 2]);
+        audio.send(Control::CalibrationHold(false)).unwrap();
+        cb.commands();
+        assert!(cb.frame([0.5; 2])[0] > 0.1);
+    }
+    #[test]
+    fn metronome_and_audition_are_monitor_only() {
+        let (_audio, mut cb) = callback();
+        cb.enabled = true;
+        cb.core.options[0].quantize = crate::config::track_options::Quantize::Off;
+        cb.core.action(Action::Metronome(true), &mut cb.pages);
+        cb.core.action(Action::Trigger(0), &mut cb.pages);
+        let mut heard = 0.0f32;
+        for _ in 0..5000 {
+            heard = heard.max(cb.frame([0.0; 2])[0].abs());
+        }
+        assert!(heard > 0.05);
+        assert!(
+            (0..cb.core.tracks[0].audio.len).all(|i| cb.core.tracks[0].audio.read(i) == [0.0; 2])
+        );
+        cb.core.action(Action::Panic, &mut cb.pages);
+        let mut config = AppConfig::new(120, 0, 5);
+        config
+            .input_fx
+            .set_slot_kind(0, 0, crate::config::FxKind::Oscillator);
+        if let Some(crate::config::InputFx::Oscillator(osc)) =
+            &mut config.input_fx.banks[0].slots[0].fx
+        {
+            osc.threshold.value = 100;
+            osc.note.replace_events(
+                48,
+                &[crate::config::sequence_edit::NoteEvent {
+                    start: 0,
+                    len: 48,
+                    pitch: crate::config::note_configs::NoteOct::from_pitch_index(48),
+                }],
+            );
+        }
+        cb.core
+            .configure(&mut Parameters::from_config(&config, 8000));
+        let params = super::super::audition::AuditionParameters::new(
+            &config,
+            crate::presets::FxTarget::Input { bank: 0, slot: 0 },
+            0,
+        )
+        .unwrap();
+        cb.audition = Some(Box::new(super::super::audition::Audition::new(
+            params, 8000,
+        )));
+        let mut heard = 0.0f32;
+        for _ in 0..4000 {
+            heard = heard.max(cb.frame([0.0; 2])[0].abs());
+        }
+        assert!(heard > 0.01);
+        assert!(
+            cb.core.clock.origin.is_none(),
+            "Audition cannot start performance"
+        );
+        cb.core.action(Action::Trigger(1), &mut cb.pages);
+        for _ in 0..1000 {
+            cb.frame([0.0; 2]);
+        }
+        assert!(
+            (0..cb.core.tracks[1].audio.len).all(|i| cb.core.tracks[1].audio.read(i) == [0.0; 2])
+        );
+        assert!(!config.input_fx.banks[0].slots[0].is_enabled);
+    }
+    #[test]
+    fn capture_accepts_stopped_tracks_with_a_running_transport() {
+        let (mut audio, mut cb) = callback();
+        cb.core.action(Action::Metronome(true), &mut cb.pages);
+        assert!(!cb.core.idle() && cb.core.tracks_stopped());
+        let config = AppConfig::new(120, 0, 5);
+        audio
+            .send(Control::BeginTake {
+                core: Box::new(RenderCore::new(8000)),
+                snapshot: Box::new(AudioSnapshot::empty(8000)),
+                retired_audition: None,
+                root: PathBuf::from("var").join(format!("capture-test-{}", crate::session::id())),
+                project_id: "test.json".into(),
+                data: crate::project::data_from_config(&config),
+            })
+            .unwrap();
+        cb.commands();
+        assert!(cb.taking);
+        assert!(!cb.core.metronome && cb.core.clock.origin.is_none());
+        audio.send(Control::EndTake).unwrap();
+        cb.commands();
+    }
     #[test]
     fn handoff_returns_exact_recording_renderer_even_before_first_callback() {
         let config = cpal::StreamConfig {

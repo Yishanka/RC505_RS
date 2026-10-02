@@ -1,4 +1,4 @@
-//! Page sharing makes snapshots and one-level undo independent of loop size.
+//! Page sharing makes snapshots and bounded undo history independent of PCM copying.
 //! The audio thread obtains replacement pages from a bounded, prepared pool.
 use std::sync::Arc;
 

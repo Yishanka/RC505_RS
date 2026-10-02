@@ -48,6 +48,8 @@ struct ProjectIndex {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectData {
+    #[serde(default = "default_metronome_volume")]
+    pub metronome_volume: f32,
     #[serde(default)]
     pub calibration: Option<crate::config::track_options::LatencyCalibration>,
     #[serde(default)]
@@ -65,6 +67,10 @@ pub struct ProjectData {
     pub input_fx: InputFxData,
     #[serde(default)]
     pub track_fx: TrackFxData,
+}
+
+fn default_metronome_volume() -> f32 {
+    0.35
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -770,6 +776,7 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
     }
 
     ProjectData {
+        metronome_volume: config.metronome_volume.clamp(0.0, 1.0),
         calibration: config.calibration.clone(),
         snapshot: None,
         track_options: config.track_options.clone(),
@@ -797,6 +804,11 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
 }
 
 pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
+    config.metronome_volume = if data.metronome_volume.is_finite() {
+        data.metronome_volume.clamp(0.0, 1.0)
+    } else {
+        default_metronome_volume()
+    };
     config.calibration = data.calibration;
     config.input_routing = data.input_routing;
     for (index, options) in config.track_options.iter_mut().enumerate() {
@@ -1403,6 +1415,7 @@ mod tests {
     #[test]
     fn old_project_defaults_and_new_faders_roundtrip() {
         let mut source = AppConfig::new(127, 85, 5);
+        source.metronome_volume = 0.72;
         source.track_levels = vec![0.0, 0.25, 0.5, 0.75, 1.0];
         source.input_fx.set_slot_kind(0, 0, FxKind::Oscillator);
         if let Some(InputFx::Oscillator(osc)) = &mut source.input_fx.banks[0].slots[0].fx {
@@ -1413,15 +1426,18 @@ mod tests {
         let mut restored = AppConfig::new(120, 0, 5);
         apply_data_to_config(&mut restored, serde_json::from_value(json.clone()).unwrap());
         assert_eq!(restored.track_levels, source.track_levels);
+        assert_eq!(restored.metronome_volume, 0.72);
         assert_eq!(restored.beat_config.current_bpm(), 127);
         let Some(InputFx::Oscillator(osc)) = &restored.input_fx.banks[0].slots[0].fx else {
             panic!()
         };
         assert_eq!(osc.note.events().len(), 2);
         json.as_object_mut().unwrap().remove("track_levels");
+        json.as_object_mut().unwrap().remove("metronome_volume");
         json["beat"]["bpm"] = serde_json::json!(0);
         apply_data_to_config(&mut restored, serde_json::from_value(json).unwrap());
         assert_eq!(restored.track_levels, vec![1.0; 5]);
+        assert_eq!(restored.metronome_volume, 0.35);
         assert_eq!(restored.beat_config.current_bpm(), 30);
     }
     #[test]

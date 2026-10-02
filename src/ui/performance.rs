@@ -79,7 +79,7 @@ fn fixed_panel(
         let height = if ui.ctx().screen_rect().height() < 800.0 {
             120.0
         } else {
-            236.0
+            198.0
         };
         egui::ScrollArea::vertical()
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
@@ -134,7 +134,7 @@ fn transport(ui: &mut egui::Ui, app: &mut MyApp) {
             }
         });
     });
-    ui.horizontal_wrapped(|ui| {
+    theme::control_row(ui, |ui| {
         ui.label("BPM");
         nav::register(
             ui.add_enabled(
@@ -160,6 +160,27 @@ fn transport(ui: &mut egui::Ui, app: &mut MyApp) {
         {
             app.toggle_all();
         }
+        ui.separator();
+        let mut click = app.view.metronome;
+        if nav::register(ui.checkbox(&mut click, lang.choose("Metronome", "节拍器"))).changed() {
+            app.action(crate::engine::core::Action::Metronome(click));
+        }
+        ui.scope(|ui| {
+            ui.spacing_mut().slider_width = 95.0;
+            let mut volume = app.config.metronome_volume * 100.0;
+            if nav::register(
+                ui.add(
+                    egui::Slider::new(&mut volume, 0.0..=100.0)
+                        .text(lang.choose("Click %", "节拍音量 %")),
+                ),
+            )
+            .changed()
+            {
+                app.config.metronome_volume = volume / 100.0;
+            }
+        });
+    });
+    theme::control_row(ui, |ui| {
         let menu = ui.menu_button(lang.text("Save"), |ui| {
             if theme::action(ui, Icon::Save, lang.text("Configuration"), "Ctrl+S").clicked() {
                 app.save_now();
@@ -178,24 +199,74 @@ fn transport(ui: &mut egui::Ui, app: &mut MyApp) {
             }
         });
         nav::register(menu.response);
+        let reason = app.take_block_reason();
         let taking = app.taking();
-        ui.add_enabled_ui(!app.busy(), |ui| {
-            if nav::register(theme::action(
+        ui.add_enabled_ui(reason.is_none(), |ui| {
+            let response = nav::register(theme::action(
                 ui,
                 if taking { Icon::Stop } else { Icon::Record },
                 lang.text(if taking { "End take" } else { "Record take" }),
                 "F9",
-            ))
-            .clicked()
-            {
-                if taking {
-                    app.finish_take();
-                } else {
-                    app.start_take();
-                }
+            ));
+            if response.clicked() {
+                app.toggle_take();
+            }
+            if let Some(reason) = reason {
+                response.on_disabled_hover_text(lang.text(reason));
             }
         });
+        if nav::register(theme::action(
+            ui,
+            Icon::Play,
+            lang.choose("Replays", "回放库"),
+            "F10",
+        ))
+        .clicked()
+        {
+            app.open_replays();
+        }
+        if nav::button(ui, lang.choose("Audio / calibration", "音频 / 校准")).clicked() {
+            app.left_page = LeftPage::Audio;
+            app.focus_panel(ui.ctx(), Focus::Left);
+        }
+        theme::caption(
+            ui,
+            if taking {
+                lang.choose("CAPTURING operations + input", "正在录制操作与输入")
+            } else if app.view.running {
+                lang.choose("Performance running", "演出运行中")
+            } else {
+                lang.choose("Performance stopped", "演出已停止")
+            },
+        );
+        if let Some(reason) = reason {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(lang.text(reason))
+                        .small()
+                        .color(theme::MUTED),
+                )
+                .truncate(true),
+            )
+            .on_hover_text(lang.text(reason));
+        }
     });
+    if app.calibration_held() {
+        ui.horizontal(|ui| {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                lang.choose("Monitoring muted for calibration", "回环校准：监听保持静音"),
+            );
+            if nav::button(
+                ui,
+                lang.choose("Open safety controls", "打开拔线确认与恢复监听"),
+            )
+            .clicked()
+            {
+                app.calibration_open = true;
+            }
+        });
+    }
     nav::end(ui);
     ui.allocate_ui_with_layout(
         egui::vec2(ui.available_width(), 24.0),
@@ -250,7 +321,7 @@ fn transport(ui: &mut egui::Ui, app: &mut MyApp) {
 
 fn left(ui: &mut egui::Ui, app: &mut MyApp) {
     let lang = crate::app_support::language::Language::current(ui.ctx());
-    ui.horizontal_wrapped(|ui| {
+    theme::control_row(ui, |ui| {
         for (page, label) in [
             (LeftPage::Track, lang.text("Track")),
             (LeftPage::Audio, lang.text("Audio")),
@@ -269,13 +340,13 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
             ui.add_enabled_ui(
                 !matches!(app.view.tracks[index].mode, Mode::Recording | Mode::Overdub),
                 |ui| {
-                    ui.horizontal_wrapped(|ui| {
+                    theme::control_row(ui, |ui| {
                         nav::register(ui.checkbox(&mut options.reverse, lang.text("Reverse")));
                         nav::register(ui.checkbox(&mut options.one_shot, lang.text("One shot")));
                     });
                 },
             );
-            ui.horizontal_wrapped(|ui| {
+            theme::control_row(ui, |ui| {
                 ui.label(lang.text("Stop"));
                 parameters::selector(
                     ui,
@@ -296,26 +367,50 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
                     ),
                 );
             });
-            ui.horizontal_wrapped(|ui|{
-                ui.label(lang.text("Quantize"));parameters::selector(ui,"quantize",&mut options.quantize,&[(Quantize::Off,lang.text("Off")),(Quantize::Beat,lang.text("Beat")),(Quantize::Measure,lang.text("Measure")),(Quantize::Loop,lang.text("Loop"))]);
-                ui.label(lang.text("Length"));nav::register(ui.add(egui::DragValue::new(&mut options.measures).clamp_range(0..=128).suffix(" bars"))).on_hover_text(lang.text("0 = finish manually; 1–128 = fixed length in 4/4. Maximum audio length is five minutes."));
+            theme::control_row(ui, |ui| {
+                ui.label(lang.text("Quantize"));
+                parameters::selector(
+                    ui,
+                    "quantize",
+                    &mut options.quantize,
+                    &[
+                        (Quantize::Off, lang.text("Off")),
+                        (Quantize::Beat, lang.text("Beat")),
+                        (Quantize::Measure, lang.text("Measure")),
+                        (Quantize::Loop, lang.text("Loop")),
+                    ],
+                );
+                ui.label(lang.text("Length"));
+                nav::register(ui.add(egui::DragValue::new(&mut options.measures).clamp_range(0..=128).suffix(" bars"))).on_hover_text(lang.text("0 = finish manually; 1–128 = fixed length in 4/4. Maximum audio length is five minutes."));
             });
             theme::caption(
                 ui,
                 lang.text("0 bars = manual finish · Reverse / One shot disable overdub"),
             );
-            ui.horizontal_wrapped(|ui| {
-                let redo = app.view.tracks[index].redo;
-                ui.add_enabled_ui(app.view.tracks[index].undo || redo, |ui| {
+            theme::control_row(ui, |ui| {
+                let view = app.view.tracks[index];
+                ui.add_enabled_ui(view.undo, |ui| {
                     if nav::register(theme::action(
                         ui,
-                        theme::Icon::None,
-                        lang.text(if redo { "Redo" } else { "Undo" }),
-                        if redo { "Ctrl+Y" } else { "Ctrl+Z" },
+                        theme::Icon::Undo,
+                        lang.text("Undo"),
+                        "Ctrl+Z",
                     ))
                     .clicked()
                     {
                         app.undo_track(index);
+                    }
+                });
+                ui.add_enabled_ui(view.redo, |ui| {
+                    if nav::register(theme::action(
+                        ui,
+                        theme::Icon::Redo,
+                        lang.text("Redo"),
+                        "Ctrl+Y",
+                    ))
+                    .clicked()
+                    {
+                        app.redo_track(index);
                     }
                 });
                 clear_button(ui, app, index);
@@ -343,14 +438,16 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
                     lang.choose("Unavailable", "尚未连接")
                 }
             ));
-            parameters::choice(ui, &mut app.config.system_config.input_device);
-            ui.add_enabled_ui(!follow, |ui| {
+            ui.add_enabled_ui(!app.calibration_held(), |ui| {
+                parameters::choice(ui, &mut app.config.system_config.input_device)
+            });
+            ui.add_enabled_ui(!follow && !app.calibration_held(), |ui| {
                 parameters::choice(ui, &mut app.config.system_config.output_device)
             });
             if nav::button(ui, lang.choose("Refresh devices", "刷新设备列表")).clicked() {
                 app.config.system_config.refresh();
             }
-            ui.horizontal_wrapped(|ui| {
+            theme::control_row(ui, |ui| {
                 ui.label(lang.text("Buffer"));
                 nav::register(
                     egui::ComboBox::from_id_source("buffer-frames")
@@ -367,7 +464,7 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
                         .response,
                 );
                 if nav::register(ui.add_enabled(
-                    app.stopped() && !app.busy() && !app.taking(),
+                    app.stopped() && !app.busy() && !app.taking() && !app.calibration_held(),
                     egui::Button::new(lang.text("Reconnect")),
                 ))
                 .clicked()
@@ -389,37 +486,36 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
                     d.maximum_callback_ns.load(Ordering::Relaxed) as f64 / 1e6
                 ),
             );
-            theme::caption(
+            if nav::button(
                 ui,
-                lang.text("Loopback: connect output L to input L; disconnect speakers. Monitoring is muted during probes."),
-            );
-            ui.horizontal_wrapped(|ui| {
-                if nav::register(ui.add_enabled(
-                    app.stopped() && app.audio.online && !app.taking(),
-                    egui::Button::new(lang.text("Measure loopback")),
-                ))
-                .clicked()
-                {
-                    app.calibrate();
+                lang.choose(
+                    "Loopback calibration / Can I test?",
+                    "回环延迟校准 / 能否测试？",
+                ),
+            )
+            .clicked()
+            {
+                app.calibration_open = true;
+            }
+            let mut visual = app.visualizer_enabled;
+            if nav::register(ui.checkbox(
+                &mut visual,
+                lang.choose("Animated output background", "输出音柱背景"),
+            ))
+            .changed()
+            {
+                app.visualizer_enabled = visual;
+                if !app.read_only {
+                    let mut pref = crate::app_support::launcher_config::load().unwrap_or_default();
+                    pref.visualizer_enabled = visual;
+                    let _ = crate::app_support::launcher_config::save(&pref);
                 }
-                if let Some(value) = app.measurement {
-                    if nav::button(
-                        ui,
-                        format!(
-                            "Apply {:.3} ms",
-                            value.frames as f64 * 1000.0 / value.sample_rate as f64
-                        ),
-                    )
-                    .clicked()
-                    {
-                        app.apply_measurement();
-                    }
-                }
-            });
+            }
         }
+
         LeftPage::Session => {
             ui.strong(app.project_name());
-            ui.horizontal_wrapped(|ui| {
+            theme::control_row(ui, |ui| {
                 if nav::button(ui, lang.text("Save configuration")).clicked() {
                     app.save_now();
                 }
@@ -427,7 +523,7 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
                     app.save_snapshot();
                 }
             });
-            ui.horizontal_wrapped(|ui| {
+            theme::control_row(ui, |ui| {
                 ui.label(lang.text("Input FX order"));
                 nav::register(
                     egui::ComboBox::from_id_source("routing")
@@ -451,7 +547,7 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
                 );
             });
             if nav::button(ui, lang.text("Replay library & import")).clicked() {
-                app.replay_browser = true;
+                app.open_replays();
             }
             if nav::button(ui, lang.text("Signal flow and operation guide")).clicked() {
                 app.help_open = true;
@@ -698,36 +794,36 @@ fn track(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
                 app.trigger_track(index);
             }
             ui.horizontal(|ui| {
-                if theme::action(
-                    ui,
-                    theme::Icon::None,
-                    lang.text("Stop"),
-                    &format!("F{}", index + 1),
-                )
-                .on_hover_text(format!("Shift+{}", index + 1))
-                .clicked()
+                if theme::action(ui, theme::Icon::Stop, "", &format!("F{}", index + 1))
+                    .on_hover_text(format!("Shift+{}", index + 1))
+                    .clicked()
                 {
                     app.pause_track(index);
                 }
-                ui.add_enabled_ui(view.undo || view.redo, |ui| {
-                    if theme::action(
-                        ui,
-                        if view.redo {
-                            theme::Icon::Redo
-                        } else {
-                            theme::Icon::Undo
-                        },
-                        "",
-                        "",
-                    )
-                    .on_hover_text(format!(
-                        "{} · Alt+{}",
-                        lang.text(if view.redo { "Redo" } else { "Undo" }),
-                        index + 1
-                    ))
-                    .clicked()
+                ui.add_enabled_ui(view.undo, |ui| {
+                    if theme::action(ui, theme::Icon::Undo, "", "")
+                        .on_hover_text(format!(
+                            "{} · Alt+{} · {}",
+                            lang.text("Undo"),
+                            index + 1,
+                            view.undo_depth
+                        ))
+                        .clicked()
                     {
                         app.undo_track(index);
+                    }
+                });
+                ui.add_enabled_ui(view.redo, |ui| {
+                    if theme::action(ui, theme::Icon::Redo, "", "")
+                        .on_hover_text(format!(
+                            "{} · Ctrl+Alt+{} · {}",
+                            lang.text("Redo"),
+                            index + 1,
+                            view.redo_depth
+                        ))
+                        .clicked()
+                    {
+                        app.redo_track(index);
                     }
                 });
             });
@@ -746,7 +842,7 @@ fn track(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
 fn clear_button(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
     let lang = crate::app_support::language::Language::current(ui.ctx());
     let response = nav::register(theme::action(ui, theme::Icon::Trash, lang.text("Clear audio"), "Del"))
-        .on_hover_text(format!("{}\n{}", lang.text("Hold Delete for 0.75 s or double-press within 350 ms. Clears the selected track and its undo audio."), lang.text("Click twice within 350 ms, or hold for 0.75 s. Release to cancel a hold.")));
+        .on_hover_text(format!("{}\n{}", lang.text("Hold Delete for 0.75 s or double-press within 350 ms. Clear can be undone from track history."), lang.text("Click twice within 350 ms, or hold for 0.75 s. Release to cancel a hold.")));
     let id = response.id.with("clear-gesture");
     let mut gesture = ui
         .ctx()

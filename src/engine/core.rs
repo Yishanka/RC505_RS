@@ -29,6 +29,9 @@ pub enum Action {
     Stop(usize),
     Clear(usize),
     Undo(usize),
+    UndoStep(usize),
+    RedoStep(usize),
+    Metronome(bool),
     All,
     Panic,
     Preview(bool),
@@ -37,6 +40,7 @@ pub enum Action {
 /// Allocated on the control thread. Old runtimes are moved back into the same
 /// envelope and retired on the worker, never freed by the callback.
 pub struct Parameters {
+    pub metronome_volume: f32,
     pub input: InputFxRuntime,
     pub track: TrackFxRuntime,
     pub options: [TrackOptions; TRACKS],
@@ -48,6 +52,7 @@ pub struct Parameters {
 impl Parameters {
     pub fn from_config(config: &AppConfig, sample_rate: u32) -> Self {
         Self {
+            metronome_volume: config.metronome_volume,
             input: InputFxRuntime::from_config(&config.input_fx),
             track: TrackFxRuntime::from_config(&config.track_fx),
             options: std::array::from_fn(|i| {
@@ -75,6 +80,7 @@ impl Parameters {
 }
 
 pub struct CoreTrack {
+    pub history: super::history::AudioHistory,
     pub audio: LoopAudio,
     pub undo: LoopAudio,
     pub undo_valid: bool,
@@ -92,6 +98,7 @@ pub struct CoreTrack {
 impl CoreTrack {
     fn new(sr: u32) -> Self {
         Self {
+            history: super::history::AudioHistory::new(sr),
             audio: LoopAudio::new(sr),
             undo: LoopAudio::new(sr),
             undo_valid: false,
@@ -110,6 +117,8 @@ impl CoreTrack {
 }
 
 pub struct AudioSnapshot {
+    pub histories: [super::history::AudioHistory; TRACKS],
+    pub has_histories: bool,
     pub sample_rate: u32,
     pub at: u64,
     pub tracks: [LoopAudio; TRACKS],
@@ -120,6 +129,8 @@ pub struct AudioSnapshot {
 impl AudioSnapshot {
     pub fn empty(sr: u32) -> Self {
         Self {
+            histories: std::array::from_fn(|_| super::history::AudioHistory::new(sr)),
+            has_histories: false,
             sample_rate: sr,
             at: 0,
             tracks: std::array::from_fn(|_| LoopAudio::new(sr)),
@@ -132,6 +143,8 @@ impl AudioSnapshot {
 
 #[derive(Clone, Copy, Default)]
 pub struct TrackView {
+    pub undo_depth: usize,
+    pub redo_depth: usize,
     pub mode: Mode,
     pub pending: bool,
     pub frames: usize,
@@ -143,6 +156,8 @@ pub struct TrackView {
 }
 #[derive(Clone, Copy)]
 pub struct EngineView {
+    pub metronome: bool,
+    pub output_wave: [f32; super::visual_meter::BARS],
     pub frame: u64,
     pub elapsed: u64,
     pub running: bool,
@@ -156,6 +171,8 @@ pub struct EngineView {
 impl Default for EngineView {
     fn default() -> Self {
         Self {
+            metronome: false,
+            output_wave: [0.0; super::visual_meter::BARS],
             frame: 0,
             elapsed: 0,
             running: false,
@@ -170,6 +187,10 @@ impl Default for EngineView {
 }
 
 pub struct RenderCore {
+    pub transport: bool,
+    pub metronome: bool,
+    pub metronome_volume: f32,
+    legacy: bool,
     pub sample_rate: u32,
     pub clock: SampleClock,
     pub tracks: [CoreTrack; TRACKS],
@@ -195,6 +216,10 @@ impl RenderCore {
         let mut track_fx = TrackFxEngine::new(sr as f32, TRACKS);
         track_fx.prepare();
         Self {
+            transport: false,
+            metronome: false,
+            metronome_volume: 0.35,
+            legacy: false,
             sample_rate: sr,
             clock: SampleClock::default(),
             tracks: std::array::from_fn(|_| CoreTrack::new(sr)),
@@ -213,6 +238,7 @@ impl RenderCore {
         }
     }
     pub fn configure(&mut self, p: &mut Parameters) {
+        self.metronome_volume = p.metronome_volume;
         p.input = self
             .input
             .swap_runtime(std::mem::replace(&mut p.input, InputFxRuntime::empty()));
@@ -232,6 +258,25 @@ impl RenderCore {
             .set_clock(self.bpm as usize, self.clock.origin.is_some());
     }
     pub fn idle(&self) -> bool {
+        if self.legacy {
+            self.legacy_idle()
+        } else {
+            !self.transport && !self.preview && self.tracks_stopped()
+        }
+    }
+    pub fn tracks_stopped(&self) -> bool {
+        self.tracks.iter().all(|t| {
+            matches!(t.mode, Mode::Empty | Mode::Stopped)
+                && t.pending.is_none()
+                && t.finish.is_none()
+                && t.fade.is_none()
+        })
+    }
+    pub fn legacy_renderer(&mut self, enabled: bool) {
+        self.legacy = enabled;
+        self.input.set_legacy_fallback(enabled);
+    }
+    pub fn legacy_idle(&self) -> bool {
         !self.preview
             && self
                 .tracks
@@ -239,8 +284,23 @@ impl RenderCore {
                 .all(|t| matches!(t.mode, Mode::Empty | Mode::Stopped) && t.pending.is_none())
     }
     pub fn snapshot(&self, snapshot: &mut AudioSnapshot, pool: &mut impl PageAllocator) {
+        snapshot.has_histories = true;
         snapshot.at = self.clock.frame;
         for i in 0..TRACKS {
+            let track = &self.tracks[i];
+            if self.legacy {
+                snapshot.histories[i].clear(pool);
+                if track.undo_valid {
+                    let stack = if track.undone {
+                        &mut snapshot.histories[i].redo
+                    } else {
+                        &mut snapshot.histories[i].undo
+                    };
+                    stack.push(&track.undo, pool);
+                }
+            } else {
+                track.history.copy_into(&mut snapshot.histories[i], pool);
+            }
             self.tracks[i]
                 .audio
                 .share_into(&mut snapshot.tracks[i], pool);
@@ -253,6 +313,7 @@ impl RenderCore {
     pub fn restore(&mut self, snapshot: &mut AudioSnapshot) {
         for i in 0..TRACKS {
             let t = &mut self.tracks[i];
+            std::mem::swap(&mut t.history, &mut snapshot.histories[i]);
             std::mem::swap(&mut t.audio, &mut snapshot.tracks[i]);
             std::mem::swap(&mut t.undo, &mut snapshot.undo[i]);
             t.undo_valid = snapshot.undo_valid[i];
@@ -270,6 +331,8 @@ impl RenderCore {
         }
         self.clock.origin = None;
         self.preview = false;
+        self.transport = false;
+        self.metronome = false;
         self.exhausted = false;
     }
     fn boundary(&self, i: usize) -> u64 {
@@ -295,6 +358,12 @@ impl RenderCore {
             Action::All => {
                 let stop = !self.idle();
                 self.preview = false;
+                self.transport = !stop && !self.legacy;
+                if stop {
+                    self.metronome = false;
+                } else if !self.legacy {
+                    self.clock.start();
+                }
                 for i in 0..TRACKS {
                     if stop {
                         self.action(Action::Stop(i), pool);
@@ -305,6 +374,8 @@ impl RenderCore {
             }
             Action::Panic => {
                 self.preview = false;
+                self.transport = false;
+                self.metronome = false;
                 for t in &mut self.tracks {
                     t.pending = None;
                     t.finish = None;
@@ -328,8 +399,44 @@ impl RenderCore {
                     self.clock.start();
                 }
             }
+            Action::Metronome(enabled) => {
+                self.metronome = enabled;
+                if enabled {
+                    self.transport = true;
+                    self.clock.start();
+                }
+            }
+            Action::UndoStep(i) | Action::RedoStep(i) if i < TRACKS => {
+                let t = &mut self.tracks[i];
+                let available = if matches!(action, Action::UndoStep(_)) {
+                    t.history.undo.len > 0
+                } else {
+                    t.history.redo.len > 0
+                };
+                if available
+                    && !matches!(t.mode, Mode::Recording | Mode::Overdub)
+                    && t.finish.is_none()
+                {
+                    if matches!(action, Action::UndoStep(_)) {
+                        t.history.undo(&mut t.audio, pool);
+                    } else {
+                        t.history.redo(&mut t.audio, pool);
+                    }
+                    if t.audio.len == 0 {
+                        t.mode = Mode::Empty;
+                    } else if t.mode == Mode::Empty {
+                        t.mode = Mode::Stopped;
+                    }
+                    t.cursor %= t.audio.len.max(1);
+                    t.pending = None;
+                    t.fade = None;
+                }
+            }
             Action::Clear(i) if i < TRACKS => {
                 let t = &mut self.tracks[i];
+                if t.audio.len > 0 && !self.legacy {
+                    t.history.checkpoint(&t.audio, pool);
+                }
                 t.audio.clear(pool);
                 t.undo.clear(pool);
                 t.undo_valid = false;
@@ -410,6 +517,9 @@ impl RenderCore {
         match action {
             Action::Trigger(_) => match t.mode {
                 Mode::Empty => {
+                    if !self.legacy {
+                        t.history.checkpoint(&t.audio, pool);
+                    }
                     t.audio.clear(pool);
                     t.undo.clear(pool);
                     t.undo_valid = false;
@@ -455,6 +565,9 @@ impl RenderCore {
                     t.fade = None;
                 }
                 Mode::Playing if !self.options[i].reverse => {
+                    if !self.legacy {
+                        t.history.checkpoint(&t.audio, pool);
+                    }
                     t.audio.share_into(&mut t.undo, pool);
                     t.undo_valid = true;
                     t.undone = false;
@@ -623,8 +736,22 @@ impl RenderCore {
                 pending: t.pending.is_some() || t.finish.is_some() || t.fade.is_some(),
                 frames: t.audio.len,
                 cursor: t.cursor,
-                undo: t.undo_valid && !t.undone,
-                redo: t.undo_valid && t.undone,
+                undo: !matches!(t.mode, Mode::Recording | Mode::Overdub)
+                    && t.finish.is_none()
+                    && if self.legacy {
+                        t.undo_valid && !t.undone
+                    } else {
+                        t.history.undo.len > 0
+                    },
+                redo: !matches!(t.mode, Mode::Recording | Mode::Overdub)
+                    && t.finish.is_none()
+                    && if self.legacy {
+                        t.undo_valid && t.undone
+                    } else {
+                        t.history.redo.len > 0
+                    },
+                undo_depth: t.history.undo.len,
+                redo_depth: t.history.redo.len,
                 peak: self.track_peaks[i],
                 wave: std::array::from_fn(|bin| {
                     let start = bin * t.audio.len / 24;
@@ -635,6 +762,8 @@ impl RenderCore {
             }
         });
         let view = EngineView {
+            metronome: self.metronome,
+            output_wave: [0.0; super::visual_meter::BARS],
             frame: self.clock.frame,
             elapsed: self.clock.elapsed(),
             running: self.clock.origin.is_some(),
@@ -733,6 +862,45 @@ mod tests {
         core.action(Action::Undo(0), &mut OfflinePages);
         assert!(core.tracks[0].audio.read(30)[1] > 0.0);
         assert_eq!(snapshot.tracks[0].read(30)[1], 0.0);
+    }
+    #[test]
+    fn consecutive_record_overdub_clear_history_survives_snapshot_restore() {
+        let mut core = core();
+        record(&mut core, 100);
+        let original = core.tracks[0].audio.read(30);
+        core.action(Action::Trigger(0), &mut OfflinePages);
+        core.process([0.1; 2], &mut OfflinePages);
+        core.action(Action::UndoStep(0), &mut OfflinePages);
+        assert_eq!(
+            core.tracks[0].mode,
+            Mode::Overdub,
+            "undo is disabled while writing"
+        );
+        for _ in 0..99 {
+            core.process([0.1; 2], &mut OfflinePages);
+        }
+        core.action(Action::Trigger(0), &mut OfflinePages);
+        core.process([0.0; 2], &mut OfflinePages);
+        let overdub = core.tracks[0].audio.read(30);
+        assert_ne!(original, overdub);
+        core.action(Action::Clear(0), &mut OfflinePages);
+        let mut saved = AudioSnapshot::empty(8000);
+        core.snapshot(&mut saved, &mut OfflinePages);
+        let mut restored = crate::engine::core::tests::core();
+        restored.restore(&mut saved);
+        restored.action(Action::UndoStep(0), &mut OfflinePages);
+        assert_eq!(restored.tracks[0].audio.read(30), overdub);
+        restored.action(Action::UndoStep(0), &mut OfflinePages);
+        assert_eq!(restored.tracks[0].audio.read(30), original);
+        restored.action(Action::UndoStep(0), &mut OfflinePages);
+        assert_eq!(restored.tracks[0].mode, Mode::Empty);
+        restored.action(Action::RedoStep(0), &mut OfflinePages);
+        assert_eq!(restored.tracks[0].audio.read(30), original);
+        restored.action(Action::RedoStep(0), &mut OfflinePages);
+        assert_eq!(restored.tracks[0].audio.read(30), overdub);
+        restored.action(Action::RedoStep(0), &mut OfflinePages);
+        assert_eq!(restored.tracks[0].mode, Mode::Empty);
+        assert_eq!(restored.tracks[1].history.undo.len, 0);
     }
     #[test]
     fn one_shot_reverse_stop_modes_and_fixed_length() {

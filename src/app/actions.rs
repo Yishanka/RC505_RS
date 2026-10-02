@@ -3,13 +3,23 @@ use crate::engine::core::Action;
 
 impl MyApp {
     pub fn action(&mut self, action: Action) {
+        if matches!(action, Action::Panic) {
+            self.stop_audition();
+        }
+        if self.calibration_held() {
+            self.status = self
+                .language
+                .text("Disconnect the loopback cable and restore monitoring first")
+                .into();
+            return;
+        }
         if self.performance_locked() || self.player_open {
             return;
         }
         if !self.audio.online
             && matches!(
                 action,
-                Action::Trigger(_) | Action::Preview(true) | Action::All
+                Action::Trigger(_) | Action::Preview(true) | Action::Metronome(true) | Action::All
             )
         {
             self.status="Connect audio before performing. Offline preset and snapshot editing is available.".into();
@@ -30,15 +40,13 @@ impl MyApp {
         self.action(Action::Clear(index));
     }
     pub fn undo_track(&mut self, index: usize) {
-        self.action(Action::Undo(index));
+        self.action(Action::UndoStep(index));
     }
     pub fn toggle_all(&mut self) {
-        self.previewing = false;
         self.action(Action::All);
     }
-    pub fn toggle_preview(&mut self) {
-        self.previewing = !self.previewing;
-        self.action(Action::Preview(self.previewing));
+    pub fn redo_track(&mut self, index: usize) {
+        self.action(Action::RedoStep(index));
     }
     pub fn project_name(&self) -> &str {
         self.active_project_idx
@@ -164,8 +172,8 @@ impl MyApp {
             self.config.calibration = Some(crate::config::track_options::LatencyCalibration {
                 frames: value.frames,
                 sample_rate: value.sample_rate,
-                input: self.config.system_config.input_device.value.clone(),
-                output: self.config.system_config.output_device.value.clone(),
+                input: self.audio.curr_input_name().to_owned(),
+                output: self.audio.curr_output_name().to_owned(),
                 buffer_frames: self.buffer_frames,
                 displayed_ms: self.config.beat_config.input_latency.value,
             });
@@ -177,6 +185,13 @@ impl MyApp {
         }
     }
     pub fn calibrate(&mut self) {
+        if !self.calibration_held() || !self.loopback_connected {
+            self.status = self
+                .language
+                .text("Prepare and confirm the loopback cable first")
+                .into();
+            return;
+        }
         if !self.stopped() || self.taking() || !self.audio.online {
             return;
         }

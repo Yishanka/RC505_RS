@@ -26,6 +26,7 @@ impl MyApp {
             && !text
             && !popup_open
             && !self.editor.expanded
+            && !self.calibration_open
             && !self.help_open
             && !self.player_open
             && !self.replay_browser
@@ -62,10 +63,42 @@ impl MyApp {
         if !input.focused {
             return;
         }
+        if self.app_state == AppState::MainLoop
+            && input.modifiers.is_none()
+            && pressed(&input, Key::F9)
+        {
+            if self.show_save_prompt || self.help_open || self.calibration_open {
+                self.status = self
+                    .language
+                    .choose(
+                        "Close the current dialog before recording.",
+                        "请先关闭当前对话框再录制回放。",
+                    )
+                    .into();
+            } else {
+                self.toggle_take();
+            }
+            return;
+        }
+        if self.app_state == AppState::MainLoop
+            && !self.show_save_prompt
+            && !self.calibration_open
+            && input.modifiers.is_none()
+            && pressed(&input, Key::F10)
+        {
+            self.open_replays();
+            return;
+        }
         if self.show_save_prompt {
             if pressed(&input, Key::Escape) && !self.busy() {
                 self.show_save_prompt = false;
                 self.pending_exit = None;
+            }
+            return;
+        }
+        if self.calibration_open {
+            if pressed(&input, Key::Escape) {
+                self.calibration_open = false;
             }
             return;
         }
@@ -80,7 +113,10 @@ impl MyApp {
             return;
         }
         if self.player_open {
-            if !text && pressed(&input, Key::Space) {
+            if input.modifiers.is_none() && pressed(&input, Key::Space) {
+                ctx.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::NONE, Key::Space);
+                });
                 self.send(Control::PlayerToggle);
             }
             if pressed(&input, Key::Escape) {
@@ -91,6 +127,7 @@ impl MyApp {
         if self.replay_browser {
             if pressed(&input, Key::Escape) {
                 self.replay_browser = false;
+                self.replay_autoplay = false;
             }
             return;
         }
@@ -169,14 +206,6 @@ impl MyApp {
             }
             return;
         }
-        if !text && pressed(&input, Key::F9) {
-            if self.taking() {
-                self.finish_take();
-            } else {
-                self.start_take();
-            }
-            return;
-        }
         if self.focus != Focus::Performance {
             let no_command =
                 !input.modifiers.ctrl && !input.modifiers.alt && !input.modifiers.mac_cmd;
@@ -218,16 +247,23 @@ impl MyApp {
         let numbers = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5];
         for (index, key) in numbers.into_iter().enumerate() {
             if pressed(&input, key) {
-                if input.modifiers.ctrl {
+                if input.modifiers.alt {
+                    if input.modifiers.ctrl {
+                        self.redo_track(index);
+                    } else {
+                        self.undo_track(index);
+                    }
+                } else if input.modifiers.ctrl {
                     self.track_sel = Some(index);
-                } else if input.modifiers.alt {
-                    self.undo_track(index);
                 } else if input.modifiers.shift {
                     self.pause_track(index);
                 } else {
                     self.trigger_track(index);
                 }
             }
+        }
+        if input.modifiers.ctrl && input.modifiers.alt {
+            return;
         }
         if input.modifiers.ctrl {
             let index = self.track_sel.unwrap_or(0);
@@ -237,7 +273,7 @@ impl MyApp {
             if (pressed(&input, Key::Y) || pressed(&input, Key::Z) && input.modifiers.shift)
                 && self.view.tracks[index].redo
             {
-                self.undo_track(index);
+                self.redo_track(index);
             }
             for (index, key) in fx_keys.into_iter().enumerate() {
                 if pressed(&input, key) {

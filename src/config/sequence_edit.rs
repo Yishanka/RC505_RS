@@ -167,6 +167,16 @@ impl NoteConfigs {
             .collect();
         self.replace_events(self.seq().len(), &events);
     }
+    /// Editor operations preserve the explicitly selected loop length.
+    pub fn insert_within_loop(&mut self, mut event: NoteEvent) -> bool {
+        let length = self.seq().len();
+        if event.start >= length || event.len == 0 {
+            return false;
+        }
+        event.len = event.len.min(length - event.start);
+        self.insert_event(event);
+        true
+    }
 
     pub fn transpose(&mut self, semitones: i32) {
         let mut events = self.events();
@@ -195,6 +205,17 @@ impl NoteConfigs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bounded_editing_cannot_extend_the_loop() {
+        let mut c = NoteConfigs::new();
+        c.replace_events(12, &[]);
+        assert!(!c.insert_within_loop(note(24, 3, 48)));
+        assert_eq!(c.seq().len(), 12);
+        assert!(c.insert_within_loop(note(10, 12, 48)));
+        assert_eq!(c.events()[0].len, 2);
+        c.remove_event(10);
+        assert_eq!(c.seq().len(), 12);
+    }
     fn note(start: usize, len: usize, pitch: usize) -> NoteEvent {
         NoteEvent {
             start,

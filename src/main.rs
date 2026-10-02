@@ -32,10 +32,8 @@ fn main() -> eframe::Result<()> {
         }
         return Ok(());
     }
-    let small = std::env::args().any(|arg| {
-        arg.starts_with("--ui-preview=performance-small")
-            || arg.starts_with("--ui-preview=sequence-small")
-    });
+    let small =
+        std::env::args().any(|arg| arg.starts_with("--ui-preview=") && arg.contains("-small"));
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_icon(ui::theme::window_icon())

@@ -17,7 +17,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const RENDERER_VERSION: u32 = 2;
+pub const RENDERER_VERSION: u32 = 3;
 pub const MAX_TAKE_SECONDS: u64 = 1800;
 #[derive(Clone, Serialize, Deserialize)]
 pub enum EventKind {
@@ -153,7 +153,7 @@ impl Writer {
 pub fn info(root: &Path) -> Result<ReplayInfo> {
     let value: ReplayInfo = serde_json::from_slice(&fs::read(root.join("replay.json"))?)?;
     ensure!(
-        value.version == 1 && value.renderer == RENDERER_VERSION,
+        value.version == 1 && (value.renderer == 2 || value.renderer == RENDERER_VERSION),
         "Replay requires renderer version {}",
         value.renderer
     );
@@ -193,6 +193,8 @@ pub fn list(entry: &crate::project::ProjectEntry) -> Vec<(PathBuf, String)> {
 }
 
 pub struct RenderResult {
+    pub project_id: String,
+    pub name: String,
     pub snapshot: AudioSnapshot,
     pub config: ProjectData,
     pub wav: PathBuf,
@@ -226,6 +228,7 @@ pub fn render(
     let mut config = AppConfig::new(120, 0, 5);
     crate::project::apply_data_to_config(&mut config, data.clone());
     let mut core = RenderCore::new(metadata.sample_rate);
+    core.legacy_renderer(metadata.renderer == 2);
     core.configure(&mut Parameters::from_config(&config, metadata.sample_rate));
     core.restore(&mut initial);
     let mut input = hound::WavReader::open(root.join("input.wav"))?;
@@ -302,6 +305,8 @@ pub fn render(
     core.snapshot(&mut snapshot, &mut OfflinePages);
     progress.store(metadata.frames, std::sync::atomic::Ordering::Relaxed);
     Ok(RenderResult {
+        project_id: metadata.project_id,
+        name: metadata.name,
         snapshot,
         config: data,
         wav: destination.to_owned(),
@@ -330,6 +335,11 @@ mod tests {
     use crate::config::{FxKind, TrackFxKind, track_options::Quantize};
     #[test]
     fn live_input_and_operations_reproduce_bit_exact_output_and_final_loops() {
+        for renderer in [2, RENDERER_VERSION] {
+            check_renderer(renderer);
+        }
+    }
+    fn check_renderer(renderer: u32) {
         let root = std::env::temp_dir().join(format!("rc505-replay-test-{}", session::id()));
         let mut config = AppConfig::new(117, 3, 5);
         config.calibration = Some(crate::config::track_options::LatencyCalibration {
@@ -345,9 +355,17 @@ mod tests {
         }
         config.input_fx.set_slot_kind(0, 0, FxKind::Filter);
         config.input_fx.banks[0].slots[0].is_enabled = true;
+        config.input_fx.set_slot_kind(0, 1, FxKind::Oscillator);
+        config.input_fx.banks[0].slots[1].is_enabled = true;
+        if let Some(crate::config::InputFx::Oscillator(osc)) =
+            &mut config.input_fx.banks[0].slots[1].fx
+        {
+            osc.threshold.value = 0;
+        }
         config.track_fx.set_slot_kind(0, 0, TrackFxKind::Delay);
         config.track_fx.tracks[0].enabled[0][0] = true;
         let mut core = RenderCore::new(8000);
+        core.legacy_renderer(renderer == 2);
         core.configure(&mut Parameters::from_config(&config, 8000));
         let mut initial = AudioSnapshot::empty(8000);
         core.snapshot(&mut initial, &mut OfflinePages);
@@ -363,7 +381,10 @@ mod tests {
         for frame in 0..6000u64 {
             let action = match frame {
                 0 | 1000 | 1600 | 2800 => Some(Action::Trigger(0)),
-                3400 | 3800 => Some(Action::Undo(0)),
+                3400 | 3800 if renderer == 2 => Some(Action::Undo(0)),
+                3400 => Some(Action::UndoStep(0)),
+                3500 => Some(Action::UndoStep(0)),
+                3600 | 3800 => Some(Action::RedoStep(0)),
                 4400 => Some(Action::Stop(0)),
                 4700 => Some(Action::Trigger(0)),
                 _ => None,
@@ -386,6 +407,13 @@ mod tests {
             live.push(core.process(dry, &mut OfflinePages));
         }
         writer.finish(6000).unwrap();
+        if renderer == 2 {
+            let path = root.join("replay.json");
+            let mut metadata: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            metadata["renderer"] = 2.into();
+            fs::write(path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        }
         let wav = root.join("rendered.wav");
         let result = render(&root, &wav, &std::sync::atomic::AtomicU64::new(0)).unwrap();
         let values = hound::WavReader::open(&wav)
@@ -402,6 +430,24 @@ mod tests {
             );
         }
         assert_eq!(result.snapshot.tracks[0].len, core.tracks[0].audio.len);
+        if renderer == RENDERER_VERSION {
+            assert_eq!(
+                result.snapshot.histories[0].undo.len,
+                core.tracks[0].history.undo.len
+            );
+            assert_eq!(
+                result.snapshot.histories[0].redo.len,
+                core.tracks[0].history.redo.len
+            );
+        } else {
+            let stack = if core.tracks[0].undone {
+                &result.snapshot.histories[0].redo
+            } else {
+                &result.snapshot.histories[0].undo
+            };
+            assert_eq!(stack.len, 1);
+            assert_eq!(stack.slots[0].read(0), core.tracks[0].undo.read(0));
+        }
         for i in 0..core.tracks[0].audio.len {
             assert_eq!(
                 result.snapshot.tracks[0].read(i),

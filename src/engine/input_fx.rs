@@ -145,6 +145,7 @@ pub struct InputFxState {
 }
 
 pub struct InputFxEngine {
+    legacy_fallback: bool,
     routing: crate::config::track_options::InputRouting,
     clock_active: bool,
     input_envelope: crate::dsp::detector::PeakFollower,
@@ -156,8 +157,12 @@ pub struct InputFxEngine {
 }
 
 impl InputFxEngine {
+    pub fn set_legacy_fallback(&mut self, enabled: bool) {
+        self.legacy_fallback = enabled;
+    }
     pub fn new(sample_rate: f32) -> Self {
         Self {
+            legacy_fallback: false,
             routing: crate::config::track_options::InputRouting::Legacy,
             clock_active: false,
             input_envelope: crate::dsp::detector::PeakFollower::default(),
@@ -277,18 +282,23 @@ impl InputFxEngine {
             let Some(osc) = slot.osc.as_ref() else {
                 continue;
             };
-            let note = if osc.note_seq.is_empty() {
+            let note = if !self.legacy_fallback && (!self.clock_active || osc.note_seq.is_empty()) {
+                None
+            } else if osc.note_seq.is_empty() {
                 osc.note_current
             } else if !self.clock_active {
                 osc.note_current
             } else {
                 note_at_time(&osc.note_seq, self.bpm, elapsed_secs)
             };
-            let note_on = if !self.clock_active || osc.note_on_seq.is_empty() {
-                true
-            } else {
-                seq_bool_at_time(&osc.note_on_seq, self.bpm, elapsed_secs)
-            };
+            let note_on =
+                if !self.legacy_fallback && (!self.clock_active || osc.note_on_seq.is_empty()) {
+                    false
+                } else if !self.clock_active || osc.note_on_seq.is_empty() {
+                    true
+                } else {
+                    seq_bool_at_time(&osc.note_on_seq, self.bpm, elapsed_secs)
+                };
             let note_retrigger = state_bank.slots[idx].trigger.next(
                 &osc.note_trigger_seq,
                 self.bpm,
@@ -339,18 +349,24 @@ impl InputFxEngine {
                 continue;
             };
 
-            let note_on = if !self.clock_active || delay.note_on_seq.is_empty() {
-                true
-            } else {
-                seq_bool_at_time(&delay.note_on_seq, self.bpm, elapsed_secs)
-            };
+            let note_on =
+                if !self.legacy_fallback && (!self.clock_active || delay.note_on_seq.is_empty()) {
+                    false
+                } else if !self.clock_active || delay.note_on_seq.is_empty() {
+                    true
+                } else {
+                    seq_bool_at_time(&delay.note_on_seq, self.bpm, elapsed_secs)
+                };
             let note_retrigger = state_bank.slots[idx].trigger.next(
                 &delay.note_trigger_seq,
                 self.bpm,
                 elapsed_secs,
                 self.clock_active,
             );
-            let note = if delay.note_seq.is_empty() {
+            let note = if !self.legacy_fallback && (!self.clock_active || delay.note_seq.is_empty())
+            {
+                None
+            } else if delay.note_seq.is_empty() {
                 delay.note_current
             } else if !self.clock_active {
                 delay.note_current
@@ -956,6 +972,51 @@ fn tension_to_exponent(value: usize) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn modern_voice_requires_running_notes_and_legacy_renderer_keeps_fixed_note() {
+        let mut config = InputFxConfigs::new();
+        config.set_slot_kind(0, 0, crate::config::FxKind::Oscillator);
+        config.banks[0].slots[0].is_enabled = true;
+        if let Some(InputFx::Oscillator(osc)) = &mut config.banks[0].slots[0].fx {
+            osc.threshold.value = 0;
+            osc.osc_filter.mix.value = 0;
+            osc.envelope.attack_ms.value = 1;
+        }
+        let mut engine = InputFxEngine::new(8000.0);
+        engine.swap_runtime(InputFxRuntime::from_config(&config));
+        for active in [false, true] {
+            engine.set_clock(active, 120);
+            for i in 0..400 {
+                assert_eq!(
+                    engine.process_frame(i as f64 / 8000.0, 0.0, 0.0, &[]),
+                    (0.0, 0.0)
+                );
+            }
+        }
+        engine.set_legacy_fallback(true);
+        engine.set_clock(false, 120);
+        let mut peak = 0.0f32;
+        for i in 0..400 {
+            peak = peak.max(
+                engine
+                    .process_frame(i as f64 / 8000.0, 0.0, 0.0, &[])
+                    .0
+                    .abs(),
+            );
+        }
+        assert!(peak > 0.1);
+        if let Some(InputFx::Oscillator(osc)) = &mut config.banks[0].slots[0].fx {
+            osc.note.push();
+        }
+        let mut live = InputFxEngine::new(8000.0);
+        live.swap_runtime(InputFxRuntime::from_config(&config));
+        live.set_clock(true, 120);
+        let mut peak = 0.0f32;
+        for i in 0..400 {
+            peak = peak.max(live.process_frame(i as f64 / 8000.0, 0.0, 0.0, &[]).0.abs());
+        }
+        assert!(peak > 0.1);
+    }
     #[test]
     fn attack_completes_inside_the_first_sequence_tick() {
         let mut config = InputFxConfigs::new();

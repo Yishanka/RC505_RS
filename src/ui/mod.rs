@@ -1,4 +1,5 @@
 mod beat;
+pub mod calibration;
 pub mod editor;
 pub mod help;
 pub mod init;
@@ -8,6 +9,7 @@ pub mod performance;
 pub mod piano_roll;
 pub mod replays;
 pub mod theme;
+pub mod visualizer;
 
 #[cfg(debug_assertions)]
 pub mod preview;
