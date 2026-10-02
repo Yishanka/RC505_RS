@@ -2,6 +2,10 @@
 
 ## 0.2.7 本地验证（2026-10-02）
 
+- 功能提交 `50a6f62`、标签 `v0.2.7` 已推送；[主分支构建](https://github.com/Yishanka/RC505_RS/actions/runs/36972862986) 和 [发布构建](https://github.com/Yishanka/RC505_RS/actions/runs/36972862466) 均成功。[正式发布页](https://github.com/Yishanka/RC505_RS/releases/tag/v0.2.7) 包含安装器、便携包、哈希与更新清单。
+- 原安装版 0.2.6 通过自带更新器正常检查、下载、校验、安装 0.2.7 到 `E:\SJTU\rc505`，自动启动后进程响应正常；主程序/启动器资源版本及 `--installation-info` 均为 0.2.7，没有 panic 日志。数据目录仍为 `E:\SJTU\rc505\data`，更新前后 61 个已有文件 SHA-256 全部一致（排除运行锁）。
+- `E:\installer` 更新后仅保留 `RC505-RS-setup.exe`、其校验清单和更新脚本，无第二份版本化安装包。正式安装器 SHA-256：`3fa3ac91a68ac543bfb96fb2479e87631c2f5a78b474d4c6617387faa731218f`。
+
 - `cargo check --all-targets`、`cargo test --all-targets` 通过：主程序 59 项、启动器 3 项、独立进程 UI 回归 1 项，共 63 项；1 项真实声卡测试默认忽略。两个 release 程序构建通过，旧辅助字段告警仍在。
 - 覆盖真实录音→叠录→清空→快照恢复后的连续撤销/重做、8 步上限和分支替换；历史遍历的实时分配/释放计数为 0。快照 3 读写包含 undo/redo 栈，复用共享音频资产，验证格式 2 的迁移。
 - renderer 2/3 分别验证现场计算与离线回放逐采样位相同；包括旧固定音符行为、新连续历史、轨道操作与参数变化。现代 Oscillator 在未开始或空序列时静音，旧回放保留旧语义。
