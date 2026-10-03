@@ -135,6 +135,7 @@ fn osc_sample(waveform: Waveform, phase: f32, freq: f32, sample_rate: f32) -> (f
     let mut t = phase;
     let sample = match waveform {
         Waveform::Sine => (2.0 * std::f32::consts::PI * t).sin(),
+        Waveform::Vocal | Waveform::Sample => 0.0, // These sources belong to the unified voice engine.
         Waveform::Saw => {
             let mut v = 2.0 * t - 1.0;
             v -= poly_blep(t, dt);
@@ -174,4 +175,15 @@ fn poly_blep(t: f32, dt: f32) -> f32 {
         return x * x + x + x + 1.0;
     }
     0.0
+}
+
+mod note_schedule;
+mod sample_tables;
+mod voice;
+pub use voice::{PolyOscRuntime, PolyOscState, lfo_value, process_poly_sample};
+
+/// Read the same prepared source table for the editor; called only by the UI.
+pub fn source_wave_preview(config: &crate::config::OscillatorConfigs) -> [f32; 400] {
+    let table = sample_tables::WaveBank::prepare(config);
+    std::array::from_fn(|i| table.read((i as f64 / 200.0).fract(), 220.0, 48000.0))
 }

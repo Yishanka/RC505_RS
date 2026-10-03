@@ -40,6 +40,8 @@ pub enum Action {
 /// Allocated on the control thread. Old runtimes are moved back into the same
 /// envelope and retired on the worker, never freed by the callback.
 pub struct Parameters {
+    pub master: crate::dsp::master::MasterFxRuntime,
+    pub input_thru: bool,
     pub metronome_volume: f32,
     pub input: InputFxRuntime,
     pub track: TrackFxRuntime,
@@ -52,6 +54,8 @@ pub struct Parameters {
 impl Parameters {
     pub fn from_config(config: &AppConfig, sample_rate: u32) -> Self {
         Self {
+            master: crate::dsp::master::MasterFxRuntime::from_config(&config.master_fx),
+            input_thru: config.input_thru,
             metronome_volume: config.metronome_volume,
             input: InputFxRuntime::from_config(&config.input_fx),
             track: TrackFxRuntime::from_config(&config.track_fx),
@@ -156,6 +160,7 @@ pub struct TrackView {
 }
 #[derive(Clone, Copy)]
 pub struct EngineView {
+    pub bpm: u32,
     pub metronome: bool,
     pub output_spectrum: [f32; super::spectrum::BARS],
     pub frame: u64,
@@ -171,6 +176,7 @@ pub struct EngineView {
 impl Default for EngineView {
     fn default() -> Self {
         Self {
+            bpm: 120,
             metronome: false,
             output_spectrum: [0.0; super::spectrum::BARS],
             frame: 0,
@@ -187,6 +193,9 @@ impl Default for EngineView {
 }
 
 pub struct RenderCore {
+    master: crate::dsp::master::MasterFxState,
+    pub input_thru: bool,
+    input_monitor_gain: f32,
     pub transport: bool,
     pub metronome: bool,
     pub metronome_volume: f32,
@@ -216,7 +225,10 @@ impl RenderCore {
         let mut track_fx = TrackFxEngine::new(sr as f32, TRACKS);
         track_fx.prepare();
         Self {
+            master: crate::dsp::master::MasterFxState::new(sr as f32),
             transport: false,
+            input_thru: true,
+            input_monitor_gain: 1.0,
             metronome: false,
             metronome_volume: 0.35,
             legacy: false,
@@ -238,6 +250,11 @@ impl RenderCore {
         }
     }
     pub fn configure(&mut self, p: &mut Parameters) {
+        self.master.configure(p.master);
+        self.input_thru = p.input_thru;
+        if self.clock.frame == 0 {
+            self.input_monitor_gain = if p.input_thru { 1.0 } else { 0.0 };
+        }
         self.metronome_volume = p.metronome_volume;
         p.input = self
             .input
@@ -597,6 +614,7 @@ impl RenderCore {
         }
     }
     pub fn process(&mut self, input: Frame, pool: &mut impl PageAllocator) -> Frame {
+        let input = input.map(crate::dsp::headroom);
         for i in 0..TRACKS {
             if self.tracks[i]
                 .pending
@@ -631,6 +649,34 @@ impl RenderCore {
         self.track_fx
             .set_clock(self.bpm as usize, self.clock.origin.is_some());
         let mut carriers = [None; TRACKS];
+        // Track vocoders read a common pre-FX snapshot. This avoids processing-order
+        // dependence or an instantaneous feedback graph between track effects.
+        let raw_carriers = std::array::from_fn(|i| {
+            let t = &self.tracks[i];
+            let audible = matches!(t.mode, Mode::Playing | Mode::Overdub);
+            if t.audio.len == 0
+                || t.mode == Mode::Recording
+                || (!audible && self.clock.origin.is_none())
+            {
+                return None;
+            }
+            let pos = if audible {
+                t.cursor
+            } else {
+                self.clock.frame.saturating_sub(t.play_origin) as usize % t.audio.len
+            };
+            let read = if self.options[i].reverse {
+                t.audio.len - 1 - pos
+            } else {
+                pos
+            };
+            let f = t.audio.read(read);
+            Some((f[0], f[1]))
+        });
+        self.track_fx
+            .set_vocoder_sources((input[0], input[1]), raw_carriers);
+        self.track_fx
+            .set_transport_elapsed(self.clock.elapsed() as f64 / self.sample_rate as f64);
         let mut mixed = [0.0; 2];
         for i in 0..TRACKS {
             let t = &mut self.tracks[i];
@@ -693,8 +739,16 @@ impl RenderCore {
                 ok = t.audio.write(
                     write,
                     [
-                        (old[0] + left).clamp(-1.0, 1.0),
-                        (old[1] + right).clamp(-1.0, 1.0),
+                        if self.legacy {
+                            (old[0] + left).clamp(-1.0, 1.0)
+                        } else {
+                            crate::dsp::headroom(old[0] + left)
+                        },
+                        if self.legacy {
+                            (old[1] + right).clamp(-1.0, 1.0)
+                        } else {
+                            crate::dsp::headroom(old[1] + right)
+                        },
                     ],
                     pool,
                 );
@@ -718,8 +772,15 @@ impl RenderCore {
                 }
             }
         }
-        mixed[0] += left;
-        mixed[1] += right;
+        // INPUT THRU gates only the monitor branch, after the track writers.
+        // A short linear ramp avoids clicks; input processing and record levels stay unchanged.
+        let target = if self.input_thru { 1.0 } else { 0.0 };
+        let step = 1.0 / (0.005 * self.sample_rate as f32).max(1.0);
+        self.input_monitor_gain += (target - self.input_monitor_gain).clamp(-step, step);
+        mixed[0] += left * self.input_monitor_gain;
+        mixed[1] += right * self.input_monitor_gain;
+        mixed = self.master.process(mixed);
+        mixed = mixed.map(crate::dsp::headroom);
         self.input_peak = self.input_peak.max(input[0].abs().max(input[1].abs()));
         self.output_peak = self.output_peak.max(mixed[0].abs().max(mixed[1].abs()));
         if mixed.iter().any(|v| v.abs() > 1.0) {
@@ -762,6 +823,7 @@ impl RenderCore {
             }
         });
         let view = EngineView {
+            bpm: self.bpm,
             metronome: self.metronome,
             output_spectrum: [0.0; super::spectrum::BARS],
             frame: self.clock.frame,
@@ -784,6 +846,20 @@ impl RenderCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "manual process-memory measurement at prepared sample rates"]
+    fn benchmark_prepared_core_memory() {
+        for sr in [48000, 192000] {
+            let start = std::time::Instant::now();
+            let core = Box::new(RenderCore::new(sr));
+            println!(
+                "PREPARED_CORE {sr} {:.3} ms",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            std::hint::black_box(&core);
+        }
+    }
     use crate::engine::loop_audio::{OfflinePages, PAGE_FRAMES, Page};
     fn core() -> RenderCore {
         let mut core = RenderCore::new(8000);
@@ -792,6 +868,94 @@ mod tests {
             options.quantize = Quantize::Off;
         }
         core
+    }
+    #[test]
+    fn input_thru_off_records_processed_input_without_monitoring_or_stopping_loops() {
+        let mut config = AppConfig::new(120, 0, 5);
+        config.input_thru = false;
+        config.track_options[0].quantize = Quantize::Off;
+        let mut core = core();
+        core.configure(&mut Parameters::from_config(&config, 8000));
+        core.action(Action::Trigger(0), &mut OfflinePages);
+        for _ in 0..100 {
+            assert_eq!(core.process([0.25, -0.125], &mut OfflinePages), [0.0; 2]);
+        }
+        assert_eq!(core.tracks[0].audio.read(30), [0.25, -0.125]);
+        core.action(Action::Trigger(0), &mut OfflinePages);
+        assert_eq!(core.process([0.8; 2], &mut OfflinePages), [0.25, -0.125]);
+        assert_eq!(core.tracks[0].mode, Mode::Playing);
+        core.action(Action::Trigger(0), &mut OfflinePages);
+        assert_eq!(core.process([0.1; 2], &mut OfflinePages), [0.25, -0.125]);
+        let overdub = core.tracks[0].audio.read(1);
+        assert!((overdub[0] - 0.35).abs() < 1e-6 && (overdub[1] + 0.025).abs() < 1e-6);
+        core.input_thru = true;
+        for _ in 0..50 {
+            core.process([0.0; 2], &mut OfflinePages);
+        }
+        assert_eq!(core.input_monitor_gain, 1.0);
+    }
+    #[test]
+    fn float_recording_and_overdub_keep_headroom_until_fader_and_master() {
+        use crate::config::{FxKind, InputFx, audio_fx::AudioFxKind};
+        let mut config = AppConfig::new(120, 0, 5);
+        config.input_thru = false;
+        config.track_options[0].quantize = Quantize::Off;
+        config
+            .input_fx
+            .set_slot_kind(0, 0, FxKind::Audio(AudioFxKind::Pan));
+        config.input_fx.banks[0].slots[0].is_enabled = true;
+        if let Some(InputFx::Audio(p)) = &mut config.input_fx.banks[0].slots[0].fx {
+            p.level_db = 12.0;
+        }
+        let mut core = core();
+        core.configure(&mut Parameters::from_config(&config, 8000));
+        core.action(Action::Trigger(0), &mut OfflinePages);
+        for _ in 0..1000 {
+            core.process([0.4, -0.4], &mut OfflinePages);
+        }
+        let recorded = core.tracks[0].audio.read(900)[0];
+        assert!(
+            recorded > 1.5,
+            "input rack clipped the recording: {recorded}"
+        );
+        core.action(Action::Trigger(0), &mut OfflinePages);
+        config.track_levels[0] = 0.25;
+        core.configure(&mut Parameters::from_config(&config, 8000));
+        let mut out = [0.0; 2];
+        for _ in 0..1900 {
+            out = core.process([0.0; 2], &mut OfflinePages);
+        }
+        assert!(
+            out[0] > 0.38 && out[0] < 0.41,
+            "lower fader must recover the unclipped signal: {:?}",
+            out
+        );
+        core.action(Action::Trigger(0), &mut OfflinePages);
+        for _ in 0..1000 {
+            core.process([0.4, -0.4], &mut OfflinePages);
+        }
+        let doubled = core.tracks[0].audio.read(900)[0];
+        assert!(doubled > 3.0, "overdub clipped: {doubled}");
+        core.action(Action::Trigger(0), &mut OfflinePages);
+        config.track_levels[0] = 1.0;
+        config.master_fx.compressor_enabled = true;
+        config.master_fx.compressor.threshold_db = -20.0;
+        config.master_fx.compressor.ratio = 20.0;
+        config.master_fx.compressor.attack_ms = 0.1;
+        core.configure(&mut Parameters::from_config(&config, 8000));
+        for _ in 0..3000 {
+            out = core.process([0.0; 2], &mut OfflinePages);
+        }
+        assert!(
+            out[0] > 0.1 && out[0] < 0.14,
+            "master receives unclipped floats: {:?}",
+            out
+        );
+        assert!(
+            core.process([f32::NAN, f32::INFINITY], &mut OfflinePages)
+                .iter()
+                .all(|v| v.is_finite())
+        );
     }
     #[test]
     fn replay_start_frame_does_not_change_paused_vocoder_carrier_phase() {

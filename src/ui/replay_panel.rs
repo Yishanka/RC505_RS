@@ -10,6 +10,15 @@ use eframe::egui;
 use std::sync::{Arc, atomic::Ordering};
 pub struct ReplayPanel {
     pub visuals: Arc<ReplayVisuals>,
+    stream: Option<crate::replay::streaming::Session>,
+    pending: std::collections::VecDeque<crate::replay::streaming::DisplayFrame>,
+    current_data: Option<Arc<crate::project::ProjectData>>,
+    stream_revision: u64,
+    seek_position: Option<f64>,
+    import_open: bool,
+    import_target: Option<usize>,
+    import_name: String,
+    error: Option<String>,
     config: AppConfig,
     data: serde_json::Value,
     next_config: usize,
@@ -21,6 +30,31 @@ pub struct ReplayPanel {
     track_changed_at: u64,
 }
 impl ReplayPanel {
+    pub fn modal_open(&self) -> bool {
+        self.import_open
+    }
+    pub fn dismiss_modal(&mut self) -> bool {
+        std::mem::take(&mut self.import_open)
+    }
+    pub fn request_import(&mut self) {
+        if self.error.is_none()
+            && self
+                .stream
+                .as_ref()
+                .is_some_and(|s| !s.shared.playing() && !s.shared.seeking())
+        {
+            self.import_open = true;
+        }
+    }
+    #[cfg(debug_assertions)]
+    pub fn show_import_preview(&mut self) {
+        self.import_open = true;
+    }
+    pub fn toggle(&self) {
+        if let Some(session) = &self.stream {
+            session.shared.toggle();
+        }
+    }
     pub fn new(visuals: Arc<ReplayVisuals>) -> Self {
         let mut config = AppConfig::new(120, 0, 5);
         crate::project::apply_data_to_config(&mut config, visuals.initial.clone());
@@ -32,6 +66,15 @@ impl ReplayPanel {
         });
         Self {
             visuals,
+            stream: None,
+            pending: std::collections::VecDeque::new(),
+            current_data: None,
+            stream_revision: 0,
+            seek_position: None,
+            import_open: false,
+            import_target: None,
+            import_name: String::new(),
+            error: None,
             config,
             data,
             next_config: 0,
@@ -41,6 +84,88 @@ impl ReplayPanel {
             last_action: None,
             track: Some(0),
             track_changed_at: 0,
+        }
+    }
+    pub fn streaming(session: crate::replay::streaming::Session) -> Self {
+        let mut panel = Self::new(Arc::new(ReplayVisuals {
+            name: session.source.metadata.name.clone(),
+            sample_rate: session.source.metadata.sample_rate,
+            frames: session.source.metadata.frames,
+            initial: (*session.initial).clone(),
+            configs: Vec::new(),
+            views: Vec::new(),
+        }));
+        panel.current_data = Some(session.initial.clone());
+        panel.import_name = format!("{} - replay", session.source.metadata.name);
+        panel.stream = Some(session);
+        panel
+    }
+    fn update_stream(&mut self) {
+        let Some(session) = &self.stream else {
+            return;
+        };
+        let revision = session.shared.revision();
+        if self.stream_revision != revision {
+            self.pending.clear();
+            self.stream_revision = revision;
+        }
+        while let Ok(event) = session.display.try_recv() {
+            match event {
+                crate::replay::streaming::DisplayEvent::Error(error) => self.error = Some(error),
+                crate::replay::streaming::DisplayEvent::Frame(frame)
+                    if frame.revision == revision =>
+                {
+                    self.pending.push_back(frame)
+                }
+                _ => {}
+            }
+        }
+        self.position = session.shared.position();
+        while self
+            .pending
+            .front()
+            .is_some_and(|frame| frame.frame <= self.position)
+        {
+            let frame = self.pending.pop_front().unwrap();
+            if self
+                .current_data
+                .as_ref()
+                .is_none_or(|current| !Arc::ptr_eq(current, &frame.data))
+            {
+                if let Some(previous) = &self.current_data {
+                    let delta =
+                        crate::replay::ConfigPoint::focus(frame.frame, previous, &frame.data);
+                    if let Some(target) = delta.target {
+                        self.editor.select(target);
+                    }
+                    if let Some(track) = delta.track {
+                        self.track = Some(track);
+                        self.track_changed_at = frame.frame;
+                    }
+                }
+                crate::project::apply_data_to_config(&mut self.config, (*frame.data).clone());
+                self.current_data = Some(frame.data);
+            }
+            self.view = frame.view;
+            if self.view.running {
+                self.view.elapsed += self.position.saturating_sub(frame.frame);
+            }
+            self.last_action = frame.last_action;
+            if let Some((
+                at,
+                Action::Trigger(i)
+                | Action::Stop(i)
+                | Action::Clear(i)
+                | Action::Undo(i)
+                | Action::UndoStep(i)
+                | Action::RedoStep(i),
+            )) = self.last_action
+            {
+                if at >= self.track_changed_at {
+                    self.track = Some(i.min(4));
+                    self.track_changed_at = at;
+                }
+            }
         }
     }
     fn update(&mut self, frame: u64, playback_rate: u32) {
@@ -115,21 +240,36 @@ impl ReplayPanel {
 }
 pub fn draw(ui: &mut egui::Ui, app: &mut MyApp) {
     let lang = app.language;
-    let playing = app.audio.diagnostics.player_playing.load(Ordering::Relaxed);
     let Some(mut panel) = app.replay_panel.take() else {
         ui.spinner();
         return;
     };
-    panel.update(
-        app.audio.diagnostics.player_frame.load(Ordering::Relaxed),
-        app.audio.config.sample_rate.0,
-    );
+    if panel.stream.is_some() {
+        panel.update_stream();
+    } else {
+        panel.update(
+            app.audio.diagnostics.player_frame.load(Ordering::Relaxed),
+            app.audio.config.sample_rate.0,
+        );
+    }
+    let playing = panel
+        .stream
+        .as_ref()
+        .map(|s| s.shared.playing())
+        .unwrap_or_else(|| app.audio.diagnostics.player_playing.load(Ordering::Relaxed));
+    let seeking = panel.stream.as_ref().is_some_and(|s| s.shared.seeking());
+    let display_enabled = ui.is_enabled();
+    ui.set_enabled(display_enabled && !panel.import_open);
     let mut close = false;
     theme::control_row(ui, |ui| {
         if theme::action(
             ui,
             theme::Icon::Back,
-            lang.choose("Performance", "返回演奏"),
+            if app.app_state == crate::state::AppState::Init {
+                lang.choose("Projects", "返回工程列表")
+            } else {
+                lang.choose("Performance", "返回演奏")
+            },
             "Esc",
         )
         .clicked()
@@ -143,12 +283,12 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp) {
         ));
         theme::caption(
             ui,
-            lang.choose("Temporary panel · read only", "临时面板 · 只读"),
+            lang.choose("Live simulation · temporary panel", "实时演算 · 临时面板"),
         );
         app.language_switch(ui);
     });
     theme::control_row(ui, |ui| {
-        if theme::action(
+        if theme::action_fixed(
             ui,
             if playing {
                 theme::Icon::Stop
@@ -160,7 +300,21 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp) {
         )
         .clicked()
         {
-            app.send(crate::engine::audio_io::Control::PlayerToggle);
+            panel.toggle();
+        }
+        if ui
+            .add_enabled(
+                !playing
+                    && !seeking
+                    && panel.stream.is_some()
+                    && panel.error.is_none()
+                    && !app.busy()
+                    && !app.read_only,
+                egui::Button::new(lang.choose("Import this position", "导入当前时刻")).wrap(false),
+            )
+            .clicked()
+        {
+            panel.request_import();
         }
         ui.label(format!(
             "{:.2} / {:.2} s",
@@ -181,11 +335,70 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp) {
             },
         ));
     });
-    ui.add(
-        egui::ProgressBar::new(panel.position as f32 / panel.visuals.frames.max(1) as f32)
-            .desired_height(5.0)
-            .fill(theme::accent(ui)),
-    );
+    let duration = panel.visuals.frames as f64 / panel.visuals.sample_rate as f64;
+    let mut seconds = panel
+        .seek_position
+        .unwrap_or(panel.position as f64 / panel.visuals.sample_rate as f64);
+    let response = ui
+        .scope(|ui| {
+            ui.spacing_mut().slider_width = (ui.available_width() - 120.0).max(180.0);
+            ui.add_enabled(
+                panel.stream.is_some() && panel.error.is_none() && !app.busy(),
+                egui::Slider::new(&mut seconds, 0.0..=duration)
+                    .show_value(false)
+                    .text(lang.choose("Seek", "跳转进度")),
+            )
+        })
+        .inner;
+    if response.dragged() {
+        panel.seek_position = Some(seconds);
+    }
+    if response.drag_stopped() || (response.changed() && !response.dragged()) {
+        if let Some(session) = &panel.stream {
+            session
+                .shared
+                .seek((seconds * panel.visuals.sample_rate as f64).round() as u64);
+        }
+        panel.seek_position = None;
+    }
+    if seeking {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(lang.choose(
+                "Reconstructing the selected position from original inputs…",
+                "正在按原始输入重建所选位置……",
+            ));
+        });
+    }
+    if let Some(error) = &panel.error {
+        ui.colored_label(ui.visuals().error_fg_color, error);
+    }
+    if let Some(session) = &panel.stream {
+        let underruns = session.shared.underruns.load(Ordering::Relaxed);
+        if underruns > 0 {
+            theme::caption(ui,lang.choose("Playback waited for the simulation worker; the playhead stays sample-accurate during an audio gap.","演算线程曾未及时提供音频；发生等待时保持原采样位置，不跳过回放内容。"));
+        }
+    }
+    if panel
+        .stream
+        .as_ref()
+        .is_some_and(|s| s.source.metadata.renderer < crate::replay::RENDERER_VERSION)
+    {
+        theme::caption(
+            ui,
+            lang.choose(
+                "Recorded with an older beta renderer; current algorithms may change its timbre.",
+                "此回放录于旧测试版；当前算法重新演算时音色可能变化。",
+            ),
+        );
+    }
+    if panel
+        .stream
+        .as_ref()
+        .is_some_and(|session| session.source.legacy_mydelay)
+    {
+        ui.label(lang.choose("This replay contains legacy MyDelay. The old captured source is interpreted as the new OSC; missing historical capture buffers prevent exact reproduction. Export audio in the older app version first if you need that original sound.","此回放包含旧版 MyDelay。旧捕获音源会按新版 OSC 解释；缺失旧捕获缓存时无法精确复现。需要保留原音色时，建议先用旧版软件导出音频。"));
+    }
     if let Some((at, action)) = panel.last_action {
         let (label, track) = match action {
             Action::Trigger(i) => (
@@ -218,6 +431,33 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp) {
     }
     // Reuse the exact performance widgets with an isolated read-only display
     // model. Restore live state before sync_config or any audio command routing.
+    ui.set_enabled(display_enabled);
+    if panel.import_open {
+        let mut open = true;
+        egui::Window::new(lang.choose("Import paused replay", "导入暂停的回放"))
+            .id(egui::Id::new("replay-import-position")).open(&mut open).collapsible(false).default_width(520.0)
+            .anchor(egui::Align2::CENTER_CENTER,egui::Vec2::ZERO)
+            .show(ui.ctx(),|ui| {
+                ui.label(lang.choose("Imports all five track buffers, undo history and sound settings at this position.","导入此刻五轨音频、撤销历史和音色配置。"));
+                ui.label(lang.choose("All tracks open stopped.","导入后所有轨道保持暂停。"));
+                egui::ComboBox::from_id_source("replay-import-project")
+                    .selected_text(panel.import_target.and_then(|i|app.projects.get(i)).map(|p|p.name.as_str()).unwrap_or(lang.choose("New project", "新建工程")))
+                    .width(320.0).show_ui(ui,|ui| {
+                        ui.selectable_value(&mut panel.import_target,None,lang.choose("New project", "新建工程"));
+                        for (index,entry) in app.projects.iter().enumerate() { ui.selectable_value(&mut panel.import_target,Some(index),&entry.name); }
+                    });
+                if panel.import_target.is_none() { ui.add(egui::TextEdit::singleline(&mut panel.import_name).id(egui::Id::new("replay-import-name")).desired_width(400.0)); }
+                ui.label(lang.choose("This replaces the current unsaved workspace with the selected project and replay.","导入会替换当前未保存的工作区。"));
+                ui.label(lang.choose("The target project's saved files stay intact until you save. Choose Discard when leaving to restore its saved version.","主动保存前，目标工程的已保存文件保持原样。离开时「放弃修改」可恢复已保存版本。"));
+                if ui.add_enabled(!app.busy() && !playing && !seeking,egui::Button::new(lang.choose("Confirm import", "确认导入")).wrap(false)).clicked() {
+                    if let Some(session)=&panel.stream {
+                        app.import_replay_position(session.source.clone(),panel.position,panel.import_target,panel.import_name.clone());
+                        panel.import_open=false;
+                    }
+                }
+            });
+        panel.import_open &= open;
+    }
     std::mem::swap(&mut app.config, &mut panel.config);
     std::mem::swap(&mut app.view, &mut panel.view);
     std::mem::swap(&mut app.editor, &mut panel.editor);
@@ -310,6 +550,37 @@ pub fn parameter_details(ui: &mut egui::Ui, app: &MyApp) {
     match target {
         FxTarget::Input { bank, slot } => {
             match app.config.input_fx.banks[bank].slots[slot].fx.as_ref() {
+                Some(InputFx::Roll(v)) => {
+                    row(
+                        "Mode / division",
+                        "模式／细分",
+                        format!("{} / {}", v.mode.value, v.step.value),
+                    );
+                    row(
+                        "Time",
+                        "时间",
+                        format!(
+                            "{:.2} ms",
+                            v.time_mode.value.milliseconds(
+                                v.time_ms.value,
+                                app.config.beat_config.current_bpm()
+                            )
+                        ),
+                    );
+                    row(
+                        "Feedback / repeats",
+                        "反馈／次数",
+                        format!("{} % / {}", v.feedback.value, v.repeat.value),
+                    );
+                }
+                Some(InputFx::Audio(v)) => {
+                    row("Effect", "效果", v.kind.name().into());
+                    row(
+                        "Mix / level",
+                        "混合 / 电平",
+                        format!("{:.0} % / {:.1} dB", v.mix * 100.0, v.level_db),
+                    );
+                }
                 Some(InputFx::Oscillator(v)) => {
                     row(
                         "Waveform",
@@ -382,6 +653,23 @@ pub fn parameter_details(ui: &mut egui::Ui, app: &MyApp) {
             .fx
             .as_ref()
         {
+            Some(TrackFx::Vocoder(v)) => {
+                row("Carrier", "载波", v.carrier.value.to_string());
+                row("Formant", "共振峰", format!("{} st", v.formant_semitones));
+                row(
+                    "Bands / mix",
+                    "频段 / 混合",
+                    format!("{} / {} %", v.bands.value, v.mix.value),
+                );
+            }
+            Some(TrackFx::Audio(v)) => {
+                row("Effect", "效果", v.kind.name().into());
+                row(
+                    "Mix / level",
+                    "混合 / 电平",
+                    format!("{:.0} % / {:.1} dB", v.mix * 100.0, v.level_db),
+                );
+            }
             Some(TrackFx::Delay(v)) => {
                 row(
                     "Delay time",

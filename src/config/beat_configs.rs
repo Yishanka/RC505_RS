@@ -9,6 +9,8 @@ pub struct BeatTapCaculator {
     pub value: usize,
     pub tap_count: usize,
     pub last_tap_time: Option<Instant>,
+    intervals_ns: [u64; 8],
+    next_interval: usize,
 }
 
 impl BeatTapCaculator {
@@ -17,6 +19,8 @@ impl BeatTapCaculator {
             value: initial_value,
             tap_count: 0,
             last_tap_time: None,
+            intervals_ns: [0; 8],
+            next_interval: 0,
         }
     }
 
@@ -24,20 +28,33 @@ impl BeatTapCaculator {
         self.value
     }
 
-    pub fn calculate_avg_bpm(&mut self) {
-        let now = Instant::now();
-        self.tap_count += 1;
-
-        if let Some(last_time) = self.last_tap_time {
-            let interval = now.duration_since(last_time).as_millis() as usize;
-            if interval > 3000 {
-                self.tap_count = 0;
-            } else if interval > 0 {
-                let new_bpm = (60000 / interval).clamp(30, 300);
-                self.value = (self.value * (self.tap_count - 1) + new_bpm) / self.tap_count;
-            }
+    pub fn reset(&mut self, value: usize) {
+        self.value = value.clamp(30, 300);
+        self.tap_count = 0;
+        self.last_tap_time = None;
+        self.intervals_ns.fill(0);
+        self.next_interval = 0;
+    }
+    fn tap_at(&mut self, now: Instant) {
+        let Some(previous) = self.last_tap_time else {
+            self.last_tap_time = Some(now);
+            return;
+        };
+        if now <= previous {
+            return;
         }
-
+        let interval = now.duration_since(previous);
+        if interval > std::time::Duration::from_secs(3) {
+            self.reset(self.value);
+        } else {
+            self.intervals_ns[self.next_interval] =
+                interval.as_nanos().clamp(200_000_000, 2_000_000_000) as u64;
+            self.next_interval = (self.next_interval + 1) % self.intervals_ns.len();
+            self.tap_count = (self.tap_count + 1).min(self.intervals_ns.len());
+            let sum = self.intervals_ns.iter().sum::<u64>() as u128;
+            self.value = ((60_000_000_000u128 * self.tap_count as u128 + sum / 2) / sum)
+                .clamp(30, 300) as usize;
+        }
         self.last_tap_time = Some(now);
     }
 }
@@ -71,15 +88,34 @@ impl BeatConfigs {
     pub fn current_latency(&self) -> usize {
         self.input_latency.value
     }
+    pub fn tap(&mut self) {
+        self.tap_at(Instant::now());
+    }
+    pub fn tap_at(&mut self, now: Instant) {
+        // A typed/dragged BPM invalidates the previous tap series. Its first
+        // tap measures an origin and must not restore a stale calculator value.
+        if self.tap_calc.value != self.input_bpm.value {
+            self.tap_calc.reset(self.input_bpm.value);
+        }
+        self.tap_calc.tap_at(now);
+        self.input_bpm.value = self.tap_calc.value;
+        self.input_bpm.buffer = self.input_bpm.value.to_string();
+    }
+    pub fn accept_engine_bpm(&mut self, bpm: usize) {
+        let bpm = bpm.clamp(30, 300);
+        if self.input_bpm.value != bpm {
+            self.input_bpm.value = bpm;
+            self.input_bpm.buffer = bpm.to_string();
+            self.tap_calc.reset(bpm);
+        }
+    }
 
     pub fn set_values(&mut self, bpm: usize, latency: usize) {
         // self.bpm = bpm;
         // self.latency = latency;
         self.input_bpm.value = bpm;
         self.input_bpm.buffer = bpm.to_string();
-        self.tap_calc.value = bpm;
-        self.tap_calc.tap_count = 0;
-        self.tap_calc.last_tap_time = None;
+        self.tap_calc.reset(bpm);
         self.input_latency.value = latency;
         self.input_latency.buffer = latency.to_string();
     }
@@ -114,9 +150,7 @@ impl ConfigSet for BeatConfigs {
                 let fv_t = self.tap_calc.confirm();
                 if fv_n != self.input_bpm.value {
                     self.input_bpm.value = fv_n;
-                    self.tap_calc.value = fv_n;
-                    self.tap_calc.tap_count = 0;
-                    self.tap_calc.last_tap_time = None;
+                    self.tap_calc.reset(fv_n);
                     self.input_bpm.buffer = fv_n.to_string();
                 } else {
                     self.input_bpm.value = fv_t;
@@ -129,5 +163,57 @@ impl ConfigSet for BeatConfigs {
             // }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tap_tests {
+    use super::*;
+    use std::time::Duration;
+    #[test]
+    fn first_tap_preserves_tempo_and_second_tap_measures_without_old_value_bias() {
+        let mut beat = BeatConfigs::new(120, 0);
+        let start = Instant::now();
+        beat.tap_at(start);
+        assert_eq!(beat.current_bpm(), 120);
+        beat.tap_at(start + Duration::from_millis(250));
+        assert_eq!(beat.current_bpm(), 240);
+        beat.tap_at(start + Duration::from_millis(500));
+        assert_eq!(beat.current_bpm(), 240);
+        beat.tap_at(start + Duration::from_millis(500));
+        assert_eq!(beat.tap_calc.tap_count, 2);
+    }
+    #[test]
+    fn manual_changes_and_timeouts_begin_a_fresh_tap_series() {
+        let mut beat = BeatConfigs::new(120, 17);
+        let start = Instant::now();
+        beat.tap_at(start);
+        beat.tap_at(start + Duration::from_millis(250));
+        beat.input_bpm.value = 77;
+        beat.tap_at(start + Duration::from_millis(500));
+        assert_eq!(beat.current_bpm(), 77);
+        beat.tap_at(start + Duration::from_millis(1000));
+        assert_eq!(beat.current_bpm(), 120);
+        beat.tap_at(start + Duration::from_secs(5));
+        assert_eq!(beat.current_bpm(), 120);
+        beat.tap_at(start + Duration::from_millis(5800));
+        assert_eq!(beat.current_bpm(), 75);
+        assert_eq!(beat.current_latency(), 17);
+    }
+    #[test]
+    fn rolling_interval_average_and_engine_readback_are_bounded() {
+        let mut beat = BeatConfigs::new(99, 0);
+        let mut time = Instant::now();
+        beat.tap_at(time);
+        for ms in [450, 550, 450, 550, 450, 550, 450, 550] {
+            time += Duration::from_millis(ms);
+            beat.tap_at(time);
+        }
+        assert_eq!(beat.current_bpm(), 120);
+        assert_eq!(beat.tap_calc.tap_count, 8);
+        beat.accept_engine_bpm(137);
+        assert_eq!(beat.current_bpm(), 137);
+        beat.tap_at(time + Duration::from_millis(500));
+        assert_eq!(beat.current_bpm(), 137);
     }
 }

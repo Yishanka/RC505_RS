@@ -69,6 +69,10 @@ pub struct VocoderDspState {
     level: f32,
     mix: f32,
     sibilance: f32,
+    gains: [f32; VOCODER_MAX_BANDS],
+    gain_delta: [f32; VOCODER_MAX_BANDS],
+    sensitivity_gain: f32,
+    control_tick: u8,
 }
 impl VocoderDspState {
     pub fn new() -> Self {
@@ -91,6 +95,10 @@ impl VocoderDspState {
             level: 1.0,
             mix: 1.0,
             sibilance: 0.2,
+            gains: [0.0; VOCODER_MAX_BANDS],
+            gain_delta: [0.0; VOCODER_MAX_BANDS],
+            sensitivity_gain: 6.0,
+            control_tick: 0,
         }
     }
     fn configure(&mut self, p: VocoderParams) {
@@ -100,6 +108,9 @@ impl VocoderDspState {
             self.bands = bands;
             self.sample_rate = sr;
             self.env.fill(0.0);
+            self.gains.fill(0.0);
+            self.gain_delta.fill(0.0);
+            self.control_tick = 0;
             let low = 90.0_f32;
             let high = 7200.0_f32.min(sr * 0.45);
             let ratio = (high / low).powf(1.0 / (bands - 1) as f32);
@@ -142,62 +153,74 @@ pub fn process_frame(
     state.sibilance += (p.sibilance.clamp(0.0, 1.0) - state.sibilance) * smoothing;
     let modulator = p.modulator_override.unwrap_or((input_l + input_r) * 0.5);
     // +/-18 dB envelope sensitivity, retaining the user's formant contrast idea.
-    let sensitivity = 6.0 * 10.0_f32.powf(state.sensitivity * 0.36 / 20.0);
-    let mut sum = 0.0;
+    if state.control_tick == 0 {
+        state.sensitivity_gain = 6.0 * 10.0_f32.powf(state.sensitivity * 0.36 / 20.0);
+    }
     for index in 0..state.bands {
         let band = state.analysis[index].next(modulator);
-        let target = 1.0 - (-band.abs() * sensitivity).exp();
+        let target = band.abs() * state.sensitivity_gain;
         let rate = if target > state.env[index] {
             state.attack
         } else {
             state.release
         };
         state.env[index] += (target - state.env[index]) * rate;
-        sum += state.env[index];
     }
-    let avg = sum / state.bands as f32;
-    let mut shaped = [0.0; VOCODER_MAX_BANDS];
-    if avg > 1e-6 {
-        for (index, value) in shaped.iter_mut().enumerate().take(state.bands) {
-            let env = state.env[index];
-            let local_start = index.saturating_sub(1);
-            let local_end = (index + 1).min(state.bands - 1);
-            let local = state.env[local_start..=local_end].iter().sum::<f32>()
-                / (local_end - local_start + 1) as f32;
-            let peak = (env / local.max(1e-6) - 1.0).max(0.0);
-            *value = avg * 0.06 + avg * (env / avg).powf(1.9) * (1.0 + peak * 1.8);
+    if state.control_tick == 0 {
+        // Envelope detection remains sample-rate. Spectral contrast, formant
+        // interpolation and tilt run every 16 frames, with linear gain interpolation.
+        // Move soft compression after envelope following instead of exp() per band/sample.
+        let compressed = state.env.map(|v| 1.0 - (-v).exp());
+        let avg = compressed[..state.bands].iter().sum::<f32>() / state.bands as f32;
+        let mut shaped = [0.0; VOCODER_MAX_BANDS];
+        if avg > 1e-6 {
+            for (index, value) in shaped.iter_mut().enumerate().take(state.bands) {
+                let env = compressed[index];
+                let local_start = index.saturating_sub(1);
+                let local_end = (index + 1).min(state.bands - 1);
+                let local = compressed[local_start..=local_end].iter().sum::<f32>()
+                    / (local_end - local_start + 1) as f32;
+                let peak = (env / local.max(1e-6) - 1.0).max(0.0);
+                *value = avg * 0.06 + avg * (env / avg).powf(1.9) * (1.0 + peak * 1.8);
+            }
+        }
+        // Normalize the complete spectral envelope rather than clipping each band:
+        // independent clipping flattens vowel peaks at ordinary microphone levels.
+        let peak = shaped.iter().copied().fold(1.0_f32, f32::max);
+        for value in &mut shaped {
+            *value /= peak;
+        }
+        let shift = state.formant / state.spacing_semitones;
+        let mut tilt = 2.0_f32.powf(-state.tone / 50.0);
+        let tilt_step = 2.0_f32.powf(state.tone / 25.0 / (state.bands - 1) as f32);
+        for index in 0..state.bands {
+            let source = (index as f32 - shift).clamp(0.0, (state.bands - 1) as f32);
+            let lower = source.floor() as usize;
+            let upper = (lower + 1).min(state.bands - 1);
+            let env = shaped[lower] + (shaped[upper] - shaped[lower]) * (source - lower as f32);
+            let position = index as f32 / (state.bands - 1) as f32;
+            let consonants = if position > 0.7 {
+                1.0 + state.sibilance * 2.0
+            } else {
+                1.0
+            };
+            let target = env * tilt * consonants;
+            state.gain_delta[index] = (target - state.gains[index]) / 16.0;
+            tilt *= tilt_step;
         }
     }
-    // Normalize the complete spectral envelope rather than clipping each band:
-    // independent clipping flattens vowel peaks at ordinary microphone levels.
-    let peak = shaped.iter().copied().fold(1.0_f32, f32::max);
-    for value in &mut shaped {
-        *value /= peak;
-    }
+    state.control_tick = (state.control_tick + 1) % 16;
     let (carrier_l, carrier_r) = if p.has_track_carrier {
         (p.track_carrier_l, p.track_carrier_r)
     } else {
         (0.0, 0.0)
     };
-    let shift = state.formant / state.spacing_semitones;
     let mut wet_l = 0.0;
     let mut wet_r = 0.0;
-    let mut tilt = 2.0_f32.powf(-state.tone / 50.0);
-    let tilt_step = 2.0_f32.powf(state.tone / 25.0 / (state.bands - 1) as f32);
     for index in 0..state.bands {
-        let source = (index as f32 - shift).clamp(0.0, (state.bands - 1) as f32);
-        let lower = source.floor() as usize;
-        let upper = (lower + 1).min(state.bands - 1);
-        let env = shaped[lower] + (shaped[upper] - shaped[lower]) * (source - lower as f32);
-        let position = index as f32 / (state.bands - 1) as f32;
-        let consonants = if position > 0.7 {
-            1.0 + state.sibilance * 2.0
-        } else {
-            1.0
-        };
-        wet_l += state.synthesis_l[index].next(carrier_l) * env * tilt * consonants;
-        wet_r += state.synthesis_r[index].next(carrier_r) * env * tilt * consonants;
-        tilt *= tilt_step;
+        state.gains[index] += state.gain_delta[index];
+        wet_l += state.synthesis_l[index].next(carrier_l) * state.gains[index];
+        wet_r += state.synthesis_r[index].next(carrier_r) * state.gains[index];
     }
     // Overlap-aware banks sum at approximately unity. Avoid sqrt(N) attenuation
     // which made increased band counts unexpectedly quieter in the old version.

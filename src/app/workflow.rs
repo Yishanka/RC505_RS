@@ -1,8 +1,5 @@
 use super::*;
-use crate::engine::{
-    core::{AudioSnapshot, Parameters},
-    loop_audio::OfflinePages,
-};
+use crate::engine::core::{AudioSnapshot, Parameters};
 
 impl MyApp {
     pub fn set_follow_output(&mut self, follow: bool) {
@@ -305,9 +302,7 @@ impl MyApp {
         else {
             return;
         };
-        let Ok(root) = crate::session::project_assets(&entry) else {
-            return;
-        };
+        let root = crate::replay::library::root();
         let sr = self.audio.config.sample_rate.0;
         let mut core = Box::new(RenderCore::new(sr));
         core.configure(&mut Parameters::from_config(&self.config, sr));
@@ -315,9 +310,7 @@ impl MyApp {
             retired_audition: None,
             core,
             snapshot: Box::new(AudioSnapshot::empty(sr)),
-            root: root
-                .join("replays")
-                .join(format!("draft-{}", crate::session::id())),
+            root: root.join(format!("draft-{}", crate::session::id())),
             project_id: entry.file,
             data: project::data_from_config(&self.config),
         };
@@ -357,9 +350,7 @@ impl MyApp {
                     }
                 }
                 self.status = format!("Replay saved: {}", path.display());
-                if let Some(i) = self.active_project_idx {
-                    self.replay_list = crate::replay::list(&self.projects[i]);
-                }
+                self.replay_list = crate::replay::library::list();
             }
             Err(e) => self.status = e.to_string(),
         }
@@ -369,16 +360,14 @@ impl MyApp {
         // discarding here dismisses the prompt, it never recursively deletes data.
         self.draft = None;
         self.status = "Draft kept in replay history. You can reopen it later.".into();
-        if let Some(i) = self.active_project_idx {
-            self.replay_list = crate::replay::list(&self.projects[i]);
-        }
+        self.replay_list = crate::replay::library::list();
     }
     pub fn render_replay(&mut self, root: PathBuf) {
         self.replay_autoplay = false;
         if self.busy() || self.taking() {
             return;
         }
-        let export = root.parent().unwrap_or(&root).join("exports");
+        let export = crate::replay::library::root().join("exports");
         if let Err(e) = std::fs::create_dir_all(&export) {
             self.status = e.to_string();
             return;
@@ -390,162 +379,11 @@ impl MyApp {
         let progress = self.render_progress.clone();
         self.status = "Rendering replay through the audio engine...".into();
         std::thread::spawn(move || {
-            let result = crate::replay::render(&root, &destination, &progress);
+            let result = crate::replay::export(&root, &destination, &progress);
             let _ = tx.send(match result {
                 Ok(result) => JobResult::Rendered { root, result },
                 Err(e) => JobResult::Error(format!("Replay render failed: {e}")),
             });
-        });
-    }
-    pub fn play_rendered(&mut self) {
-        if self.busy() {
-            return;
-        }
-        if !self.tracks_stopped() || self.taking() || !self.audio.online || self.calibration_held()
-        {
-            self.status = self
-                .language
-                .choose(
-                    "Stop tracks and restore monitoring before replay playback.",
-                    "请先停止五轨、连接音频设备并恢复监听，再播放回放。",
-                )
-                .into();
-            return;
-        }
-        self.stop_audition();
-        self.replay_autoplay = true;
-        let Some((_, result)) = &self.rendered else {
-            return;
-        };
-        let path = result.wav.clone();
-        let visuals = result.visuals.clone();
-        let rate = self.audio.config.sample_rate.0;
-        let (tx, rx) = mpsc::channel();
-        self.job = Some(rx);
-        self.engine_transition = true;
-        std::thread::spawn(move || {
-            let result = (|| -> anyhow::Result<Vec<[f32; 2]>> {
-                let mut reader = hound::WavReader::open(path)?;
-                let source_rate = reader.spec().sample_rate;
-                anyhow::ensure!(
-                    reader.spec() == crate::session::wav_spec(source_rate),
-                    "Invalid rendered WAV format"
-                );
-                anyhow::ensure!(
-                    source_rate == visuals.sample_rate
-                        && reader.duration() as u64 == visuals.frames,
-                    "Rendered audio no longer matches the replay timeline"
-                );
-                let mut frames = Vec::with_capacity(reader.duration() as usize);
-                let mut samples = reader.samples::<f32>();
-                while let Some(left) = samples.next() {
-                    let frame = [
-                        left?,
-                        samples
-                            .next()
-                            .ok_or_else(|| anyhow::anyhow!("Truncated stereo audio"))??,
-                    ];
-                    anyhow::ensure!(
-                        frame.iter().all(|v| v.is_finite()),
-                        "Invalid rendered samples"
-                    );
-                    frames.push(frame);
-                }
-                if source_rate == rate {
-                    Ok(frames)
-                } else {
-                    Ok(crate::session::resample_frames(&frames, source_rate, rate))
-                }
-            })();
-            let _ = tx.send(match result {
-                Ok(samples) => JobResult::PlayerReady(samples, visuals),
-                Err(e) => JobResult::Error(e.to_string()),
-            });
-        });
-    }
-    pub fn close_player(&mut self) {
-        self.replay_autoplay = false;
-        self.send(Control::Player(None));
-        self.player_open = false;
-        self.replay_panel = None;
-    }
-    pub fn import_rendered(&mut self, new_project: bool) {
-        if self.busy()
-            || self.taking()
-            || !self.tracks_stopped()
-            || self.read_only
-            || self.calibration_held()
-        {
-            return;
-        }
-        let Some((root, result)) = self.rendered.as_ref() else {
-            return;
-        };
-        let metadata = match crate::replay::info(root) {
-            Ok(v) => v,
-            Err(e) => {
-                self.status = e.to_string();
-                return;
-            }
-        };
-        let index = if new_project {
-            let index = self.projects.len();
-            let name = format!("{} - replay", metadata.name);
-            self.projects.push(ProjectEntry {
-                file: project::make_project_file_name(&name, index),
-                name,
-            });
-            if let Err(e) = project::save_index(&self.projects) {
-                self.projects.pop();
-                self.status = e.to_string();
-                return;
-            }
-            index
-        } else {
-            let Some(index) = self
-                .projects
-                .iter()
-                .position(|p| p.file == metadata.project_id)
-            else {
-                self.status = "Source project not found. Import into a new project.".into();
-                return;
-            };
-            index
-        };
-        let mut snapshot = AudioSnapshot::empty(result.snapshot.sample_rate);
-        for i in 0..5 {
-            result.snapshot.histories[i].copy_into(&mut snapshot.histories[i], &mut OfflinePages);
-            snapshot.has_histories = true;
-            result.snapshot.tracks[i].share_into(&mut snapshot.tracks[i], &mut OfflinePages);
-            result.snapshot.undo[i].share_into(&mut snapshot.undo[i], &mut OfflinePages);
-        }
-        snapshot.undo_valid = result.snapshot.undo_valid;
-        snapshot.undone = result.snapshot.undone;
-        let data = result.config.clone();
-        let entry = self.projects[index].clone();
-        let sr = self.audio.config.sample_rate.0;
-        let (tx, rx) = mpsc::channel();
-        self.job = Some(rx);
-        self.engine_transition = true;
-        self.status = "Importing replay final state as a new snapshot revision...".into();
-        std::thread::spawn(move || {
-            let result = (|| -> anyhow::Result<JobResult> {
-                let mut data = data;
-                data.snapshot = Some(crate::session::save_snapshot(
-                    &entry,
-                    &snapshot,
-                    data.clone(),
-                )?);
-                crate::session::resample(&mut snapshot, sr)?;
-                let mut config = AppConfig::new(120, 0, 5);
-                project::apply_data_to_config(&mut config, data.clone());
-                let mut core = Box::new(RenderCore::new(sr));
-                core.configure(&mut Parameters::from_config(&config, sr));
-                core.restore(&mut snapshot);
-                Ok(JobResult::Loaded { index, data, core })
-            })();
-            let _ =
-                tx.send(result.unwrap_or_else(|e| JobResult::Error(format!("Import failed: {e}"))));
         });
     }
 }

@@ -3,11 +3,12 @@ use crate::config::config_type::NumericConfig;
 pub const TRACK_DELAY_TIME_MIN_MS: usize = 1;
 pub const TRACK_DELAY_TIME_MAX_MS: usize = 2_000;
 pub const TRACK_DELAY_FEEDBACK_MAX_PCT: usize = 95;
-pub const TRACK_DELAY_DAMP_MIN_HZ: usize = 200;
+pub const TRACK_DELAY_DAMP_MIN_HZ: usize = 0; // zero = FLAT
 pub const TRACK_DELAY_DAMP_MAX_HZ: usize = 20_000;
 pub const TRACK_DELAY_MIX_MAX_PCT: usize = 100;
 
 pub struct TrackDelayConfigs {
+    pub feedback_repeats: NumericConfig,
     pub direct_pct: NumericConfig,
     pub effect_pct: NumericConfig,
     pub low_cut_hz: NumericConfig,
@@ -21,8 +22,9 @@ pub struct TrackDelayConfigs {
 impl TrackDelayConfigs {
     pub fn new() -> Self {
         Self {
-            direct_pct: NumericConfig::new("Direct level (%)", 60),
-            effect_pct: NumericConfig::new("Effect level (%)", 40),
+            feedback_repeats: NumericConfig::new("Repeats (0 = manual feedback)", 8),
+            direct_pct: NumericConfig::new("Direct level (%)", 100),
+            effect_pct: NumericConfig::new("Effect level (%)", 50),
             low_cut_hz: NumericConfig::new("Feedback low cut (Hz; 0 = thru)", 0),
             time_mode: super::config_type::EnumConfig::new(
                 "Time mode",

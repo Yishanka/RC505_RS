@@ -18,6 +18,7 @@ pub struct DelayDspState {
     buffer_l: Vec<f32>,
     buffer_r: Vec<f32>,
     write_idx: usize,
+    valid: usize,
     smooth_time_samples: f32,
     smooth_feedback: f32,
     smooth_damp_hz: f32,
@@ -41,6 +42,7 @@ impl DelayDspState {
             buffer_l: vec![0.0; max_delay_samples.max(2)],
             buffer_r: vec![0.0; max_delay_samples.max(2)],
             write_idx: 0,
+            valid: 0,
             smooth_time_samples: (DELAY_TIME_MIN_MS / 1000.0) * sr,
             smooth_feedback: 0.0,
             smooth_damp_hz: 20_000.0,
@@ -69,17 +71,19 @@ impl DelayDspState {
         self.buffer_l = vec![0.0; max_delay_samples.max(2)];
         self.buffer_r = vec![0.0; max_delay_samples.max(2)];
         self.write_idx = 0;
+        self.valid = 0;
         self.smooth_time_samples = (DELAY_TIME_MIN_MS / 1000.0) * sr;
         self.fb_lp_l = 0.0;
         self.fb_lp_r = 0.0;
     }
 
     pub fn reset(&mut self) {
-        self.buffer_l.fill(0.0);
-        self.buffer_r.fill(0.0);
         self.write_idx = 0;
+        self.valid = 0;
         self.fb_lp_l = 0.0;
         self.fb_lp_r = 0.0;
+        self.hp_x = [0.0; 2];
+        self.hp_y = [0.0; 2];
     }
 }
 
@@ -90,6 +94,36 @@ pub fn process_sample(
     input_l: f32,
     input_r: f32,
 ) -> (f32, f32) {
+    process_mode(state, p, sample_rate, input_l, input_r, None)
+}
+
+/// Stereo divided taps: L at Time*Ratio, R at Time; full-length taps cross-feed.
+pub fn process_panning_sample(
+    state: &mut DelayDspState,
+    p: DelayParams,
+    sample_rate: f32,
+    input_l: f32,
+    input_r: f32,
+    ratio: f32,
+    width: f32,
+) -> (f32, f32) {
+    process_mode(
+        state,
+        p,
+        sample_rate,
+        input_l,
+        input_r,
+        Some((ratio.clamp(0.1, 1.0), width.clamp(0.0, 2.0))),
+    )
+}
+fn process_mode(
+    state: &mut DelayDspState,
+    p: DelayParams,
+    sample_rate: f32,
+    input_l: f32,
+    input_r: f32,
+    panning: Option<(f32, f32)>,
+) -> (f32, f32) {
     state.set_sample_rate(sample_rate);
     let sr = state.sample_rate;
     let max_delay_samples = (state.buffer_l.len().saturating_sub(2)).max(1);
@@ -98,9 +132,13 @@ pub fn process_sample(
         * sr)
         .clamp(1.0, max_delay_samples as f32);
     let target_feedback = p.feedback.clamp(0.0, FEEDBACK_MAX);
-    let target_damp_hz = p.high_damp_hz.clamp(200.0, 20_000.0);
+    let target_damp_hz = if p.high_damp_hz <= 0.0 {
+        sr * 0.49
+    } else {
+        p.high_damp_hz.clamp(20.0, 20_000.0)
+    };
     let target_direct = p.direct.clamp(0.0, 1.0);
-    let target_effect = p.effect.clamp(0.0, 1.0);
+    let target_effect = p.effect.clamp(0.0, 1.2);
 
     let smooth_coeff = state.smoothing;
     state.smooth_time_samples += (target_time_samples - state.smooth_time_samples) * smooth_coeff;
@@ -112,8 +150,29 @@ pub fn process_sample(
     let delay_samples = state
         .smooth_time_samples
         .clamp(1.0, max_delay_samples as f32);
-    let delayed_l = read_interp(&state.buffer_l, state.write_idx as f32 - delay_samples);
-    let delayed_r = read_interp(&state.buffer_r, state.write_idx as f32 - delay_samples);
+    let delayed_l = if delay_samples > state.valid as f32 {
+        0.0
+    } else {
+        read_interp(&state.buffer_l, state.write_idx as f32 - delay_samples)
+    };
+    let delayed_r = if delay_samples > state.valid as f32 {
+        0.0
+    } else {
+        read_interp(&state.buffer_r, state.write_idx as f32 - delay_samples)
+    };
+    let wet = if let Some((ratio, width)) = panning {
+        let time = (delay_samples * ratio).max(1.0);
+        let left = if time > state.valid as f32 {
+            0.0
+        } else {
+            read_interp(&state.buffer_l, state.write_idx as f32 - time)
+        };
+        let mid = (left + delayed_r) * 0.5;
+        let side = (left - delayed_r) * 0.5 * width;
+        [mid + side, mid - side]
+    } else {
+        [delayed_l, delayed_r]
+    };
 
     if state.lp_cache.0 != state.smooth_damp_hz {
         state.lp_cache = (
@@ -121,7 +180,11 @@ pub fn process_sample(
             one_pole_alpha(state.smooth_damp_hz, sr),
         );
     }
-    let lp_alpha = state.lp_cache.1;
+    let lp_alpha = if p.high_damp_hz <= 0.0 {
+        1.0
+    } else {
+        state.lp_cache.1
+    };
     state.fb_lp_l += (delayed_l - state.fb_lp_l) * lp_alpha;
     state.fb_lp_r += (delayed_r - state.fb_lp_r) * lp_alpha;
 
@@ -130,7 +193,9 @@ pub fn process_sample(
         if state.hp_cache.0 != p.low_cut_hz {
             state.hp_cache = (
                 p.low_cut_hz,
-                (-2.0 * std::f32::consts::PI * p.low_cut_hz.clamp(10.0, 1000.0) / sr).exp(),
+                (-2.0 * std::f32::consts::PI * p.low_cut_hz.clamp(10.0, 12500.0).min(sr * 0.45)
+                    / sr)
+                    .exp(),
             );
         }
         let a = state.hp_cache.1;
@@ -142,10 +207,18 @@ pub fn process_sample(
         }
     }
     let fb = state.smooth_feedback;
-    let write_l = (input_l + feedback[0] * fb).clamp(-1.0, 1.0);
-    let write_r = (input_r + feedback[1] * fb).clamp(-1.0, 1.0);
+    let (source_l, source_r) = if panning.is_some() {
+        feedback.swap(0, 1);
+        let mono = (input_l + input_r) * 0.5;
+        (mono, mono)
+    } else {
+        (input_l, input_r)
+    };
+    let write_l = (source_l + feedback[0] * fb).clamp(-1.0, 1.0);
+    let write_r = (source_r + feedback[1] * fb).clamp(-1.0, 1.0);
     state.buffer_l[state.write_idx] = write_l;
     state.buffer_r[state.write_idx] = write_r;
+    state.valid = (state.valid + 1).min(state.buffer_l.len());
 
     state.write_idx += 1;
     if state.write_idx >= state.buffer_l.len() {
@@ -163,8 +236,8 @@ pub fn process_sample(
         state.smooth_effect
     };
     (
-        input_l * direct + delayed_l * effect,
-        input_r * direct + delayed_r * effect,
+        input_l * direct + wet[0] * effect,
+        input_r * direct + wet[1] * effect,
     )
 }
 

@@ -23,8 +23,16 @@ pub fn configure(app: &mut MyApp, mode: &str) {
         return;
     }
     app.active_project_idx = Some(0);
+    if mode.starts_with("shortcuts") {
+        app.shortcut_editor.open(&app.shortcuts);
+        return;
+    }
     if mode.starts_with("performance") && mode.contains("audio") {
         app.left_page = crate::app::LeftPage::Audio;
+        if mode.contains("master") {
+            app.master_fx_open = true;
+            app.config.master_fx.compressor_enabled = true;
+        }
         app.config.system_config.input_device.value =
             "USB microphone — multichannel audio interface with a long device name".into();
         app.config.system_config.output_device.value =
@@ -50,17 +58,86 @@ pub fn configure(app: &mut MyApp, mode: &str) {
     if let Some(InputFx::Oscillator(osc)) = &mut app.config.input_fx.banks[0].slots[0].fx {
         let pitches = [48, 51, 55, 58, 55, 51, 46, 48];
         osc.note.replace_events(
-            96,
+            7680,
             &pitches
                 .iter()
                 .enumerate()
                 .map(|(i, p)| crate::config::sequence_edit::NoteEvent {
-                    start: i * 6,
-                    len: 5,
+                    id: 0,
+                    velocity: 100,
+                    start: i * 480,
+                    len: 400,
                     pitch: crate::config::note_configs::NoteOct::from_pitch_index(*p),
                 })
                 .collect::<Vec<_>>(),
         );
+        if mode.starts_with("poly") {
+            use crate::config::{note_configs::NoteOct, sequence_edit::NoteEvent};
+            osc.note.replace_events(
+                7680,
+                &[
+                    (0, 24, 48),
+                    (0, 24, 52),
+                    (0, 24, 55),
+                    (24, 24, 45),
+                    (24, 24, 48),
+                    (24, 24, 52),
+                    (48, 24, 46),
+                    (48, 24, 50),
+                    (48, 24, 53),
+                    (72, 24, 43),
+                    (72, 24, 47),
+                    (72, 24, 50),
+                ]
+                .map(|(start, len, p)| {
+                    NoteEvent::new(start * 80, len * 80, NoteOct::from_pitch_index(p))
+                }),
+            );
+            osc.note.clip_name = "Four chord phrase / 四个和弦".into();
+        }
+        if mode.starts_with("sample") {
+            use crate::config::osc_configs::{SampleAsset, Waveform};
+            osc.waveform.value = Waveform::Sample;
+            osc.sample = Some(std::sync::Arc::new(SampleAsset::prepare_recording(
+                "Vowel capture / 人声质感采样".into(),
+                48000,
+                &(0..24000)
+                    .map(|i| {
+                        let phase = i as f32 * std::f32::consts::TAU * 220.0 / 48000.0;
+                        phase.sin() * 0.35 + (phase * 3.0).sin() * 0.2 + (phase * 7.0).sin() * 0.1
+                    })
+                    .collect::<Vec<_>>(),
+            )));
+            osc.select_sample_region();
+        }
+        if mode.starts_with("lfo") {
+            use crate::config::osc_configs::{CurvePoint, LfoShape, LfoTarget};
+            osc.lfo.enabled = true;
+            osc.lfo.shape = LfoShape::Custom;
+            osc.lfo.target = LfoTarget::Cutoff;
+            osc.lfo.points = vec![
+                CurvePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    curve: -0.5,
+                },
+                CurvePoint {
+                    x: 0.4,
+                    y: 1.0,
+                    curve: 0.6,
+                },
+                CurvePoint {
+                    x: 0.75,
+                    y: 0.2,
+                    curve: 0.0,
+                },
+                CurvePoint {
+                    x: 1.0,
+                    y: 0.0,
+                    curve: 0.0,
+                },
+            ];
+        }
         osc.envelope.attack_ms.value = 80;
         osc.envelope.decay_ms.value = 350;
         osc.envelope.sustain_pct.value = 40;
@@ -81,17 +158,50 @@ pub fn configure(app: &mut MyApp, mode: &str) {
     if mode == "reverb" {
         app.editor.select(FxTarget::Input { bank: 0, slot: 3 });
     }
+    if mode.starts_with("input-roll") {
+        app.config.input_fx.set_slot_kind(0, 0, FxKind::Roll);
+        app.config.input_fx.banks[0].slots[0].is_enabled = true;
+        app.editor.select(FxTarget::Input { bank: 0, slot: 0 });
+    }
     if mode == "roll" {
         app.config
             .track_fx
             .set_slot_kind(0, 0, crate::config::TrackFxKind::Roll);
         app.editor.select(FxTarget::Track { bank: 0, slot: 0 });
     }
-    app.editor.page = match mode {
-        "sequence" | "sequence-small" => EditorPage::Sequence,
-        "filter" => EditorPage::Filter,
-        "envelope" => EditorPage::Envelope,
-        _ => EditorPage::Sound,
+    if mode.starts_with("audio-fx-") {
+        use crate::config::audio_fx::AudioFxKind as K;
+        let kind = if mode.contains("electric") {
+            K::Electric
+        } else if mode.contains("panning") {
+            K::PanningDelay
+        } else if mode.contains("slicer") {
+            K::StepSlicer
+        } else if mode.contains("transpose") {
+            K::Transpose
+        } else {
+            K::Equalizer
+        };
+        app.config.input_fx.set_slot_kind(0, 0, FxKind::Audio(kind));
+        app.config.input_fx.banks[0].slots[0].is_enabled = true;
+        if let Some(InputFx::Audio(p)) = &mut app.config.input_fx.banks[0].slots[0].fx {
+            p.low_db = 4.0;
+            p.mid_db = -6.0;
+            p.high_db = 2.0;
+            p.semitones = 7.0;
+            p.pitch_sequence = kind == K::Transpose;
+        }
+    }
+    app.editor.page = if mode.starts_with("sequence") || mode.starts_with("poly") {
+        EditorPage::Sequence
+    } else if mode.starts_with("filter") {
+        EditorPage::Filter
+    } else if mode.starts_with("envelope") {
+        EditorPage::Envelope
+    } else if mode.starts_with("lfo") {
+        EditorPage::Modulation
+    } else {
+        EditorPage::Sound
     };
     if mode.starts_with("playback") {
         let mut view = crate::engine::core::EngineView::default();
@@ -126,6 +236,9 @@ pub fn configure(app: &mut MyApp, mode: &str) {
             std::sync::Arc::new(visuals),
         )));
         app.player_open = true;
+        if mode.contains("import") {
+            app.replay_panel.as_mut().unwrap().show_import_preview();
+        }
         app.editor.expanded = false;
     }
     if mode.starts_with("replays") {

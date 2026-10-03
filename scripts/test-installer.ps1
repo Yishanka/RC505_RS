@@ -47,3 +47,8 @@ $latest=Join-Path $downloads 'RC505-RS-setup.exe'
 if (!(Test-Path -LiteralPath $latest) -or (Test-Path -LiteralPath $old) -or (Test-Path -LiteralPath $candidate) -or !(Test-Path -LiteralPath $unrelated)) {throw 'Cache retention policy is incorrect.'}
 if ((Get-FileHash -LiteralPath $latest -Algorithm SHA256).Hash -ine $metadata.sha256) {throw 'Latest cached installer changed.'}
 Write-Output 'Installer smoke test passed: no-import install, reinstall, data preservation and one-package cache.'
+$resolved = [IO.Path]::GetFullPath($testRoot)
+$allowed = [IO.Path]::GetFullPath((Join-Path $workspace 'var')) + [IO.Path]::DirectorySeparatorChar
+if (!$resolved.StartsWith($allowed,[StringComparison]::OrdinalIgnoreCase) -or (Split-Path -Leaf $resolved) -notmatch '^installer-smoke-[a-f0-9]{32}$') { throw 'Refusing cleanup outside installer test workspace.' }
+if ((Get-Item -LiteralPath $resolved).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Refusing linked installer test workspace.' }
+Remove-Item -LiteralPath $resolved -Recurse -Force

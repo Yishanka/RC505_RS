@@ -45,6 +45,11 @@ impl AuditionParameters {
                 for (b, group) in runtime.banks.iter_mut().enumerate() {
                     for (s, effect) in group.slots.iter_mut().enumerate() {
                         effect.enabled = b == bank && s == slot;
+                        // Capture mailboxes have one writer: the formal input engine.
+                        // Private audition must never race it or overwrite captured PCM.
+                        if let Some(osc) = &mut effect.osc {
+                            osc.poly.capture = None;
+                        }
                     }
                 }
                 runtime.selected_bank_idx = bank;
@@ -52,6 +57,7 @@ impl AuditionParameters {
                 let uses_input = chosen.my_delay.is_some();
                 if let Some(osc) = &mut chosen.osc {
                     osc.threshold = 0.0;
+                    osc.poly.input_gate = false;
                 }
                 if let Some(delay) = &mut chosen.my_delay {
                     delay.threshold = 0.0;

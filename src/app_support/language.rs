@@ -39,6 +39,26 @@ impl Language {
     }
 }
 const TRANSLATIONS: &[(&str, &str)] = &[
+    ("Transpose", "移调"),
+    ("Electric", "电音校音"),
+    ("Harmonist", "手动和声"),
+    ("Distortion", "失真"),
+    ("Dynamics", "动态处理"),
+    ("Equalizer", "均衡器"),
+    ("Octave", "低八度"),
+    ("Auto Pan", "自动声像"),
+    ("Panning Delay", "左右抽头延迟"),
+    ("Phaser", "相位器"),
+    ("Flanger", "镶边"),
+    ("Sustainer", "延音压缩"),
+    ("Manual Pan", "手动声像"),
+    ("Stereo Enhance", "立体声扩展"),
+    ("Tremolo", "振幅颤音"),
+    ("Vibrato", "音高颤音"),
+    ("Step Slicer", "步进切片"),
+    ("Freeze", "冻结延音"),
+    ("Chorus", "合唱"),
+    ("Repeats (0 = manual feedback)", "重复次数（0 手动反馈）"),
     (
         "Connect audio before testing",
         "音频未连接，请先检查设备并重新连接",
@@ -62,6 +82,10 @@ const TRANSLATIONS: &[(&str, &str)] = &[
         "请先拔掉回环线并恢复监听",
     ),
     ("Connect audio before auditioning", "请先连接音频设备再试听"),
+    (
+        "Capture or import a sample first",
+        "请先捕获输入或导入采样素材",
+    ),
     ("Close the replay player first", "请先关闭回放播放器"),
     (
         "Add notes to the piano roll first",
@@ -130,6 +154,12 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("Step", "步长"),
     ("Seq", "序列"),
     ("Waveform", "波形"),
+    ("Vocal", "人声波形"),
+    ("Sample", "采样"),
+    (
+        "Legacy MyDelay was migrated to OSC; capture or import a sample first.",
+        "旧 MyDelay 已迁移为 OSC；请先捕获或导入采样素材。",
+    ),
     ("Sine", "正弦波"),
     ("Square", "方波"),
     ("Saw", "锯齿波"),

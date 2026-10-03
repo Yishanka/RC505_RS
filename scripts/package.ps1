@@ -1,6 +1,7 @@
 param([string]$Version,[string]$Iscc,[switch]$SkipBuild)
 $ErrorActionPreference='Stop'
 $workspace = Split-Path -Parent $PSScriptRoot
+$portable = $null
 Push-Location $workspace
 try {
     $cargoVersion = ((Get-Content Cargo.toml | Where-Object {$_ -match '^version\s*='}) -replace '^version\s*=\s*"([^" ]+)".*$','$1').Trim()
@@ -29,4 +30,22 @@ try {
     [IO.File]::WriteAllText((Join-Path $workspace 'dist/update.json'),($manifest|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
     $sums=Get-ChildItem dist -File | Where-Object {$_.Name -like "*$Version*"} | ForEach-Object {"$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)"}
     [IO.File]::WriteAllLines((Join-Path $workspace 'dist/SHA256SUMS.txt'),$sums,[Text.UTF8Encoding]::new($false))
-} finally {Pop-Location}
+    # The current installer has passed smoke tests and the portable ZIP exists.
+    # Keep one local release in dist; historical releases remain on GitHub.
+    $artifactRoot = [IO.Path]::GetFullPath((Join-Path $workspace 'dist'))
+    if ((Get-Item -LiteralPath $artifactRoot).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Refusing cleanup in a linked artifact directory.' }
+    foreach ($oldArtifact in Get-ChildItem -LiteralPath $artifactRoot -File) {
+        if ($oldArtifact.Name -match '^RC505-RS-(\d+\.\d+\.\d+)-windows-x64-(setup\.exe|portable\.zip)$' -and $Matches[1] -ne $Version) {
+            Remove-Item -LiteralPath $oldArtifact.FullName -Force
+        }
+    }
+} finally {
+    if ($portable -and (Test-Path -LiteralPath $portable)) {
+        $resolved = [IO.Path]::GetFullPath($portable)
+        $allowed = [IO.Path]::GetFullPath((Join-Path $workspace 'var')) + [IO.Path]::DirectorySeparatorChar
+        if (!$resolved.StartsWith($allowed, [StringComparison]::OrdinalIgnoreCase) -or (Split-Path -Leaf $resolved) -notmatch '^package-\d') { throw 'Refusing cleanup outside package workspace.' }
+        if ((Get-Item -LiteralPath $resolved).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Refusing linked package workspace.' }
+        Remove-Item -LiteralPath $resolved -Recurse -Force
+    }
+    Pop-Location
+}

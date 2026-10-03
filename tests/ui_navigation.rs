@@ -32,4 +32,11 @@ fn editor_navigation_and_dialogs_keep_valid_accessibility_focus() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("UI regression passed"));
+    // Keep failures for diagnosis, but do not accumulate successful audio fixtures.
+    let root = std::fs::canonicalize(root).unwrap();
+    assert_eq!(
+        root.parent(),
+        Some(std::fs::canonicalize("var").unwrap().as_path())
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }

@@ -46,9 +46,7 @@ pub struct Diagnostics {
     pub player_playing: AtomicBool,
 }
 pub struct Player {
-    pub samples: Vec<Frame>,
-    pub cursor: usize,
-    pub playing: bool,
+    pub stream: replay::streaming::Consumer,
 }
 pub enum Control {
     Spectrum(bool),
@@ -78,7 +76,6 @@ pub enum Control {
     EndTake,
     Enable(bool),
     Player(Option<Box<Player>>),
-    PlayerToggle,
     Calibrate(Option<Box<super::latency::Calibration>>),
 }
 enum WorkerMessage {
@@ -282,14 +279,6 @@ impl Callback {
                         std::mem::swap(&mut self.player, value);
                     }
                 }
-                Control::PlayerToggle => {
-                    if let Some(player) = &mut self.player {
-                        if player.cursor >= player.samples.len() {
-                            player.cursor = 0;
-                        }
-                        player.playing = !player.playing;
-                    }
-                }
                 Control::Calibrate(value) => {
                     if !self.diagnostics.calibration_hold.load(Ordering::Relaxed)
                         || self.player.is_some()
@@ -341,22 +330,13 @@ impl Callback {
             return [0.0; 2];
         }
         if let Some(player) = &mut self.player {
-            let frame = if player.playing && player.cursor < player.samples.len() {
-                let frame = player.samples[player.cursor];
-                player.cursor += 1;
-                frame
-            } else {
-                [0.0; 2]
-            };
-            if player.cursor >= player.samples.len() {
-                player.playing = false;
-            }
+            let frame = player.stream.next();
             self.diagnostics
                 .player_frame
-                .store(player.cursor as u64, Ordering::Relaxed);
+                .store(player.stream.shared.position(), Ordering::Relaxed);
             self.diagnostics
                 .player_playing
-                .store(player.playing, Ordering::Relaxed);
+                .store(player.stream.shared.playing(), Ordering::Relaxed);
             return frame;
         }
         if !self.enabled {
@@ -1047,10 +1027,12 @@ mod output_tests {
         {
             osc.threshold.value = 100;
             osc.note.replace_events(
-                48,
+                3840,
                 &[crate::config::sequence_edit::NoteEvent {
+                    id: 0,
+                    velocity: 100,
                     start: 0,
-                    len: 48,
+                    len: 3840,
                     pitch: crate::config::note_configs::NoteOct::from_pitch_index(48),
                 }],
             );
@@ -1090,12 +1072,13 @@ mod output_tests {
         cb.core.action(Action::Metronome(true), &mut cb.pages);
         assert!(!cb.core.idle() && cb.core.tracks_stopped());
         let config = AppConfig::new(120, 0, 5);
+        let root = PathBuf::from("var").join(format!("capture-test-{}", crate::session::id()));
         audio
             .send(Control::BeginTake {
                 core: Box::new(RenderCore::new(8000)),
                 snapshot: Box::new(AudioSnapshot::empty(8000)),
                 retired_audition: None,
-                root: PathBuf::from("var").join(format!("capture-test-{}", crate::session::id())),
+                root: root.clone(),
                 project_id: "test.json".into(),
                 data: crate::project::data_from_config(&config),
             })
@@ -1105,6 +1088,34 @@ mod output_tests {
         assert!(!cb.core.metronome && cb.core.clock.origin.is_none());
         audio.send(Control::EndTake).unwrap();
         cb.commands();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut complete = false;
+            for response in audio.responses() {
+                match response {
+                    Response::Take(path) => {
+                        assert_eq!(path, root);
+                        complete = true;
+                    }
+                    Response::Error(error) => panic!("Capture completion failed: {error}"),
+                    _ => {}
+                }
+            }
+            if complete {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Capture completion timed out"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let root = std::fs::canonicalize(root).unwrap();
+        assert_eq!(
+            root.parent(),
+            Some(std::fs::canonicalize("var").unwrap().as_path())
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn handoff_returns_exact_recording_renderer_even_before_first_callback() {

@@ -28,7 +28,19 @@ impl MyApp {
         if !self.sync_config() {
             return;
         }
-        self.send(Control::Action(action));
+        if self.send(Control::Action(action)) {
+            if matches!(action, Action::Panic | Action::Preview(false)) {
+                self.tempo_start_queued = None;
+            } else if matches!(
+                action,
+                Action::All | Action::Trigger(_) | Action::Metronome(true) | Action::Preview(true)
+            ) && self.stopped()
+            {
+                // The callback's view arrives later than this UI frame. Lock
+                // tempo immediately so a mouse edit cannot follow a queued start.
+                self.tempo_start_queued = Some(self.view.frame);
+            }
+        }
     }
     pub fn trigger_track(&mut self, index: usize) {
         self.action(Action::Trigger(index));
@@ -111,6 +123,10 @@ impl MyApp {
             return;
         }
         let entry = self.projects[self.sel_project_idx].clone();
+        if let Err(error) = crate::replay::library::migrate(&self.projects) {
+            self.status = format!("Cannot detach replays before deleting project: {error}");
+            return;
+        }
         match project::trash_project(&entry) {
             Ok(()) => {
                 self.projects.remove(self.sel_project_idx);

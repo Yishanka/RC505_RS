@@ -113,6 +113,12 @@ impl MyApp {
         match self.editor.target {
             Some(FxTarget::Input { bank, slot }) => {
                 match self.config.input_fx.banks[bank].slots[slot].fx.as_ref() {
+                    Some(crate::config::InputFx::Oscillator(v))
+                        if v.waveform.value == crate::config::osc_configs::Waveform::Sample
+                            && v.sample.is_none() =>
+                    {
+                        Some("Capture or import a sample first")
+                    }
                     Some(crate::config::InputFx::Oscillator(v)) if !v.note.events().is_empty() => {
                         None
                     }
@@ -209,17 +215,13 @@ impl MyApp {
         }
     }
     pub fn open_replays(&mut self) {
-        if let Some(index) = self.active_project_idx {
-            self.replay_list = crate::replay::list(&self.projects[index]);
+        if !self.read_only {
+            if let Err(error) = crate::replay::library::migrate(&self.projects) {
+                self.status = format!("Replay library migration failed: {error}");
+            }
         }
+        self.replay_list = crate::replay::library::list();
+        self.replay_exports = crate::replay::library::exports();
         self.replay_browser = true;
-    }
-    pub fn play_replay(&mut self, path: PathBuf) {
-        if self.busy() || self.taking() {
-            self.status = self.language.text("Wait for the current operation").into();
-            return;
-        }
-        self.render_replay(path);
-        self.replay_autoplay = self.job.is_some();
     }
 }

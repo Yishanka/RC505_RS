@@ -1,3 +1,5 @@
+#[path = "synth_controls.rs"]
+mod synth_controls;
 use super::{
     parameters::{self, choice, number},
     piano_roll::{self, PianoRollState},
@@ -17,6 +19,7 @@ pub enum EditorPage {
     Envelope,
     Filter,
     FilterEnvelope,
+    Modulation,
 }
 
 pub struct EditorState {
@@ -25,6 +28,9 @@ pub struct EditorState {
     pub page: EditorPage,
     pub piano: PianoRollState,
     pub preset_name: String,
+    pub library_open: bool,
+    pub clip_name: String,
+    pub clips: Vec<String>,
     pub presets: Vec<String>,
     pub message: String,
 }
@@ -37,6 +43,9 @@ impl Default for EditorState {
             page: EditorPage::Sound,
             piano: PianoRollState::default(),
             preset_name: String::new(),
+            library_open: false,
+            clip_name: String::new(),
+            clips: presets::list_clips(),
             presets: presets::list(),
             message: String::new(),
         }
@@ -53,6 +62,7 @@ impl EditorState {
                 EditorPage::Envelope,
                 EditorPage::Filter,
                 EditorPage::FilterEnvelope,
+                EditorPage::Modulation,
             ];
             let index = pages
                 .iter()
@@ -72,6 +82,14 @@ impl EditorState {
 }
 
 pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(egui::Id::new("audio-fx-sample-rate"), app.view.sample_rate));
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(
+            egui::Id::new("audio-fx-bpm"),
+            app.config.beat_config.current_bpm(),
+        )
+    });
     let lang = crate::app_support::language::Language::current(ui.ctx());
     let Some(target) = app.editor.target else {
         theme::card().show(ui, |ui| {
@@ -104,6 +122,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
             let target_text=format!("{} / {} / {}",lang.text(if matches!(target,FxTarget::Input{..}) {"INPUT FX"} else {"TRACK FX"}),bank+1,['A','B','C','D'][slot]);
             ui.label(egui::RichText::new(target_text).color(theme::accent(ui)).strong());
             if full {header_kind_changed=kind_picker(ui,&mut app.config,target);}
+            if full && super::navigation::register(ui.selectable_label(app.editor.library_open,lang.choose("Sounds / phrases", "音色 / 乐句库"))).clicked(){app.editor.library_open=!app.editor.library_open;}
             match target {
                 FxTarget::Input {bank,slot} => { super::navigation::register(ui.checkbox(&mut app.config.input_fx.banks[bank].slots[slot].is_enabled,lang.text("Enabled"))); }
                 FxTarget::Track {bank,slot} => {
@@ -124,7 +143,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
 
         });
         if full && crate::engine::audition::supports(&app.config,target) {
-            theme::caption(ui,lang.choose("Audition has its own clock and is monitor-only. MyDelay needs live input; Track Filter needs a recorded loop.","独立试听使用自己的时钟，只进入监听。MyDelay 需要实时输入；轨道滤波需要已有循环音频。"));
+            theme::caption(ui,lang.choose("Audition has its own clock and is monitor-only. OSC needs a phrase; Sample also needs captured/imported audio. Track Filter needs a recorded loop.","独立试听使用自己的时钟，只进入监听。OSC 需要乐句；采样模式还需要素材。轨道滤波需要已有循环音频。"));
         }
         let active = match target { FxTarget::Input{bank,..}=>bank==app.config.input_fx.sel_bank_idx, FxTarget::Track{bank,..}=>bank==app.config.track_fx.sel_bank_idx };
         if !active {
@@ -133,9 +152,9 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
                 if ui.button(lang.text("Activate this bank")).clicked() { match target {FxTarget::Input{bank,..}=>app.config.input_fx.select_bank(bank),FxTarget::Track{bank,..}=>app.config.track_fx.select_bank(bank)} }
             });
         }
-        if full {
+        if full && app.editor.library_open {
             theme::control_row(ui, |ui| {
-                ui.label(lang.text("Preset"));
+                ui.label(lang.choose("Sound preset", "音色预设"));
                 ui.add(egui::TextEdit::singleline(&mut app.editor.preset_name).hint_text(lang.text("Name for a new preset")).desired_width(180.0));
                 if ui.button(lang.text("Save as new")).clicked() {
                     app.editor.message = match presets::save(&app.config, target, &app.editor.preset_name) {
@@ -146,7 +165,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
                     for name in app.editor.presets.clone() {
                         if ui.selectable_label(false, &name).clicked() {
                             app.editor.message = match presets::load(&mut app.config, target, &name) {
-                                Ok(()) => { app.editor.piano.reset_history(); format!("Loaded {name}") }, Err(e) => e.to_string()
+                                Ok(()) => { format!("Loaded {name}") }, Err(e) => e.to_string()
                             };
                         }
                     }
@@ -155,14 +174,33 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
             if !app.editor.message.is_empty() { ui.label(&app.editor.message); }
             ui.separator();
         }
+        if full && app.editor.library_open && presets::clip(&app.config,target).is_some() {
+            theme::control_row(ui,|ui| {
+                ui.label(lang.choose("Phrase", "乐句"));
+                ui.add(egui::TextEdit::singleline(&mut app.editor.clip_name).hint_text(lang.choose("New phrase name", "新乐句名称")).desired_width(180.0));
+                if ui.button(lang.choose("Save phrase", "保存乐句")).clicked() {
+                    app.editor.message=match presets::save_clip(&app.config,target,&app.editor.clip_name) {
+                        Ok(())=>{app.editor.clips=presets::list_clips();lang.choose("Phrase saved", "乐句已保存").into()},Err(e)=>e.to_string()
+                    };
+                }
+                egui::ComboBox::from_id_source("load_clip").selected_text(lang.choose("Load phrase…", "载入乐句…")).show_ui(ui,|ui| {
+                    for name in app.editor.clips.clone() {if ui.selectable_label(false,&name).clicked() {
+                        let previous=presets::clip(&app.config,target);
+                        app.editor.message=match presets::load_clip(&mut app.config,target,&name) {Ok(())=>{if let (Some(previous),Some(note))=(previous,presets::note_mut(&mut app.config,target)){app.editor.piano.remember_clip(previous,note);}format!("{} {name}",lang.choose("Loaded", "已载入"))},Err(e)=>e.to_string()};
+                    }}
+                });
+                if let Some(clip)=presets::clip(&app.config,target) {if !clip.name.is_empty(){ui.label(format!("{} → {}",clip.name,target.label()));}}
+            });
+            theme::caption(ui,lang.choose("Phrase files contain notes only. Loading a phrase keeps the sound; loading a sound keeps this phrase.","乐句文件只保存音符。载入乐句保留音色；载入音色保留当前乐句。"));
+        }
         ui.push_id(target.label(), |ui| {
             let changed = if full {header_kind_changed} else {kind_picker(ui, &mut app.config, target)};
             if changed { app.editor.piano.reset_history(); app.editor.page = EditorPage::Sound; }
             let synth = matches!(target, FxTarget::Input { bank, slot } if matches!(app.config.input_fx.banks[bank].slots[slot].fx, Some(InputFx::Oscillator(_)|InputFx::MyDelay(_))));
             if full && synth {
                 theme::control_row(ui, |ui| {
-                    for (page,label) in [(EditorPage::Sound,lang.text("Sound")),(EditorPage::Sequence,lang.text("Piano roll")),(EditorPage::Envelope,lang.text("Amp envelope")),(EditorPage::Filter,lang.text("Filter")),(EditorPage::FilterEnvelope,lang.text("Filter envelope"))] {
-                        ui.selectable_value(&mut app.editor.page,page,label);
+                    for (page,label) in [(EditorPage::Sound,lang.text("Sound")),(EditorPage::Sequence,lang.text("Piano roll")),(EditorPage::Envelope,lang.text("Amp envelope")),(EditorPage::Filter,lang.text("Filter")),(EditorPage::FilterEnvelope,lang.text("Filter envelope")),(EditorPage::Modulation,lang.choose("LFO","LFO 调制"))] {
+                        super::navigation::register(ui.selectable_value(&mut app.editor.page,page,label));
                     }
                     theme::keycap(ui,"Ctrl+Tab");
                 });
@@ -197,14 +235,10 @@ fn kind_picker(ui: &mut egui::Ui, config: &mut AppConfig, target: FxTarget) -> b
                 ui,
                 "kind",
                 &mut kind,
-                &[
-                    (FxKind::None, lang.text("Empty")),
-                    (FxKind::Oscillator, lang.text("Oscillator")),
-                    (FxKind::Filter, lang.text("Filter")),
-                    (FxKind::Reverb, lang.text("Reverb")),
-                    (FxKind::MyDelay, lang.text("MyDelay")),
-                    (FxKind::Vocoder, lang.text("Vocoder")),
-                ],
+                &FxKind::available()
+                    .into_iter()
+                    .map(|kind| (kind, input_name(kind)))
+                    .collect::<Vec<_>>(),
             );
             if kind != previous {
                 config.input_fx.set_slot_kind(bank, slot, kind);
@@ -218,12 +252,10 @@ fn kind_picker(ui: &mut egui::Ui, config: &mut AppConfig, target: FxTarget) -> b
                 ui,
                 "kind",
                 &mut kind,
-                &[
-                    (TrackFxKind::None, lang.text("Empty")),
-                    (TrackFxKind::Delay, lang.text("Delay")),
-                    (TrackFxKind::Roll, lang.text("Roll")),
-                    (TrackFxKind::Filter, lang.text("Filter")),
-                ],
+                &TrackFxKind::available()
+                    .into_iter()
+                    .map(|kind| (kind, track_name(kind)))
+                    .collect::<Vec<_>>(),
             );
             if kind != previous {
                 config.track_fx.set_slot_kind(bank, slot, kind);
@@ -236,8 +268,10 @@ fn kind_picker(ui: &mut egui::Ui, config: &mut AppConfig, target: FxTarget) -> b
 
 pub fn input_name(kind: FxKind) -> &'static str {
     match kind {
+        FxKind::Roll => "Roll",
+        FxKind::Audio(kind) => kind.name(),
         FxKind::None => "Empty",
-        FxKind::Oscillator => "Oscillator",
+        FxKind::Oscillator => "OSC",
         FxKind::Filter => "Filter",
         FxKind::Reverb => "Reverb",
         FxKind::MyDelay => "MyDelay",
@@ -246,10 +280,12 @@ pub fn input_name(kind: FxKind) -> &'static str {
 }
 pub fn track_name(kind: TrackFxKind) -> &'static str {
     match kind {
+        TrackFxKind::Audio(kind) => kind.name(),
         TrackFxKind::None => "Empty",
         TrackFxKind::Delay => "Delay",
         TrackFxKind::Roll => "Roll",
         TrackFxKind::Filter => "Filter",
+        TrackFxKind::Vocoder => "Vocoder",
     }
 }
 
@@ -263,29 +299,30 @@ fn input_parameters(
 ) {
     let lang = crate::app_support::language::Language::current(ui.ctx());
     match fx {
+        InputFx::Roll(roll) => roll_parameters(ui, roll, full),
+        InputFx::Audio(audio) => super::audio_fx_panel::draw(ui, audio, full),
         InputFx::Oscillator(osc) => match page {
             EditorPage::Sequence => piano_roll::draw(ui, &mut osc.note, piano, beats),
             EditorPage::Envelope => parameters::envelope(ui, &mut osc.envelope),
             EditorPage::Filter => parameters::filter(ui, &mut osc.osc_filter, true),
             EditorPage::FilterEnvelope => parameters::envelope(ui, &mut osc.osc_filter_env),
-            EditorPage::Sound => {
-                choice(ui, &mut osc.waveform);
-                number(ui, &mut osc.level, 0, 100, false);
-                number(ui, &mut osc.threshold, 0, 100, false);
-                if full {
-                    theme::caption(
-                        ui,
-                        lang.choose("Write notes in the piano roll. The sequencer runs during performance; audition has its own clock.","在钢琴卷帘中编写音符。序列随演出运行，独立试听使用自己的时钟。"),
-                    );
-                    waveform(ui, osc.waveform.value);
-                }
-            }
+            EditorPage::Modulation => synth_controls::lfo(ui, &mut osc.lfo),
+            EditorPage::Sound => synth_controls::sound(ui, osc, full),
         },
         InputFx::MyDelay(delay) => match page {
             EditorPage::Sequence => piano_roll::draw(ui, &mut delay.note, piano, beats),
             EditorPage::Envelope => parameters::envelope(ui, &mut delay.audio_env),
             EditorPage::Filter => parameters::filter(ui, &mut delay.filter, true),
             EditorPage::FilterEnvelope => parameters::envelope(ui, &mut delay.filter_env),
+            EditorPage::Modulation => {
+                theme::caption(
+                    ui,
+                    lang.choose(
+                        "Reload this project to migrate MyDelay into OSC.",
+                        "重新载入工程即可把 MyDelay 迁移为 OSC。",
+                    ),
+                );
+            }
             EditorPage::Sound => {
                 number(ui, &mut delay.level, 0, 100, false);
                 number(ui, &mut delay.threshold, 0, 100, false);
@@ -320,7 +357,7 @@ fn input_parameters(
                 number(ui, &mut reverb.dry_level, 0, 100, false);
                 number(ui, &mut reverb.wet_level, 0, 100, false);
                 number(ui, &mut reverb.density, 1, 10, false);
-                number(ui, &mut reverb.high_cut_hz, 200, 20_000, true);
+                number(ui, &mut reverb.high_cut_hz, 0, 20_000, true);
                 number(
                     ui,
                     &mut reverb.low_cut,
@@ -392,6 +429,8 @@ fn input_parameters(
 fn track_parameters(ui: &mut egui::Ui, fx: &mut TrackFx, full: bool) {
     let lang = crate::app_support::language::Language::current(ui.ctx());
     match fx {
+        TrackFx::Audio(audio) => super::audio_fx_panel::draw(ui, audio, full),
+        TrackFx::Vocoder(vocoder) => super::audio_fx_panel::track_vocoder(ui, vocoder, full),
         TrackFx::Delay(delay) => {
             use crate::config::delay_configs::*;
             choice(ui, &mut delay.time_mode);
@@ -404,13 +443,16 @@ fn track_parameters(ui: &mut egui::Ui, fx: &mut TrackFx, full: bool) {
                     true,
                 );
             }
-            number(
-                ui,
-                &mut delay.feedback_pct,
-                0,
-                TRACK_DELAY_FEEDBACK_MAX_PCT,
-                false,
-            );
+            number(ui, &mut delay.feedback_repeats, 0, 16, false);
+            if delay.feedback_repeats.value == 0 {
+                number(
+                    ui,
+                    &mut delay.feedback_pct,
+                    0,
+                    TRACK_DELAY_FEEDBACK_MAX_PCT,
+                    false,
+                );
+            }
             number(
                 ui,
                 &mut delay.high_damp_hz,
@@ -419,39 +461,13 @@ fn track_parameters(ui: &mut egui::Ui, fx: &mut TrackFx, full: bool) {
                 true,
             );
             number(ui, &mut delay.direct_pct, 0, 100, false);
-            number(ui, &mut delay.effect_pct, 0, 100, false);
-            number(ui, &mut delay.low_cut_hz, 0, 1000, false);
-        }
-        TrackFx::Roll(roll) => {
-            use crate::config::{
-                roll_configs::{RollMode, RollStep},
-                time_mode::TimeMode,
-            };
-            choice(ui, &mut roll.mode);
-            choice(ui, &mut roll.time_mode);
-            if roll.time_mode.value == TimeMode::Milliseconds {
-                number(ui, &mut roll.time_ms, 1, 1000, true);
-            }
-            choice(ui, &mut roll.step);
-            number(ui, &mut roll.mix, 0, 100, false);
+            number(ui, &mut delay.effect_pct, 0, 120, false);
+            number(ui, &mut delay.low_cut_hz, 0, 12500, true);
             if full {
-                ui.add_enabled_ui(roll.step.value == RollStep::Off, |ui| {
-                    if roll.mode.value == RollMode::Roll1 {
-                        number(ui, &mut roll.feedback, 1, 100, false);
-                    } else {
-                        number(ui, &mut roll.repeat, 0, 100, false);
-                    }
-                });
-                theme::caption(
-                    ui,
-                    lang.text("Captures recent audio including preceding Track FX. Division shortens the frozen slice; Off repeats the full cycle using Feedback / Repeat. Repeat 0 = infinite."),
-                );
-                theme::caption(
-                    ui,
-                    lang.text("With no recent history, capture waits for one slice. Toggle the slot off/on to capture again. Sync time is limited to the 2 s capture buffer."),
-                );
+                theme::caption(ui,lang.choose("Repeat count maps feedback to -60 dB after 1–16 echoes; choose 0 for a manual coefficient. Cutoff 0 = FLAT. This mapping is documented, not a measured BOSS feedback law.","重复次数将反馈映射为第 1～16 次回声降至 -60 dB；选择 0 手动设置反馈。高低切设 0 表示直通；此映射不是实测的 BOSS 内部反馈曲线。"));
             }
         }
+        TrackFx::Roll(roll) => roll_parameters(ui, roll, full),
         TrackFx::Filter(filter) => {
             parameters::filter(ui, &mut filter.filter, full);
             if full {
@@ -501,43 +517,32 @@ fn track_parameters(ui: &mut egui::Ui, fx: &mut TrackFx, full: bool) {
     }
 }
 
-fn waveform(ui: &mut egui::Ui, waveform: crate::config::osc_configs::Waveform) {
-    use crate::config::osc_configs::Waveform;
-    theme::caption(
-        ui,
-        crate::app_support::language::Language::current(ui.ctx()).choose(
-            "WAVEFORM / ideal shape, two cycles",
-            "波形 / 理想形状，两个周期",
-        ),
-    );
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), 170.0),
-        egui::Sense::hover(),
-    );
-    ui.painter().rect_filled(rect, 6.0, theme::BACKGROUND);
-    let points = (0..400)
-        .map(|i| {
-            let phase = (i as f32 / 200.0).fract();
-            let value = match waveform {
-                Waveform::Sine => (phase * std::f32::consts::TAU).sin(),
-                Waveform::Saw => 2.0 * phase - 1.0,
-                Waveform::Square => {
-                    if phase < 0.5 {
-                        1.0
-                    } else {
-                        -1.0
-                    }
-                }
-                Waveform::Triangle => 1.0 - 4.0 * (phase - 0.5).abs(),
-            };
-            egui::pos2(
-                rect.left() + rect.width() * i as f32 / 399.0,
-                rect.center().y - value * rect.height() * 0.38,
-            )
-        })
-        .collect();
-    ui.painter().add(egui::Shape::line(
-        points,
-        egui::Stroke::new(2.0, theme::accent(ui)),
-    ));
+fn roll_parameters(
+    ui: &mut egui::Ui,
+    roll: &mut crate::config::roll_configs::RollConfigs,
+    full: bool,
+) {
+    use crate::config::{
+        roll_configs::{RollMode, RollStep},
+        time_mode::TimeMode,
+    };
+    let lang = crate::app_support::language::Language::current(ui.ctx());
+    choice(ui, &mut roll.mode);
+    choice(ui, &mut roll.time_mode);
+    if roll.time_mode.value == TimeMode::Milliseconds {
+        number(ui, &mut roll.time_ms, 1, 1000, true);
+    }
+    choice(ui, &mut roll.step);
+    number(ui, &mut roll.mix, 0, 100, false);
+    if full {
+        ui.add_enabled_ui(roll.step.value == RollStep::Off, |ui| {
+            if roll.mode.value == RollMode::Roll1 {
+                number(ui, &mut roll.feedback, 1, 100, false);
+            } else {
+                number(ui, &mut roll.repeat, 0, 100, false);
+            }
+        });
+        theme::caption(ui,lang.choose("Captures recent audio including preceding FX. Division shortens the frozen slice; Off repeats the full cycle using Feedback / Repeat. Repeat 0 = infinite.","捕获包含前级效果的最近声音。细分缩短冻结片段；Off 保留完整周期，并使用反馈／次数释放。重复 0 表示无限。"));
+        theme::caption(ui,lang.text("With no recent history, capture waits for one slice. Toggle the slot off/on to capture again. Sync time is limited to the 2 s capture buffer."));
+    }
 }

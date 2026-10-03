@@ -1,3 +1,4 @@
+pub mod audio_fx_panel;
 mod beat;
 pub mod calibration;
 pub mod editor;
@@ -9,6 +10,7 @@ pub mod performance;
 pub mod piano_roll;
 pub mod replay_panel;
 pub mod replays;
+pub mod shortcuts;
 pub mod theme;
 pub mod visualizer;
 

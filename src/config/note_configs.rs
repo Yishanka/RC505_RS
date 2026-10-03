@@ -3,7 +3,7 @@ use crate::config::config_type::EnumConfig;
 const MAX_SEQ_LEN: usize = 12 * 32;
 const TICKS_PER_BEAT: usize = 12;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Note {
     N,
     C,
@@ -41,7 +41,7 @@ impl std::fmt::Display for Note {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NoteOct {
     pub note: Note,
     pub octave: usize,
@@ -54,8 +54,12 @@ impl std::fmt::Display for NoteOct {
 }
 
 pub struct NoteConfigs {
-    note_seq: Vec<Option<NoteOct>>,
-    step_len_seq: Vec<usize>,
+    pub(crate) note_seq: Vec<Option<NoteOct>>,
+    pub(crate) events: Vec<super::sequence_edit::NoteEvent>,
+    pub(crate) loop_ticks: usize,
+    pub clip_name: String,
+    pub clip_id: String,
+    pub(crate) step_len_seq: Vec<usize>,
     pub sel_idx: Option<usize>,
     pub note: EnumConfig<Note>,
     pub octave: EnumConfig<usize>,
@@ -67,6 +71,10 @@ impl NoteConfigs {
     pub fn new() -> Self {
         Self {
             note_seq: vec![],
+            events: vec![],
+            loop_ticks: 0,
+            clip_name: String::new(),
+            clip_id: new_clip_id(),
             step_len_seq: vec![],
             sel_idx: None,
             note: EnumConfig::new(
@@ -142,6 +150,7 @@ impl NoteConfigs {
         }
         self.step_len_seq = infer_step_len_seq(&seq);
         self.note_seq = seq;
+        self.import_legacy_events();
     }
 
     pub fn step_len_seq(&self) -> &[usize] {
@@ -151,6 +160,7 @@ impl NoteConfigs {
     pub fn set_seq_with_steps(&mut self, seq: Vec<Option<NoteOct>>, step_len_seq: Vec<usize>) {
         self.set_seq(seq);
         self.step_len_seq = super::sequence_edit::canonical_steps(&self.note_seq, &step_len_seq);
+        self.import_legacy_events();
     }
 
     pub fn current_note_oct(&self) -> Option<NoteOct> {
@@ -164,44 +174,24 @@ impl NoteConfigs {
     }
 
     pub fn push(&mut self) {
-        let ticks = self.ticks_per_note().max(1);
-        if self.note_seq.len() + ticks > MAX_SEQ_LEN {
+        let ticks = self.ticks_per_note().max(1) * super::sequence_edit::LEGACY_SCALE;
+        let start = self.loop_ticks;
+        if start + ticks > super::sequence_edit::MAX_TICKS {
             return;
         }
-        let value = self.current_note_oct();
-        for i in 0..ticks {
-            self.note_seq.push(value);
-            self.step_len_seq.push(if i == 0 { ticks } else { 0 });
+        let mut events = self.events();
+        if let Some(pitch) = self.current_note_oct() {
+            events.push(super::sequence_edit::NoteEvent::new(start, ticks, pitch));
         }
+        self.replace_events(start + ticks, &events);
     }
 
     pub fn pop(&mut self) {
-        if self.note_seq.is_empty() || self.step_len_seq.is_empty() {
-            return;
-        }
-
-        if let Some((start, len)) = self
-            .step_len_seq
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, v)| **v > 0)
-            .map(|(idx, v)| (idx, *v))
-        {
-            let expected_end = start + len;
-            if expected_end == self.note_seq.len() {
-                self.note_seq.truncate(start);
-                self.step_len_seq.truncate(start);
-                return;
-            }
-        }
-
-        if let Some(last) = self.note_seq.last().copied() {
-            while self.note_seq.last().copied() == Some(last) {
-                self.note_seq.pop();
-            }
-            self.step_len_seq = infer_step_len_seq(&self.note_seq);
-        }
+        let end = self.events.last().map(|n| n.start).unwrap_or_else(|| {
+            self.loop_ticks
+                .saturating_sub(self.ticks_per_note() * super::sequence_edit::LEGACY_SCALE)
+        });
+        self.replace_events(end, &self.events());
     }
 
     pub fn apply_edit(&mut self) {
@@ -229,7 +219,7 @@ impl NoteConfigs {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum NoteSeqEdit {
     Push,
     Pop,
@@ -299,4 +289,21 @@ fn infer_step_len_seq(seq: &[Option<NoteOct>]) -> Vec<usize> {
         i = j;
     }
     out
+}
+
+fn new_clip_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static ID: AtomicU64 = AtomicU64::new(1);
+    format!(
+        "phrase-{:x}-{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |v| v.as_nanos()),
+        ID.fetch_add(1, Ordering::Relaxed)
+    )
+}
+impl NoteConfigs {
+    pub fn fork_clip_identity(&mut self) {
+        self.clip_id = new_clip_id();
+    }
 }

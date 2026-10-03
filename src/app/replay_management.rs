@@ -4,10 +4,7 @@ impl MyApp {
         if self.read_only || self.busy() || self.taking() || self.player_open {
             return;
         }
-        let Some(index) = self.active_project_idx else {
-            return;
-        };
-        match crate::replay::trash(&self.projects[index], &path) {
+        match crate::replay::library::trash(&path) {
             Ok(()) => {
                 if self.draft.as_ref() == Some(&path) {
                     self.draft = None;
@@ -19,7 +16,7 @@ impl MyApp {
                 {
                     self.rendered = None;
                 }
-                self.replay_list = crate::replay::list(&self.projects[index]);
+                self.replay_list = crate::replay::library::list();
                 self.status=self.language.choose("Replay deleted. Restore last deleted recovers it; exported WAV files remain.","回放已删除，可恢复上一次删除；已导出的 WAV 文件保留。").into();
             }
             Err(e) => self.status = e.to_string(),
@@ -34,12 +31,9 @@ impl MyApp {
         if self.read_only || self.busy() {
             return;
         }
-        let Some(index) = self.active_project_idx else {
-            return;
-        };
-        match crate::replay::restore_last(&self.projects[index]) {
+        match crate::replay::library::restore_last() {
             Ok(found) => {
-                self.replay_list = crate::replay::list(&self.projects[index]);
+                self.replay_list = crate::replay::library::list();
                 self.status = self
                     .language
                     .choose(
@@ -57,6 +51,31 @@ impl MyApp {
                     .into();
             }
             Err(e) => self.status = e.to_string(),
+        }
+    }
+    pub fn delete_replay_export(&mut self, path: PathBuf) {
+        if self.read_only || self.busy() {
+            return;
+        }
+        match crate::replay::library::delete_export(&path) {
+            Ok(()) => {
+                if self
+                    .rendered
+                    .as_ref()
+                    .is_some_and(|(_, result)| result.wav == path)
+                {
+                    self.rendered = None;
+                }
+                self.replay_exports = crate::replay::library::exports();
+                self.status = self
+                    .language
+                    .choose(
+                        "Exported WAV deleted; the replay inputs are preserved.",
+                        "已删除导出 WAV，回放原始输入仍保留。",
+                    )
+                    .into();
+            }
+            Err(error) => self.status = error.to_string(),
         }
     }
 }

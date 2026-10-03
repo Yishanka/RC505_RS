@@ -194,23 +194,44 @@ pub fn language_switch(
     response
 }
 
+fn shortcut_hint(ctx: &egui::Context, original: &str) -> String {
+    ctx.data(|data| {
+        data.get_temp::<std::sync::Arc<std::collections::BTreeMap<String, String>>>(egui::Id::new(
+            "shortcut-hints",
+        ))
+    })
+    .and_then(|map| map.get(original).cloned())
+    .unwrap_or_else(|| original.into())
+}
+
 /// Keycaps are hints, not additional clickable controls.
 pub fn keycap(ui: &mut egui::Ui, key: &str) {
+    let mapped = shortcut_hint(ui.ctx(), key);
+    let key = mapped.as_str();
+    if key.is_empty() {
+        return;
+    }
     let text = ui.painter().layout_no_wrap(
         key.into(),
         egui::FontId::monospace(12.0),
         Color32::from_gray(220),
     );
-    let (rect, response) =
-        ui.allocate_exact_size(text.size() + egui::vec2(10.0, 4.0), egui::Sense::hover());
+    let size = text.size() + egui::vec2(10.0, 4.0);
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(size.x.min(ui.available_width().max(18.0)), size.y),
+        egui::Sense::hover(),
+    );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, key));
+    response.on_hover_text(key);
     ui.painter()
         .rect_filled(rect, 4.0, Color32::from_rgb(53, 61, 74));
-    ui.painter().galley(
-        rect.min + egui::vec2(5.0, 2.0),
-        text,
-        Color32::from_gray(220),
-    );
+    ui.painter()
+        .with_clip_rect(rect.intersect(ui.clip_rect()))
+        .galley(
+            rect.min + egui::vec2(5.0, 2.0),
+            text,
+            Color32::from_gray(220),
+        );
 }
 
 /// Give controls a common row center before layout. Labels in a wrapped row
@@ -247,6 +268,12 @@ pub enum Icon {
 /// Standard egui button behavior (mouse, Enter, focus, accessibility) with
 /// separate action and shortcut paint; icons never depend on a symbol font.
 pub fn action(ui: &mut egui::Ui, icon: Icon, label: &str, key: &str) -> egui::Response {
+    let mapped = shortcut_hint(ui.ctx(), key);
+    action_fixed(ui, icon, label, &mapped)
+}
+
+/// For keys owned by a local editor/player, bypass performance-key remapping.
+pub fn action_fixed(ui: &mut egui::Ui, icon: Icon, label: &str, key: &str) -> egui::Response {
     let text = ui.painter().layout_no_wrap(
         label.into(),
         egui::FontId::proportional(15.0),

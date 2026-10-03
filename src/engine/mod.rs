@@ -8,7 +8,7 @@ pub mod input_fx;
 pub mod latency;
 pub mod loop_audio;
 pub mod metronome;
-mod output_resampler;
+pub(crate) mod output_resampler;
 pub mod output_watch;
 pub mod spectrum;
 pub mod track_fx;

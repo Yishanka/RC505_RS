@@ -15,8 +15,8 @@ pub const REVERB_WIDTH_MAX: usize = 100;
 
 pub const REVERB_HIGHCUT_MAX: usize = 100; // damping percent
 
-pub const REVERB_LOWCUT_MIN_HZ: usize = 20;
-pub const REVERB_LOWCUT_MAX_HZ: usize = 1_000;
+pub const REVERB_LOWCUT_MIN_HZ: usize = 0; // FLAT
+pub const REVERB_LOWCUT_MAX_HZ: usize = 12_500;
 
 pub struct ReverbConfigs {
     pub high_cut_hz: NumericConfig,

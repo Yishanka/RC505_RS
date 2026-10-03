@@ -35,7 +35,7 @@ use crate::config::{AppConfig, FxKind, InputFx, TrackFx, TrackFxKind};
 
 const INDEX_FILE: &str = "projects_index.json";
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectEntry {
     pub name: String,
     pub file: String,
@@ -46,8 +46,12 @@ struct ProjectIndex {
     projects: Vec<ProjectEntry>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectData {
+    #[serde(default)]
+    pub master_fx: crate::config::audio_fx::MasterFxConfig,
+    #[serde(default = "default_input_thru")]
+    pub input_thru: bool,
     #[serde(default = "default_metronome_volume")]
     pub metronome_volume: f32,
     #[serde(default)]
@@ -69,29 +73,32 @@ pub struct ProjectData {
     pub track_fx: TrackFxData,
 }
 
+fn default_input_thru() -> bool {
+    true
+}
 fn default_metronome_volume() -> f32 {
     0.35
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct BeatData {
     pub bpm: usize,
     pub latency: usize,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemData {
     pub input_device: String,
     pub output_device: String,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct InputFxData {
     pub selected_bank_idx: usize,
     pub banks: Vec<FxBankData>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackFxData {
     pub selected_bank_idx: usize,
     #[serde(default)]
@@ -100,7 +107,7 @@ pub struct TrackFxData {
     pub tracks: Vec<TrackFxTrackData>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackFxTrackData {
     #[serde(default)]
     pub enabled: Vec<Vec<bool>>,
@@ -108,13 +115,17 @@ pub struct TrackFxTrackData {
     pub banks: Vec<TrackFxBankData>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackFxBankData {
     pub slots: Vec<TrackFxSlotData>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackFxSlotData {
+    #[serde(default)]
+    pub vocoder: Option<VocoderData>,
+    #[serde(default)]
+    pub audio: Option<crate::config::audio_fx::AudioFxConfig>,
     pub is_enabled: bool,
     pub kind: String,
     #[serde(default)]
@@ -125,8 +136,10 @@ pub struct TrackFxSlotData {
     pub filter: Option<TrackFilterData>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackDelayData {
+    #[serde(default)]
+    pub feedback_repeats: usize,
     #[serde(default)]
     pub direct_pct: Option<usize>,
     #[serde(default)]
@@ -141,7 +154,7 @@ pub struct TrackDelayData {
     pub mix_pct: usize,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackRollData {
     pub step: usize,
     #[serde(default = "default_roll_time_mode")]
@@ -182,7 +195,7 @@ fn default_fader_speed() -> f32 {
     24.0
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackFilterData {
     #[serde(default)]
     pub filter: FilterData,
@@ -196,13 +209,21 @@ pub struct TrackFilterData {
     pub env: EnvelopeData,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct FxBankData {
     pub slots: Vec<FxSlotData>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct FxSlotData {
+    #[serde(default)]
+    pub roll: Option<TrackRollData>,
+    #[serde(default)]
+    pub audio: Option<crate::config::audio_fx::AudioFxConfig>,
+    #[serde(default)]
+    pub source_id: String,
+    #[serde(default)]
+    pub detached_clip: Option<crate::config::sequence_edit::NoteClip>,
     pub is_enabled: bool,
     pub kind: String,
     pub osc: Option<OscData>,
@@ -215,8 +236,36 @@ pub struct FxSlotData {
     pub vocoder: Option<VocoderData>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct OscData {
+    #[serde(default)]
+    pub clip: Option<crate::config::sequence_edit::NoteClip>,
+    #[serde(default = "default_osc_voices")]
+    pub voices: usize,
+    #[serde(default)]
+    pub input_gate: bool,
+    #[serde(default)]
+    pub lfo: crate::config::osc_configs::LfoConfig,
+    #[serde(default)]
+    pub sample: Option<std::sync::Arc<crate::config::osc_configs::SampleAsset>>,
+    #[serde(default)]
+    pub sample_mode: crate::config::osc_configs::SampleMode,
+    #[serde(default = "default_sample_root")]
+    pub sample_root: usize,
+    #[serde(default)]
+    pub sample_fine_cents: f32,
+    #[serde(default = "default_sample_loop")]
+    pub sample_loop: bool,
+    #[serde(default)]
+    pub sample_start: f32,
+    #[serde(default = "default_sample_end")]
+    pub sample_end: f32,
+    #[serde(default)]
+    pub vocal_formant: f32,
+    #[serde(default)]
+    pub capture_serial: u64,
+    #[serde(default = "default_capture_ms")]
+    pub capture_ms: usize,
     pub waveform: String,
     pub level: usize,
     pub threshold: usize,
@@ -233,13 +282,29 @@ pub struct OscData {
     pub osc_filter_envelope: EnvelopeData,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+fn default_osc_voices() -> usize {
+    8
+}
+fn default_sample_root() -> usize {
+    48
+}
+fn default_sample_loop() -> bool {
+    true
+}
+fn default_sample_end() -> f32 {
+    1.0
+}
+fn default_capture_ms() -> usize {
+    100
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct NoteOctData {
     pub note: String,
     pub octave: usize,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnvelopeData {
     pub attack_ms: usize,
     pub hold_ms: usize,
@@ -256,7 +321,7 @@ pub struct EnvelopeData {
     pub tension_r: usize,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct FilterData {
     pub filter_type: String,
     pub cutoff_hz: usize,
@@ -265,7 +330,7 @@ pub struct FilterData {
     pub mix: usize,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct MyDelayData {
     pub level: usize,
     pub threshold: usize,
@@ -281,7 +346,7 @@ pub struct MyDelayData {
     pub filter_env: EnvelopeData,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReverbData {
     #[serde(default)]
     pub high_cut_hz: Option<usize>,
@@ -299,7 +364,7 @@ pub struct ReverbData {
     pub low_cut: usize,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct VocoderData {
     #[serde(default)]
     pub tone: i32,
@@ -526,6 +591,13 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
         let mut slots = Vec::with_capacity(FX_SLOT_COUNT);
         for slot in &bank.slots {
             let mut slot_data = FxSlotData {
+                roll: None,
+                audio: None,
+                source_id: slot.source_id.clone(),
+                detached_clip: match &slot.fx {
+                    Some(InputFx::Oscillator(_) | InputFx::MyDelay(_)) => None,
+                    _ => slot.clip.clone(),
+                },
                 is_enabled: slot.is_enabled,
                 kind: "None".to_string(),
                 osc: None,
@@ -536,6 +608,14 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
             };
             if let Some(fx) = slot.fx.as_ref() {
                 match fx {
+                    InputFx::Roll(roll) => {
+                        slot_data.kind = "Roll".to_owned();
+                        slot_data.roll = Some(roll_data(roll));
+                    }
+                    InputFx::Audio(audio) => {
+                        slot_data.kind = "Audio".to_owned();
+                        slot_data.audio = Some(audio.sanitized());
+                    }
                     InputFx::Oscillator(osc) => {
                         slot_data.kind = "Oscillator".to_string();
                         let seq = osc
@@ -550,6 +630,20 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                             })
                             .collect();
                         slot_data.osc = Some(OscData {
+                            clip: Some(osc.note.clip()),
+                            voices: osc.voices,
+                            input_gate: osc.input_gate,
+                            lfo: osc.lfo.clone(),
+                            sample: osc.sample.clone(),
+                            sample_mode: osc.sample_mode,
+                            sample_root: osc.sample_root,
+                            sample_fine_cents: osc.sample_fine_cents,
+                            sample_loop: osc.sample_loop,
+                            sample_start: osc.sample_start,
+                            sample_end: osc.sample_end,
+                            vocal_formant: osc.vocal_formant,
+                            capture_serial: osc.capture_serial,
+                            capture_ms: osc.capture_ms,
                             waveform: waveform_to_string(osc.waveform.value).to_string(),
                             level: osc.level.value,
                             threshold: osc.threshold.value,
@@ -699,6 +793,8 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
         let mut track_slots = Vec::with_capacity(TRACK_FX_SLOT_COUNT);
         for slot in &bank.slots {
             let mut slot_data = TrackFxSlotData {
+                vocoder: None,
+                audio: None,
                 is_enabled: false,
                 kind: "None".to_string(),
                 delay: None,
@@ -707,9 +803,18 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
             };
             if let Some(fx) = slot.fx.as_ref() {
                 match fx {
+                    TrackFx::Audio(audio) => {
+                        slot_data.kind = "Audio".to_owned();
+                        slot_data.audio = Some(audio.sanitized());
+                    }
+                    TrackFx::Vocoder(v) => {
+                        slot_data.kind = "Vocoder".to_owned();
+                        slot_data.vocoder = Some(vocoder_data(v));
+                    }
                     TrackFx::Delay(delay) => {
                         slot_data.kind = "Delay".to_string();
                         slot_data.delay = Some(TrackDelayData {
+                            feedback_repeats: delay.feedback_repeats.value,
                             direct_pct: Some(delay.direct_pct.value),
                             effect_pct: Some(delay.effect_pct.value),
                             low_cut_hz: delay.low_cut_hz.value,
@@ -722,15 +827,7 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                     }
                     TrackFx::Roll(roll) => {
                         slot_data.kind = "Roll".to_string();
-                        slot_data.roll = Some(TrackRollData {
-                            time_mode: roll.time_mode.value,
-                            time_ms: roll.time_ms.value,
-                            mode: roll.mode.value,
-                            feedback: roll.feedback.value,
-                            repeat: roll.repeat.value,
-                            mix: roll.mix.value,
-                            step: roll.step.value.value(),
-                        });
+                        slot_data.roll = Some(roll_data(roll));
                     }
                     TrackFx::Filter(filter) => {
                         slot_data.kind = "Filter".to_string();
@@ -776,6 +873,8 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
     }
 
     ProjectData {
+        master_fx: config.master_fx.sanitized(),
+        input_thru: config.input_thru,
         metronome_volume: config.metronome_volume.clamp(0.0, 1.0),
         calibration: config.calibration.clone(),
         snapshot: None,
@@ -804,6 +903,8 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
 }
 
 pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
+    config.input_thru = data.input_thru;
+    config.master_fx = data.master_fx.sanitized();
     config.metronome_volume = if data.metronome_volume.is_finite() {
         data.metronome_volume.clamp(0.0, 1.0)
     } else {
@@ -843,8 +944,26 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
     for (bank_idx, bank_data) in data.input_fx.banks.iter().take(FX_BANK_COUNT).enumerate() {
         for (slot_idx, slot_data) in bank_data.slots.iter().take(FX_SLOT_COUNT).enumerate() {
             let slot = &mut config.input_fx.banks[bank_idx].slots[slot_idx];
+            slot.fx = None;
+            slot.clip = slot_data.detached_clip.clone();
+            if !slot_data.source_id.is_empty() {
+                slot.source_id = slot_data.source_id.chars().take(128).collect();
+            }
             slot.is_enabled = slot_data.is_enabled;
             match slot_data.kind.as_str() {
+                "Roll" => {
+                    slot.set_kind(FxKind::Roll);
+                    if let (Some(InputFx::Roll(roll)), Some(data)) =
+                        (slot.fx.as_mut(), &slot_data.roll)
+                    {
+                        apply_roll(roll, data);
+                    }
+                }
+                "Audio" => {
+                    if let Some(audio) = &slot_data.audio {
+                        slot.fx = Some(InputFx::Audio(audio.sanitized()));
+                    }
+                }
                 "Oscillator" => {
                     slot.set_kind(FxKind::Oscillator);
                     if let Some(InputFx::Oscillator(osc)) = slot.fx.as_mut() {
@@ -852,6 +971,41 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                             if let Some(w) = string_to_waveform(&osc_data.waveform) {
                                 osc.waveform.value = w;
                             }
+                            osc.voices = osc_data.voices.clamp(1, 16);
+                            osc.input_gate = osc_data.input_gate;
+                            osc.lfo = osc_data.lfo.clone();
+                            osc.lfo.sanitize();
+                            osc.sample = osc_data
+                                .sample
+                                .as_ref()
+                                .map(crate::config::osc_configs::SampleAsset::validated_shared)
+                                .filter(|sample| sample.frames.len() >= 4);
+                            osc.sample_mode = osc_data.sample_mode;
+                            osc.sample_root = osc_data.sample_root.min(119);
+                            osc.sample_fine_cents = if osc_data.sample_fine_cents.is_finite() {
+                                osc_data.sample_fine_cents.clamp(-100.0, 100.0)
+                            } else {
+                                0.0
+                            };
+                            osc.sample_loop = osc_data.sample_loop;
+                            osc.sample_start = if osc_data.sample_start.is_finite() {
+                                osc_data.sample_start.clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            osc.sample_end = if osc_data.sample_end.is_finite() {
+                                osc_data.sample_end.clamp(0.0, 1.0)
+                            } else {
+                                1.0
+                            };
+                            osc.vocal_formant = if osc_data.vocal_formant.is_finite() {
+                                osc_data.vocal_formant.clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            osc.capture_serial = osc_data.capture_serial;
+                            osc.capture_ms = osc_data.capture_ms.clamp(20, 2000);
+                            osc.sanitize_source();
                             osc.level.value = osc_data.level.min(100);
                             osc.threshold.value = osc_data.threshold.min(100);
                             if let Some(n) = string_to_note(&osc_data.note_current) {
@@ -871,6 +1025,9 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                                 .collect();
                             osc.note
                                 .set_seq_with_steps(seq, osc_data.note_step_len_seq.clone());
+                            if let Some(clip) = &osc_data.clip {
+                                osc.note.set_clip(clip);
+                            }
                             osc.envelope.attack_ms.value =
                                 osc_data.envelope.attack_ms.min(ENVELOPE_ATTACK_MAX_MS);
                             osc.envelope.hold_ms.value =
@@ -972,7 +1129,7 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                             reverb.high_cut_hz.value = reverb_data
                                 .high_cut_hz
                                 .unwrap_or(18_000 - reverb.high_cut.value * 155)
-                                .clamp(200, 20_000);
+                                .min(20_000);
                             reverb.low_cut.value = reverb_data
                                 .low_cut
                                 .clamp(REVERB_LOWCUT_MIN_HZ, REVERB_LOWCUT_MAX_HZ);
@@ -1058,6 +1215,21 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                                 delay_data.filter_env.tension_r.min(ENVELOPE_TENSION_MAX);
                         }
                     }
+                    if let Some(InputFx::MyDelay(delay)) = slot.fx.take() {
+                        let mut osc = crate::config::OscillatorConfigs::new();
+                        osc.waveform.value = Waveform::Sample;
+                        osc.sample_message =
+                            "Legacy MyDelay was migrated to OSC; capture or import a sample first."
+                                .into();
+                        osc.level = delay.level;
+                        osc.threshold = delay.threshold;
+                        osc.note = delay.note;
+                        osc.envelope = delay.audio_env;
+                        osc.osc_filter = delay.filter;
+                        osc.osc_filter_env = delay.filter_env;
+                        osc.capture_serial = 0; // Old JSON never contained PCM; the user must capture/import a new sample.
+                        slot.fx = Some(InputFx::Oscillator(osc));
+                    }
                 }
                 "Vocoder" => {
                     slot.set_kind(FxKind::Vocoder);
@@ -1115,6 +1287,12 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
     for (bank_idx, bank_data) in binding_banks.iter().take(TRACK_FX_BANK_COUNT).enumerate() {
         for (slot_idx, slot_data) in bank_data.slots.iter().take(TRACK_FX_SLOT_COUNT).enumerate() {
             match slot_data.kind.as_str() {
+                "Audio" => {
+                    if let Some(audio) = &slot_data.audio {
+                        config.track_fx.banks[bank_idx].slots[slot_idx].fx =
+                            Some(TrackFx::Audio(audio.sanitized()));
+                    }
+                }
                 "Delay" => {
                     config
                         .track_fx
@@ -1124,6 +1302,7 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                     {
                         if let Some(delay_data) = &slot_data.delay {
                             delay.time_mode.value = delay_data.time_mode;
+                            delay.feedback_repeats.value = delay_data.feedback_repeats.min(16);
                             delay.time_ms.value = delay_data
                                 .time_ms
                                 .clamp(TRACK_DELAY_TIME_MIN_MS, TRACK_DELAY_TIME_MAX_MS);
@@ -1140,9 +1319,20 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                             delay.effect_pct.value = delay_data
                                 .effect_pct
                                 .unwrap_or(delay.mix_pct.value)
-                                .min(100);
-                            delay.low_cut_hz.value = delay_data.low_cut_hz.min(1000);
+                                .min(120);
+                            delay.low_cut_hz.value = delay_data.low_cut_hz.min(12500);
                         }
+                    }
+                }
+                "Vocoder" => {
+                    config
+                        .track_fx
+                        .set_slot_kind(bank_idx, slot_idx, TrackFxKind::Vocoder);
+                    if let (Some(TrackFx::Vocoder(v)), Some(data)) = (
+                        config.track_fx.slot_fx_mut(bank_idx, slot_idx),
+                        &slot_data.vocoder,
+                    ) {
+                        apply_vocoder(v, data);
                     }
                 }
                 "Roll" => {
@@ -1153,19 +1343,7 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                         config.track_fx.slot_fx_mut(bank_idx, slot_idx)
                     {
                         if let Some(roll_data) = &slot_data.roll {
-                            roll.time_mode.value = roll_data.time_mode;
-                            roll.time_ms.value = roll_data.time_ms.clamp(1, 1000);
-                            roll.mode.value = roll_data.mode;
-                            roll.feedback.value = roll_data.feedback.clamp(1, 100);
-                            roll.repeat.value = roll_data.repeat.min(100);
-                            roll.mix.value = roll_data.mix.min(100);
-                            roll.step.value = match roll_data.step {
-                                1 => RollStep::Off,
-                                16 => RollStep::Sixteen,
-                                2 => RollStep::Two,
-                                8 => RollStep::Eight,
-                                _ => RollStep::Four,
-                            };
+                            apply_roll(roll, roll_data);
                         }
                     }
                 }
@@ -1315,6 +1493,8 @@ fn waveform_to_string(w: Waveform) -> &'static str {
         Waveform::Saw => "Saw",
         Waveform::Square => "Square",
         Waveform::Triangle => "Triangle",
+        Waveform::Vocal => "Vocal",
+        Waveform::Sample => "Sample",
     }
 }
 
@@ -1324,10 +1504,189 @@ fn string_to_waveform(s: &str) -> Option<Waveform> {
         "Saw" => Some(Waveform::Saw),
         "Square" => Some(Waveform::Square),
         "Triangle" => Some(Waveform::Triangle),
+        "Vocal" => Some(Waveform::Vocal),
+        "Sample" => Some(Waveform::Sample),
         _ => None,
     }
 }
 
+fn roll_data(roll: &crate::config::roll_configs::RollConfigs) -> TrackRollData {
+    TrackRollData {
+        time_mode: roll.time_mode.value,
+        time_ms: roll.time_ms.value,
+        mode: roll.mode.value,
+        feedback: roll.feedback.value,
+        repeat: roll.repeat.value,
+        mix: roll.mix.value,
+        step: roll.step.value.value(),
+    }
+}
+fn apply_roll(roll: &mut crate::config::roll_configs::RollConfigs, data: &TrackRollData) {
+    roll.time_mode.value = data.time_mode;
+    roll.time_ms.value = data.time_ms.clamp(1, 1000);
+    roll.mode.value = data.mode;
+    roll.feedback.value = data.feedback.clamp(1, 100);
+    roll.repeat.value = data.repeat.min(100);
+    roll.mix.value = data.mix.min(100);
+    roll.step.value = match data.step {
+        1 => RollStep::Off,
+        2 => RollStep::Two,
+        8 => RollStep::Eight,
+        16 => RollStep::Sixteen,
+        _ => RollStep::Four,
+    };
+}
+fn vocoder_data(v: &crate::config::vocoder_configs::VocoderConfigs) -> VocoderData {
+    VocoderData {
+        tone: v.tone,
+        mod_sens: v.mod_sens,
+        formant_semitones: v.formant_semitones,
+        sibilance: v.sibilance.value,
+        carrier_thru: v.carrier_thru,
+        carrier: vocoder_carrier_to_string(v.carrier.value).to_owned(),
+        bands: v.bands.value,
+        attack_ms: v.attack_ms.value,
+        release_ms: v.release_ms.value,
+        level: v.level.value,
+        mix: v.mix.value,
+    }
+}
+
+#[cfg(test)]
+mod audio_effect_tests {
+    use super::*;
+    #[test]
+    fn input_roll_project_and_preset_round_trip() {
+        use crate::presets::FxTarget;
+        let mut c = AppConfig::new(137, 0, 5);
+        c.input_fx.set_slot_kind(2, 3, FxKind::Roll);
+        c.input_fx.banks[2].slots[3].is_enabled = true;
+        if let Some(InputFx::Roll(p)) = &mut c.input_fx.banks[2].slots[3].fx {
+            p.time_mode.value = TimeMode::DottedEighth;
+            p.time_ms.value = 713;
+            p.mode.value = RollMode::Roll1;
+            p.feedback.value = 73;
+            p.repeat.value = 17;
+            p.mix.value = 82;
+            p.step.value = RollStep::Sixteen;
+        }
+        let saved = data_from_config(&c);
+        let encoded = serde_json::to_string(&saved).unwrap();
+        let mut loaded = AppConfig::new(120, 0, 5);
+        apply_data_to_config(&mut loaded, serde_json::from_str(&encoded).unwrap());
+        assert!(loaded.input_fx.slot_kind(2, 3) == FxKind::Roll);
+        assert_eq!(
+            saved.input_fx.banks[2].slots[3]
+                .roll
+                .as_ref()
+                .unwrap()
+                .time_ms,
+            713
+        );
+        assert_eq!(
+            serde_json::to_value(&data_from_config(&loaded).input_fx.banks[2].slots[3].roll)
+                .unwrap(),
+            serde_json::to_value(&saved.input_fx.banks[2].slots[3].roll).unwrap()
+        );
+        let preset = crate::presets::encode(&c, FxTarget::Input { bank: 2, slot: 3 }).unwrap();
+        crate::presets::decode(&mut loaded, FxTarget::Input { bank: 1, slot: 0 }, &preset).unwrap();
+        assert!(loaded.input_fx.slot_kind(1, 0) == FxKind::Roll);
+        assert!(
+            !loaded.input_fx.banks[1].slots[0].is_enabled,
+            "Loading a preset must preserve bypass"
+        );
+        assert_eq!(
+            serde_json::to_value(&data_from_config(&loaded).input_fx.banks[1].slots[0].roll)
+                .unwrap(),
+            serde_json::to_value(&saved.input_fx.banks[2].slots[3].roll).unwrap()
+        );
+    }
+    #[test]
+    fn every_new_audio_effect_and_master_bus_round_trip() {
+        use crate::config::audio_fx::{AudioFxKind, Scale};
+        for kind in AudioFxKind::ALL {
+            let mut config = AppConfig::new(123, 0, 5);
+            config.input_fx.set_slot_kind(2, 3, FxKind::Audio(kind));
+            config
+                .track_fx
+                .set_slot_kind(3, 2, TrackFxKind::Audio(kind));
+            if let Some(InputFx::Audio(p)) = &mut config.input_fx.banks[2].slots[3].fx {
+                p.semitones = 7.0;
+                p.low_cut_hz = 5200.0;
+                p.scale = Scale::Minor;
+                p.steps[3] = 0.3;
+                p.pitch_sequence = true;
+                p.pitch_steps[4] = -12.0;
+                p.effect_level = 1.2;
+            }
+            config.master_fx.compressor_enabled = true;
+            config.master_fx.compressor.threshold_db = -25.5;
+            config.master_fx.reverb_enabled = true;
+            config.master_fx.reverb.decay_ms = 4200.0;
+            let saved = data_from_config(&config);
+            let json = serde_json::to_vec(&saved).unwrap();
+            let loaded: ProjectData = serde_json::from_slice(&json).unwrap();
+            let mut restored = AppConfig::new(120, 0, 5);
+            apply_data_to_config(&mut restored, loaded);
+            let again = data_from_config(&restored);
+            assert_eq!(
+                saved.input_fx.banks[2].slots[3].audio,
+                again.input_fx.banks[2].slots[3].audio
+            );
+            assert_eq!(
+                saved.track_fx.banks[3].slots[2].audio,
+                again.track_fx.banks[3].slots[2].audio
+            );
+            assert_eq!(saved.master_fx, again.master_fx);
+        }
+    }
+    #[test]
+    fn old_delay_keeps_manual_feedback_and_new_track_vocoder_persists() {
+        let mut c = AppConfig::new(120, 0, 5);
+        c.track_fx.set_slot_kind(0, 0, TrackFxKind::Delay);
+        c.track_fx.set_slot_kind(0, 1, TrackFxKind::Vocoder);
+        if let Some(TrackFx::Vocoder(v)) = c.track_fx.slot_fx_mut(0, 1) {
+            v.carrier.value = VocoderCarrier::Track4;
+            v.formant_semitones = 7;
+        }
+        let mut json = serde_json::to_value(data_from_config(&c)).unwrap();
+        json["track_fx"]["banks"][0]["slots"][0]["delay"]
+            .as_object_mut()
+            .unwrap()
+            .remove("feedback_repeats");
+        json["track_fx"]["banks"][0]["slots"][0]["delay"]["feedback_pct"] = serde_json::json!(82);
+        json.as_object_mut().unwrap().remove("master_fx");
+        let d: ProjectData = serde_json::from_value(json).unwrap();
+        let mut restored = AppConfig::new(120, 0, 5);
+        apply_data_to_config(&mut restored, d);
+        let Some(TrackFx::Delay(p)) = restored.track_fx.slot_fx(0, 0) else {
+            panic!("delay disappeared")
+        };
+        assert_eq!(p.feedback_repeats.value, 0);
+        assert_eq!(p.feedback_pct.value, 82);
+        let Some(TrackFx::Vocoder(v)) = restored.track_fx.slot_fx(0, 1) else {
+            panic!("vocoder disappeared")
+        };
+        assert!(v.carrier.value == VocoderCarrier::Track4);
+        assert_eq!(v.formant_semitones, 7);
+        assert!(!restored.master_fx.compressor_enabled && !restored.master_fx.reverb_enabled);
+    }
+}
+fn apply_vocoder(v: &mut crate::config::vocoder_configs::VocoderConfigs, d: &VocoderData) {
+    v.tone = d.tone.clamp(-50, 50);
+    v.mod_sens = d.mod_sens.clamp(-50, 50);
+    v.formant_semitones = d.formant_semitones.clamp(-12, 12);
+    v.sibilance.value = d.sibilance.min(100);
+    v.carrier_thru = d.carrier_thru;
+    if let Some(carrier) = string_to_vocoder_carrier(&d.carrier) {
+        v.carrier.value = carrier;
+    }
+    v.bands.value = d.bands.clamp(VOCODER_BANDS_MIN, VOCODER_BANDS_MAX);
+    v.attack_ms.value = d.attack_ms.min(VOCODER_ATTACK_MAX_MS);
+    v.release_ms.value = d.release_ms.min(VOCODER_RELEASE_MAX_MS);
+    v.level.value = d.level.min(VOCODER_LEVEL_MAX);
+    v.mix.value = d.mix.min(VOCODER_MIX_MAX);
+}
 fn vocoder_carrier_to_string(carrier: VocoderCarrier) -> &'static str {
     match carrier {
         VocoderCarrier::InputLeft => "InputLeft",
@@ -1498,4 +1857,38 @@ mod tests {
             (0, 0, 0, 20)
         );
     }
+}
+
+/// UI change detection excludes immutable PCM, retaining its content hash and metadata.
+/// Saving and replay event serialization still use `data_from_config` with the full asset.
+pub fn fingerprint_data_from_config(config: &AppConfig) -> ProjectData {
+    let mut data = data_from_config(config);
+    for bank in &mut data.input_fx.banks {
+        for slot in &mut bank.slots {
+            if let Some(osc) = &mut slot.osc {
+                if let Some(asset) = &osc.sample {
+                    osc.sample = Some(std::sync::Arc::new(
+                        crate::config::osc_configs::SampleAsset {
+                            name: asset.name.clone(),
+                            sample_rate: asset.sample_rate,
+                            content_hash: asset.content_hash,
+                            frames: Vec::new(),
+                            root_hz: asset.root_hz,
+                            cycle_start: asset.cycle_start,
+                            cycle_end: asset.cycle_end,
+                        },
+                    ));
+                }
+            }
+        }
+    }
+    data
+}
+
+/// Visible warning for a destructive beta migration, before replacing old data.
+pub fn has_legacy_mydelay(data: &ProjectData) -> bool {
+    data.input_fx
+        .banks
+        .iter()
+        .any(|bank| bank.slots.iter().any(|slot| slot.kind == "MyDelay"))
 }

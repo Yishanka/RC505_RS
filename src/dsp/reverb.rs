@@ -26,6 +26,7 @@ struct DelayLine {
     buffer: Vec<f32>,
     write_idx: usize,
     delay_samples: usize,
+    valid: usize,
 }
 
 impl DelayLine {
@@ -35,6 +36,7 @@ impl DelayLine {
             buffer: vec![0.0; len],
             write_idx: 0,
             delay_samples: 1,
+            valid: 0,
         }
     }
 
@@ -48,12 +50,16 @@ impl DelayLine {
     }
 
     fn read(&self) -> f32 {
+        if self.valid < self.delay_samples {
+            return 0.0;
+        }
         let len = self.buffer.len();
         let idx = (self.write_idx + len - self.delay_samples) % len;
         self.buffer[idx]
     }
 
     fn write(&mut self, sample: f32) {
+        self.valid = (self.valid + 1).min(self.buffer.len());
         self.buffer[self.write_idx] = sample;
         self.write_idx += 1;
         if self.write_idx >= self.buffer.len() {
@@ -77,6 +83,10 @@ impl OnePoleLp {
     }
 
     fn process(&mut self, x: f32, cutoff_hz: f32, sample_rate: f32) -> f32 {
+        if cutoff_hz <= 0.0 {
+            self.z = x;
+            return x;
+        }
         let sr = sample_rate.max(1.0);
         let fc = cutoff_hz.max(10.0).min(sr * 0.49);
         if self.cached.0 != fc || self.cached.1 != sr {
@@ -105,6 +115,11 @@ impl OnePoleHp {
     }
 
     fn process(&mut self, x: f32, cutoff_hz: f32, sample_rate: f32) -> f32 {
+        if cutoff_hz <= 0.0 {
+            self.x_prev = x;
+            self.y = 0.0;
+            return x;
+        }
         let sr = sample_rate.max(1.0);
         let fc = cutoff_hz.max(10.0).min(sr * 0.49);
         if self.cached.0 != fc || self.cached.1 != sr {
@@ -165,6 +180,22 @@ impl ReverbDspState {
 
     pub fn prepare(&mut self, sample_rate: f32) {
         self.ensure_sample_rate(sample_rate);
+    }
+
+    /// Clear a rack tail without allocating or replacing the prepared buffers.
+    pub fn reset(&mut self) {
+        for line in &mut self.lines {
+            line.valid = 0;
+            line.write_idx = 0;
+        }
+        self.predelay.valid = 0;
+        self.predelay.write_idx = 0;
+        for diffuser in &mut self.diffusers {
+            diffuser.valid = 0;
+            diffuser.index = 0;
+        }
+        self.lp = [OnePoleLp::new(); 4];
+        self.hp = [OnePoleHp::new(); 4];
     }
 
     fn ensure_sample_rate(&mut self, sample_rate: f32) {
@@ -252,8 +283,21 @@ pub fn process_sample(
     }
 
     let mut fb = [0.0f32; 4];
-    let high_cut_hz = p.high_cut_hz.clamp(200.0, 20_000.0).min(sr * 0.49);
-    let low_cut_hz = p.low_cut_hz.max(10.0).min(high_cut_hz * 0.95);
+    let high_cut_hz = if p.high_cut_hz <= 0.0 {
+        0.0
+    } else {
+        p.high_cut_hz.clamp(20.0, 20_000.0).min(sr * 0.49)
+    };
+    let high_limit = if high_cut_hz == 0.0 {
+        sr * 0.49
+    } else {
+        high_cut_hz
+    };
+    let low_cut_hz = if p.low_cut_hz <= 0.0 {
+        0.0
+    } else {
+        p.low_cut_hz.clamp(10.0, 12500.0).min(high_limit * 0.95)
+    };
 
     for idx in 0..4 {
         let hp = state.hp[idx].process(y[idx], low_cut_hz, sr);
@@ -349,10 +393,16 @@ fn is_prime(n: usize) -> bool {
 struct Diffuser {
     buffer: Vec<f32>,
     index: usize,
+    valid: usize,
 }
 impl Diffuser {
     fn next(&mut self, input: f32, g: f32) -> f32 {
-        let delayed = self.buffer[self.index];
+        let delayed = if self.valid < self.buffer.len() {
+            0.0
+        } else {
+            self.buffer[self.index]
+        };
+        self.valid = (self.valid + 1).min(self.buffer.len());
         let output = delayed - g * input;
         self.buffer[self.index] = input + g * output;
         self.index = (self.index + 1) % self.buffer.len();
@@ -363,6 +413,7 @@ fn make_diffusers(sr: f32) -> [Diffuser; 4] {
     [4.77, 3.53, 1.71, 0.89].map(|ms| Diffuser {
         buffer: vec![0.0; (ms * sr / 1000.0).round().max(1.0) as usize],
         index: 0,
+        valid: 0,
     })
 }
 

@@ -1,3 +1,4 @@
+use super::shortcuts::Command;
 use super::*;
 use crate::{engine::core::Action, presets::FxTarget};
 use egui::Key;
@@ -7,6 +8,19 @@ fn pressed(input: &egui::InputState, key: Key) -> bool {
         .events
         .iter()
         .any(|e| matches!(e,egui::Event::Key{key:k,pressed:true,repeat:false,..} if *k==key))
+}
+fn remove_button_repeat(input: &mut egui::InputState) {
+    input.events.retain(|event| {
+        !matches!(
+            event,
+            egui::Event::Key {
+                key: Key::Enter | Key::Space,
+                pressed: true,
+                repeat: true,
+                ..
+            }
+        )
+    });
 }
 impl MyApp {
     fn release_momentary(&mut self, index: usize) {
@@ -21,9 +35,66 @@ impl MyApp {
     pub(super) fn handle_input(&mut self, ctx: &egui::Context) {
         let mut input = ctx.input(Clone::clone);
         let text = ctx.wants_keyboard_input();
+        let typing = ctx
+            .memory(|m| m.focused())
+            .is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some());
+        if !typing {
+            // egui treats repeated Enter/Space as another widget click. Keep
+            // first activation and held state, without repeatedly toggling.
+            remove_button_repeat(&mut input);
+            ctx.input_mut(remove_button_repeat);
+        }
+        let local_editor_key = self.editor.expanded
+            && input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: Key::Delete,
+                        pressed: true,
+                        ..
+                    } | egui::Event::Key {
+                        key: Key::Z | Key::Y,
+                        pressed: true,
+                        modifiers: egui::Modifiers { ctrl: true, .. },
+                        ..
+                    }
+                )
+            });
+        let global_keys = !typing
+            && !local_editor_key
+            && !self.player_open
+            && !self.replay_browser
+            && !self.master_fx_open;
         let popup_open = ctx.memory(|m| m.any_popup_open());
+        if self.shortcut_editor.open && !self.show_save_prompt {
+            let capturing = self.shortcut_editor.capture.is_some();
+            if capturing && input.focused {
+                self.performance_keys.poll(&mut input);
+            } else {
+                self.performance_keys.suspend();
+            }
+            for index in 0..8 {
+                self.release_momentary(index);
+            }
+            self.fader_keys.fill(faders::KeyFader::default());
+            self.speed_keys.fill(faders::KeyFader::default());
+            self.clear_gesture.cancel();
+            if input.focused {
+                self.shortcut_editor.handle_input(&input, self.language);
+            }
+            if capturing {
+                // The listening gesture owns these events, even if a search
+                // TextEdit still has focus from before the Assign click.
+                ctx.input_mut(|i| {
+                    i.events
+                        .retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)))
+                });
+            }
+            return;
+        }
         let performance = input.focused
-            && !text
+            && !typing
+            && !self.master_fx_open
             && !popup_open
             && !self.editor.expanded
             && !self.calibration_open
@@ -40,18 +111,8 @@ impl MyApp {
         } else {
             self.performance_keys.suspend();
         }
-        let fx_keys = [
-            Key::Q,
-            Key::W,
-            Key::E,
-            Key::R,
-            Key::U,
-            Key::I,
-            Key::O,
-            Key::P,
-        ];
-        for (index, key) in fx_keys.iter().enumerate() {
-            if !performance || !input.key_down(*key) || !input.modifiers.shift {
+        for index in 0..8 {
+            if !performance || !self.shortcuts.held(Command::HoldFx(index), &input) {
                 self.release_momentary(index);
             }
         }
@@ -64,8 +125,8 @@ impl MyApp {
             return;
         }
         if self.app_state == AppState::MainLoop
-            && input.modifiers.is_none()
-            && pressed(&input, Key::F9)
+            && global_keys
+            && self.shortcuts.pressed(Command::Take, &input)
         {
             if self.show_save_prompt || self.help_open || self.calibration_open {
                 self.status = self
@@ -80,11 +141,10 @@ impl MyApp {
             }
             return;
         }
-        if self.app_state == AppState::MainLoop
-            && !self.show_save_prompt
+        if !self.show_save_prompt
             && !self.calibration_open
-            && input.modifiers.is_none()
-            && pressed(&input, Key::F10)
+            && global_keys
+            && self.shortcuts.pressed(Command::Replays, &input)
         {
             self.open_replays();
             return;
@@ -102,7 +162,13 @@ impl MyApp {
             }
             return;
         }
-        if pressed(&input, Key::F12) {
+        if self.master_fx_open {
+            if pressed(&input, Key::Escape) {
+                self.master_fx_open = false;
+            }
+            return;
+        }
+        if global_keys && self.shortcuts.pressed(Command::Help, &input) {
             self.help_open = !self.help_open;
             return;
         }
@@ -113,14 +179,26 @@ impl MyApp {
             return;
         }
         if self.player_open {
-            if input.modifiers.is_none() && pressed(&input, Key::Space) {
+            let modal = self
+                .replay_panel
+                .as_ref()
+                .is_some_and(|panel| panel.modal_open());
+            if input.modifiers.is_none() && !typing && !modal && pressed(&input, Key::Space) {
                 ctx.input_mut(|i| {
                     i.consume_key(egui::Modifiers::NONE, Key::Space);
                 });
-                self.send(Control::PlayerToggle);
+                if let Some(panel) = &self.replay_panel {
+                    panel.toggle();
+                }
             }
             if pressed(&input, Key::Escape) {
-                self.close_player();
+                if !self
+                    .replay_panel
+                    .as_mut()
+                    .is_some_and(|panel| panel.dismiss_modal())
+                {
+                    self.close_player();
+                }
             }
             return;
         }
@@ -160,23 +238,26 @@ impl MyApp {
         if ctx.memory(|m| m.any_popup_open()) {
             return;
         }
-        if input.modifiers.ctrl && pressed(&input, Key::S) {
-            if input.modifiers.shift {
+        if global_keys
+            && (self.shortcuts.pressed(Command::Save, &input)
+                || self.shortcuts.pressed(Command::Snapshot, &input))
+        {
+            if self.shortcuts.pressed(Command::Snapshot, &input) {
                 self.save_snapshot();
             } else {
                 self.save_now();
             }
             return;
         }
-        if input.modifiers.is_none() && pressed(&input, Key::F6) {
+        if global_keys && self.shortcuts.pressed(Command::Top, &input) {
             self.focus_panel(ctx, Focus::Transport);
             return;
         }
-        if input.modifiers.is_none() && pressed(&input, Key::F7) && !self.editor.expanded {
+        if global_keys && self.shortcuts.pressed(Command::Left, &input) && !self.editor.expanded {
             self.focus_panel(ctx, Focus::Left);
             return;
         }
-        if input.modifiers.is_none() && pressed(&input, Key::F8) {
+        if global_keys && self.shortcuts.pressed(Command::Right, &input) {
             self.focus_panel(
                 ctx,
                 if self.editor.expanded {
@@ -227,100 +308,71 @@ impl MyApp {
         if !performance {
             return;
         }
+        consume_performance_keys(ctx, &self.shortcuts);
+        // Commit Tap before every transport action in this input batch; action()
+        // then sends the resulting Config before sending Start to the callback.
+        if self.shortcuts.pressed(Command::Tap, &input) && self.tempo_edit_allowed() {
+            self.tap_tempo(input.time);
+        }
         let selected = self.track_sel.unwrap_or(0);
-        if input.modifiers.is_none()
-            && !pressed(&input, Key::ArrowLeft)
-            && !pressed(&input, Key::ArrowRight)
-            && !input.pointer.any_pressed()
-        {
-            if self.clear_gesture.update(
-                selected,
-                input.key_down(Key::Delete),
-                pressed(&input, Key::Delete),
-                input.time,
-            ) {
+        let is_pressed = |c| self.shortcuts.pressed(c, &input);
+        let clear = is_pressed(Command::Clear);
+        let clear_held = self.shortcuts.held(Command::Clear, &input);
+        let changing_track = is_pressed(Command::PreviousTrack)
+            || is_pressed(Command::NextTrack)
+            || (0..5).any(|i| is_pressed(Command::Select(i)));
+        if !changing_track && !input.pointer.any_pressed() {
+            if self
+                .clear_gesture
+                .update(selected, clear_held, clear, input.time)
+            {
                 self.clear_track(selected);
             }
         } else {
             self.clear_gesture.cancel();
         }
-        let numbers = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5];
-        for (index, key) in numbers.into_iter().enumerate() {
-            if pressed(&input, key) {
-                if input.modifiers.alt {
-                    if input.modifiers.ctrl {
-                        self.redo_track(index);
-                    } else {
-                        self.undo_track(index);
-                    }
-                } else if input.modifiers.ctrl {
-                    self.track_sel = Some(index);
-                } else if input.modifiers.shift {
-                    self.pause_track(index);
-                } else {
-                    self.trigger_track(index);
-                }
+        for index in 0..5 {
+            if self.shortcuts.pressed(Command::Track(index), &input) {
+                self.trigger_track(index);
             }
-        }
-        if input.modifiers.ctrl && input.modifiers.alt {
-            return;
-        }
-        if input.modifiers.ctrl {
-            let index = self.track_sel.unwrap_or(0);
-            if pressed(&input, Key::Z) && !input.modifiers.shift && self.view.tracks[index].undo {
-                self.undo_track(index);
-            }
-            if (pressed(&input, Key::Y) || pressed(&input, Key::Z) && input.modifiers.shift)
-                && self.view.tracks[index].redo
-            {
-                self.redo_track(index);
-            }
-            for (index, key) in fx_keys.into_iter().enumerate() {
-                if pressed(&input, key) {
-                    let slot = index % 4;
-                    let target = if index < 4 {
-                        FxTarget::Input {
-                            bank: self.config.input_fx.sel_bank_idx,
-                            slot,
-                        }
-                    } else {
-                        FxTarget::Track {
-                            bank: self.config.track_fx.sel_bank_idx,
-                            slot,
-                        }
-                    };
-                    self.editor.select(target);
-                    self.focus_panel(ctx, Focus::Right);
-                }
-            }
-            return;
-        }
-        if pressed(&input, Key::Space) {
-            if input.modifiers.shift {
-                self.action(Action::Panic);
-            } else {
-                self.toggle_all();
-            }
-        }
-        for (index, key) in [Key::F1, Key::F2, Key::F3, Key::F4, Key::F5]
-            .into_iter()
-            .enumerate()
-        {
-            if pressed(&input, key) && !input.modifiers.alt {
+            if self.shortcuts.pressed(Command::Stop(index), &input) {
                 self.pause_track(index);
             }
+            if self.shortcuts.pressed(Command::Select(index), &input) {
+                self.track_sel = Some(index);
+            }
+            if self.shortcuts.pressed(Command::Undo(index), &input) {
+                self.undo_track(index);
+            }
+            if self.shortcuts.pressed(Command::Redo(index), &input) {
+                self.redo_track(index);
+            }
         }
-        if pressed(&input, Key::ArrowLeft) {
-            self.track_sel = Some((self.track_sel.unwrap_or(0) + 4) % 5);
+        if self.shortcuts.pressed(Command::UndoSelected, &input) {
+            self.undo_track(selected);
         }
-        if pressed(&input, Key::ArrowRight) {
-            self.track_sel = Some((self.track_sel.unwrap_or(0) + 1) % 5);
+        if self.shortcuts.pressed(Command::RedoSelected, &input) {
+            self.redo_track(selected);
         }
-        if pressed(&input, Key::T) && self.stopped() {
-            self.config.beat_config.tap_calc.calculate_avg_bpm();
-            self.config.beat_config.input_bpm.value = self.config.beat_config.tap_calc.value;
+        if self.shortcuts.pressed(Command::All, &input) {
+            self.toggle_all();
         }
-        for (index, key) in fx_keys.into_iter().enumerate() {
+        if self.shortcuts.pressed(Command::Panic, &input) {
+            self.action(Action::Panic);
+        }
+        if self.shortcuts.pressed(Command::PreviousTrack, &input) {
+            self.track_sel = Some((selected + 4) % 5);
+        }
+        if self.shortcuts.pressed(Command::NextTrack, &input) {
+            self.track_sel = Some((selected + 1) % 5);
+        }
+        if self.shortcuts.pressed(Command::Metronome, &input) {
+            self.action(Action::Metronome(!self.view.metronome));
+        }
+        if self.shortcuts.pressed(Command::InputThru, &input) {
+            self.config.input_thru = !self.config.input_thru;
+        }
+        for index in 0..8 {
             let slot = index % 4;
             let track = (index >= 4).then_some(self.track_sel.unwrap_or(0));
             let bank = if track.is_some() {
@@ -328,34 +380,38 @@ impl MyApp {
             } else {
                 self.config.input_fx.sel_bank_idx
             };
-            if input.modifiers.alt {
-                if pressed(&input, key) {
-                    if track.is_some() {
-                        self.config.track_fx.select_bank(slot);
-                    } else {
-                        self.config.input_fx.select_bank(slot);
-                    }
-                }
-            } else if input.modifiers.shift && input.key_down(key) && self.held_fx[index].is_none()
-            {
-                let previous = if let Some(track) = track {
-                    let v = &mut self.config.track_fx.tracks[track].enabled[bank][slot];
-                    let old = *v;
-                    *v = true;
-                    old
+            if self.shortcuts.pressed(Command::EditFx(index), &input) {
+                self.editor.select(if track.is_some() {
+                    FxTarget::Track { bank, slot }
                 } else {
-                    let v = &mut self.config.input_fx.banks[bank].slots[slot].is_enabled;
-                    let old = *v;
-                    *v = true;
-                    old
+                    FxTarget::Input { bank, slot }
+                });
+                self.focus_panel(ctx, Focus::Right);
+            }
+            if self.shortcuts.pressed(Command::Bank(index), &input) {
+                if track.is_some() {
+                    self.config.track_fx.select_bank(slot);
+                } else {
+                    self.config.input_fx.select_bank(slot);
+                }
+            }
+            if self.shortcuts.held(Command::HoldFx(index), &input) && self.held_fx[index].is_none()
+            {
+                let enabled = if let Some(track) = track {
+                    &mut self.config.track_fx.tracks[track].enabled[bank][slot]
+                } else {
+                    &mut self.config.input_fx.banks[bank].slots[slot].is_enabled
                 };
+                let previous = *enabled;
+                *enabled = true;
                 self.held_fx[index] = Some(HeldFx {
                     bank,
                     slot,
                     track,
                     previous,
                 });
-            } else if pressed(&input, key) && !input.modifiers.shift {
+            }
+            if self.shortcuts.pressed(Command::Fx(index), &input) {
                 if let Some(track) = track {
                     self.config.track_fx.toggle_slot_enabled(track, slot);
                 } else {
@@ -363,36 +419,55 @@ impl MyApp {
                 }
             }
         }
-        for (index, (down, up)) in [
-            (Key::Z, Key::X),
-            (Key::C, Key::V),
-            (Key::B, Key::N),
-            (Key::M, Key::Comma),
-            (Key::Period, Key::Slash),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let direction = i8::from(input.key_down(up)) - i8::from(input.key_down(down));
-            if input.modifiers.alt {
-                continue;
-            }
-            if input.modifiers.shift {
-                self.fader_keys[index] = faders::KeyFader::default();
-                let delta = self.speed_keys[index].delta(direction, input.stable_dt, 20.0, 1.0);
-                self.config.track_options[index].fader_speed =
-                    (self.config.track_options[index].fader_speed + delta).clamp(1.0, 60.0);
-            } else {
-                self.speed_keys[index] = faders::KeyFader::default();
-                self.fader_keys[index].advance(
-                    &mut self.config.track_levels[index],
-                    direction,
-                    input.stable_dt,
-                    self.config.track_options[index].fader_speed,
-                );
-            }
+        for index in 0..5 {
+            let fader_direction = i8::from(self.shortcuts.held(Command::FaderUp(index), &input))
+                - i8::from(self.shortcuts.held(Command::FaderDown(index), &input));
+            let speed_direction = i8::from(self.shortcuts.held(Command::Faster(index), &input))
+                - i8::from(self.shortcuts.held(Command::Slower(index), &input));
+            let delta = self.speed_keys[index].delta(speed_direction, input.stable_dt, 20.0, 1.0);
+            self.config.track_options[index].fader_speed =
+                (self.config.track_options[index].fader_speed + delta).clamp(1.0, 60.0);
+            self.fader_keys[index].advance(
+                &mut self.config.track_levels[index],
+                fader_direction,
+                input.stable_dt,
+                self.config.track_options[index].fader_speed,
+            );
         }
     }
+}
+
+fn consume_performance_keys(ctx: &egui::Context, bindings: &shortcuts::Bindings) {
+    ctx.input_mut(|input| {
+        let bound = |event: &egui::Event| {
+            let egui::Event::Key {
+                key,
+                physical_key,
+                modifiers,
+                ..
+            } = event
+            else {
+                return false;
+            };
+            let key = physical_key.unwrap_or(*key);
+            bindings.entries().iter().any(|definition| {
+                bindings.chords(definition).iter().any(|chord| {
+                    Key::from_name(&chord.key) == Some(key)
+                        && chord.ctrl == modifiers.ctrl
+                        && chord.alt == modifiers.alt
+                        && chord.shift == modifiers.shift
+                        && !modifiers.mac_cmd
+                })
+            })
+        };
+        let consumed_text = input
+            .events
+            .iter()
+            .any(|event| matches!(event, egui::Event::Key { pressed: true, .. }) && bound(event));
+        input.events.retain(|event| {
+            !bound(event) && !(consumed_text && matches!(event, egui::Event::Text(_)))
+        });
+    });
 }
 
 fn consume_navigation_keys(ctx: &egui::Context) {
@@ -407,4 +482,45 @@ fn consume_navigation_keys(ctx: &egui::Context) {
             )
         })
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn held_activation_key_does_not_reclick_native_buttons() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.button("Toggle").request_focus();
+            });
+        });
+        for (pressed, repeat, expected) in [
+            (true, false, true),
+            (true, true, false),
+            (false, false, false),
+            (true, false, true),
+        ] {
+            let mut clicked = false;
+            let _ = ctx.run(
+                egui::RawInput {
+                    events: vec![egui::Event::Key {
+                        key: Key::Enter,
+                        physical_key: Some(Key::Enter),
+                        pressed,
+                        repeat,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                    ..Default::default()
+                },
+                |ctx| {
+                    ctx.input_mut(remove_button_repeat);
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        clicked = ui.button("Toggle").clicked();
+                    });
+                },
+            );
+            assert_eq!(clicked, expected);
+        }
+    }
 }

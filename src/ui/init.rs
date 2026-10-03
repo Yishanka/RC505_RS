@@ -15,6 +15,9 @@ pub fn draw_init(ui: &mut egui::Ui, app: &mut MyApp) {
                 theme::brand(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     app.language_switch(ui);
+                    if ui.button(lang.choose("Keys", "键位")).clicked() {
+                        app.shortcut_editor.open(&app.shortcuts);
+                    }
                     if theme::action(ui, theme::Icon::Help, lang.text("Help"), "F12").clicked() {
                         app.help_open = true;
                     }
@@ -88,6 +91,11 @@ pub fn draw_init(ui: &mut egui::Ui, app: &mut MyApp) {
                     });
                 });
             });
+            ui.add_space(12.0);
+            if theme::action(ui, theme::Icon::Play, lang.choose("Replay library", "全局回放库"), "F10").clicked() {
+                app.open_replays();
+            }
+            theme::caption(ui, lang.choose("Replays are shared across all projects. Play, seek, export, or import any paused position.", "回放独立于工程保存，可播放、跳转、导出，或将暂停位置导入任意工程。"));
             ui.add_space(12.0);
             ui.add(egui::Label::new(lang.text(&app.status)).wrap(true));
             theme::caption(ui, lang.text(&app.audio_status()));

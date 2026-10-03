@@ -28,11 +28,11 @@ impl EnvelopeConfigs {
     pub fn new() -> Self {
         Self {
             sel_idx: None,
-            attack_ms: NumericConfig::new("Attack(ms)", 0),
+            attack_ms: NumericConfig::new("Attack(ms)", 5),
             hold_ms: NumericConfig::new("Hold(ms)", 0),
-            decay_ms: NumericConfig::new("Decay(ms)", 1000),
-            sustain_pct: NumericConfig::new("Sustain(%)", 100),
-            release_ms: NumericConfig::new("Release(ms)", 0),
+            decay_ms: NumericConfig::new("Decay(ms)", 150),
+            sustain_pct: NumericConfig::new("Sustain(%)", 75),
+            release_ms: NumericConfig::new("Release(ms)", 100),
             start_pct: NumericConfig::new("Start(%)", 0),
             tension_a: NumericConfig::new("Tension-A", 100),
             tension_d: NumericConfig::new("Tension-D", 100),

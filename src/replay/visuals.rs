@@ -84,6 +84,36 @@ pub fn apply(value: &mut Value, changes: &[Change]) {
     }
 }
 impl ConfigPoint {
+    /// Focus follows parameter edits, but immutable sample PCM never enters a
+    /// JSON diff on the UI thread. Its identity is enough for this purpose.
+    pub fn focus(frame: u64, old: &ProjectData, new: &ProjectData) -> Self {
+        let mut old = old.clone();
+        let mut new = new.clone();
+        let mut sample_target = None;
+        for bank in 0..new.input_fx.banks.len() {
+            for slot in 0..new.input_fx.banks[bank].slots.len() {
+                let current = new.input_fx.banks[bank].slots[slot]
+                    .osc
+                    .as_mut()
+                    .and_then(|osc| osc.sample.take());
+                let previous = old
+                    .input_fx
+                    .banks
+                    .get_mut(bank)
+                    .and_then(|b| b.slots.get_mut(slot))
+                    .and_then(|s| s.osc.as_mut())
+                    .and_then(|osc| osc.sample.take());
+                if current.as_ref().map(|s| s.content_hash)
+                    != previous.as_ref().map(|s| s.content_hash)
+                {
+                    sample_target = Some(FxTarget::Input { bank, slot });
+                }
+            }
+        }
+        let mut point = Self::new(frame, &old, &new);
+        point.target = point.target.or(sample_target);
+        point
+    }
     pub fn new(frame: u64, old: &ProjectData, new: &ProjectData) -> Self {
         let changes = changes(old, new);
         let target = changes.iter().find_map(|c| match c.path.as_slice() {

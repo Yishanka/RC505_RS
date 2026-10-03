@@ -449,6 +449,12 @@ mod tests {
             old.histories[0].redo.slots[0].read(0),
             snapshot.undo[0].read(0)
         );
+        let root = fs::canonicalize(root).unwrap();
+        assert_eq!(
+            root.parent(),
+            Some(fs::canonicalize("var").unwrap().as_path())
+        );
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn snapshot_preserves_float_bits_undo_and_detects_corruption() {

@@ -77,7 +77,7 @@ pub fn list() -> Vec<String> {
 
 pub fn encode(config: &AppConfig, target: FxTarget) -> Result<String> {
     let mut data = project::data_from_config(config);
-    let slot = match target {
+    let mut slot = match target {
         FxTarget::Input { bank, slot } => {
             SlotData::Input(data.input_fx.banks[bank].slots.remove(slot))
         }
@@ -85,23 +85,46 @@ pub fn encode(config: &AppConfig, target: FxTarget) -> Result<String> {
             SlotData::Track(data.track_fx.banks[bank].slots.remove(slot))
         }
     };
-    Ok(serde_json::to_string_pretty(&Preset { version: 1, slot })?)
+    if let SlotData::Input(slot) = &mut slot {
+        slot.source_id.clear();
+        slot.detached_clip = None;
+        if let Some(osc) = &mut slot.osc {
+            osc.clip = None;
+            osc.note_seq.clear();
+            osc.note_step_len_seq.clear();
+        }
+        if let Some(osc) = &mut slot.my_delay {
+            osc.note_seq.clear();
+            osc.note_step_len_seq.clear();
+        }
+    }
+    Ok(serde_json::to_string_pretty(&Preset { version: 2, slot })?)
 }
 
 pub fn decode(config: &mut AppConfig, target: FxTarget, text: &str) -> Result<()> {
     let preset: Preset = serde_json::from_str(text).context("Invalid preset JSON")?;
-    if preset.version != 1 {
+    if preset.version != 1 && preset.version != 2 {
         bail!("Unsupported preset version {}", preset.version);
     }
     let mut staging = AppConfig::new(120, 0, 5);
     let mut data = project::data_from_config(&staging);
     match (target, preset.slot) {
         (FxTarget::Input { bank, slot }, SlotData::Input(value)) => {
+            let previous = clip(config, target)
+                .or_else(|| config.input_fx.banks[bank].slots[slot].clip.clone());
             data.input_fx.banks[0].slots[0] = value;
             project::apply_data_to_config(&mut staging, data);
             // Keep live bypass state; loading a preset should not turn an effect on.
             config.input_fx.banks[bank].slots[slot].fx =
                 staging.input_fx.banks[0].slots[0].fx.take();
+            if let Some(note) = note_mut(config, target) {
+                if let Some(previous) = &previous {
+                    note.set_clip(previous);
+                } else {
+                    note.replace_events(0, &[]);
+                }
+            }
+            config.input_fx.banks[bank].slots[slot].clip = previous;
         }
         (FxTarget::Track { bank, slot }, SlotData::Track(value)) => {
             data.track_fx.banks[0].slots[0] = value;
@@ -153,9 +176,169 @@ mod tests {
             panic!()
         };
         assert_eq!(osc.level.value, 42);
-        assert_eq!(osc.note.events().len(), 2);
+        assert_eq!(
+            osc.note.events().len(),
+            0,
+            "Sound presets must not replace the phrase"
+        );
         assert_eq!(config.beat_config.current_bpm(), 137);
         assert!(!config.input_fx.banks[1].slots[2].is_enabled);
         assert!(decode(&mut config, FxTarget::Track { bank: 0, slot: 0 }, &encoded).is_err());
     }
+    #[test]
+    fn sound_swap_type_change_and_slot_move_preserve_independent_phrase_identity() {
+        use crate::config::note_configs::NoteOct;
+        use crate::config::sequence_edit::NoteEvent;
+        let mut c = AppConfig::new(120, 0, 5);
+        c.input_fx.set_slot_kind(0, 0, FxKind::Oscillator);
+        c.input_fx.set_slot_kind(0, 1, FxKind::Oscillator);
+        let target = FxTarget::Input { bank: 0, slot: 1 };
+        note_mut(&mut c, target).unwrap().replace_events(
+            3840,
+            &[
+                NoteEvent::new(0, 960, NoteOct::from_pitch_index(48)),
+                NoteEvent::new(0, 960, NoteOct::from_pitch_index(52)),
+                NoteEvent::new(0, 960, NoteOct::from_pitch_index(55)),
+            ],
+        );
+        note_mut(&mut c, target).unwrap().clip_id = "independent-destination-phrase".into();
+        let before = clip(&c, target).unwrap();
+        let source = c.input_fx.banks[0].slots[1].source_id.clone();
+        let encoded = encode(&c, FxTarget::Input { bank: 0, slot: 0 }).unwrap();
+        decode(&mut c, target, &encoded).unwrap();
+        assert_eq!(clip(&c, target).unwrap(), before);
+        assert_eq!(c.input_fx.banks[0].slots[1].source_id, source);
+        c.input_fx.set_slot_kind(0, 1, FxKind::Filter);
+        assert_eq!(c.input_fx.banks[0].slots[1].clip.as_ref(), Some(&before));
+        let data = project::data_from_config(&c);
+        let json = serde_json::to_string(&data).unwrap();
+        let mut restored = AppConfig::new(120, 0, 5);
+        project::apply_data_to_config(&mut restored, serde_json::from_str(&json).unwrap());
+        restored.input_fx.set_slot_kind(0, 1, FxKind::Oscillator);
+        assert_eq!(clip(&restored, target).unwrap(), before);
+        restored.input_fx.banks[0].slots.swap(1, 2);
+        assert_eq!(restored.input_fx.banks[0].slots[2].source_id, source);
+        assert_eq!(
+            clip(&restored, FxTarget::Input { bank: 0, slot: 2 }).unwrap(),
+            before
+        );
+        assert!(
+            clip(&restored, FxTarget::Input { bank: 0, slot: 0 })
+                .unwrap()
+                .events
+                .is_empty()
+        );
+    }
+}
+
+pub fn note_mut(
+    config: &mut AppConfig,
+    target: FxTarget,
+) -> Option<&mut crate::config::note_configs::NoteConfigs> {
+    let FxTarget::Input { bank, slot } = target else {
+        return None;
+    };
+    match config
+        .input_fx
+        .banks
+        .get_mut(bank)?
+        .slots
+        .get_mut(slot)?
+        .fx
+        .as_mut()?
+    {
+        crate::config::InputFx::Oscillator(o) => Some(&mut o.note),
+        crate::config::InputFx::MyDelay(o) => Some(&mut o.note),
+        _ => None,
+    }
+}
+pub fn clip(
+    config: &AppConfig,
+    target: FxTarget,
+) -> Option<crate::config::sequence_edit::NoteClip> {
+    let FxTarget::Input { bank, slot } = target else {
+        return None;
+    };
+    match config
+        .input_fx
+        .banks
+        .get(bank)?
+        .slots
+        .get(slot)?
+        .fx
+        .as_ref()?
+    {
+        crate::config::InputFx::Oscillator(o) => Some(o.note.clip()),
+        crate::config::InputFx::MyDelay(o) => Some(o.note.clip()),
+        _ => None,
+    }
+}
+fn clip_root() -> PathBuf {
+    root().with_file_name("clips")
+}
+fn clip_file(name: &str) -> Result<PathBuf> {
+    let validated = file(name)?;
+    Ok(clip_root().join(validated.file_name().unwrap()))
+}
+pub fn list_clips() -> Vec<String> {
+    let mut names: Vec<_> = fs::read_dir(clip_root())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter_map(|e| {
+            e.path()
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+        })
+        .collect();
+    names.sort();
+    names
+}
+#[derive(Serialize, Deserialize)]
+struct ClipFile {
+    version: u32,
+    clip: crate::config::sequence_edit::NoteClip,
+}
+pub fn save_clip(config: &AppConfig, target: FxTarget, name: &str) -> Result<()> {
+    let mut clip = clip(config, target).context("This effect does not accept notes")?;
+    let path = clip_file(name)?;
+    clip.name = name.trim().to_owned();
+    clip.id = format!(
+        "clip-{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+    let text = serde_json::to_string_pretty(&ClipFile { version: 1, clip })?;
+    fs::create_dir_all(clip_root())?;
+    use std::io::Write;
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .context("Clip already exists; choose another name")?
+        .write_all(text.as_bytes())?;
+    Ok(())
+}
+pub fn load_clip(config: &mut AppConfig, target: FxTarget, name: &str) -> Result<()> {
+    let path = clip_file(name)?;
+    if fs::metadata(&path)?.len() > 1024 * 1024 {
+        bail!("Clip exceeds the 1 MB size limit");
+    }
+    let mut value: ClipFile = serde_json::from_str(&fs::read_to_string(path)?)?;
+    if value.version != 1 {
+        bail!("Unsupported clip version");
+    }
+    // Loading copies the phrase; editing one source never mutates another slot.
+    value.clip.id = format!(
+        "copy-{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+    note_mut(config, target)
+        .context("This effect does not accept notes")?
+        .set_clip(&value.clip);
+    Ok(())
 }

@@ -64,7 +64,7 @@ pub enum InputRouting {
     Serial,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LatencyCalibration {
     pub frames: u32,
     pub sample_rate: u32,

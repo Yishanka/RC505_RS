@@ -23,17 +23,23 @@ RC505 RS/
   install-settings.json
   data/
     launcher_config.json
+    keyboard.json          全局自定义键位
+    replays/
+      <回放>/initial + input.wav + events.jsonl + replay.json
+      <回放>/samples/      按内容去重的 OSC 采样素材
+      exports/*.wav        仅显式导出时创建，可在回放库删除
+      trash/               删除/丢弃后可恢复的回放
     projects/
       projects_index.json
       <工程标识>.json
       <工程标识>.json.assets/
         snapshots/<版本>/manifest.json + track/undo WAV
-        replays/<回放>/initial + input.wav + events.jsonl + replay.json
-        replays/exports/*.wav
     media/                 可存放自己的录屏等资料
 ```
 
 软件本身录制回放操作与输入音频，不录制屏幕视频。手动录屏可放在 `data\media`；任何录屏工具自身的默认目录仍需要在该工具里设置。
+
+0.3 起回放属于全局库。打开回放库时，旧工程目录中的完整回放及导出文件会迁到 `data/replays`；工程的录音快照仍归原工程所有。回放的来源工程字段只作信息，不限制导入目标。
 
 ## 数据迁移
 
@@ -79,8 +85,8 @@ powershell -NoProfile -File scripts/package.ps1 -SkipBuild
 git add <本次需要发布的文件>
 git commit -m "Describe the change"
 git push origin main
-git tag v0.2.1  # 示例；必须与 Cargo.toml 一致
-git push origin v0.2.1
+git tag v0.3.0  # 示例；必须与 Cargo.toml 一致，已有 tag 不要重建
+git push origin v0.3.0
 ```
 
 `.github/workflows/release.yml` 在 Windows 上验证、构建，然后使用仓库 Actions 的内置凭据发布安装包、便携包、校验和、更新清单。tag 和 Cargo 版本不一致会失败；测试失败不会发布。Release 发布成功后，安装版才能检查到更新。已发布 tag 不应移动；修复应使用新的版本号。
@@ -88,3 +94,23 @@ git push origin v0.2.1
 打包参考 [Inno Setup 官方文档](https://jrsoftware.org/ishelp/contents.htm)。FFmpeg 不是本版本依赖；无损 WAV 读写由 Hound 完成，回放音频由 Rust DSP 渲染。
 
 Windows x64使用[静态C运行库链接](https://doc.rust-lang.org/reference/linkage.html#static-and-dynamic-c-runtimes)，不要求用户另装VC++运行库。打包时自动执行隔离的安装/再次安装/数据保留/缓存清理测试；失败则不发布。
+
+## 开发缓存与体积
+
+发布构建保持 `opt-level=3`，使用 Thin LTO、单一 codegen unit 和调试信息剥离；保留 panic 展开与故障日志，不使用禁用向量化的 `opt-level="z"`。这些设置影响编译/链接时间，实际体积比较见 [VALIDATION](VALIDATION.md)。[Cargo 官方构建配置](https://doc.rust-lang.org/cargo/reference/profiles.html)
+
+`target` 是开发编译缓存，不会装进用户的软件目录。需要释放空间时可在没有编译任务运行的情况下执行 `cargo clean`；它不删除源码和 `data`，下次构建会重新编译依赖。默认开发配置仍保留调试信息和增量编译，便于调试。
+
+```powershell
+# 先预览；只选择至少一天前、名称匹配已知测试/打包规则的临时产物
+./scripts/clean-dev.ps1
+./scripts/clean-dev.ps1 -Apply
+# 真正渲染隔离的离线界面（需要 Python 与 Pillow）；PNG 替代体积较大的 PPM
+python scripts/preview-ui.py projects-small performance-small-rose shortcuts-small
+# 可选：同一源码比较原默认发布配置和当前配置，结束后保留当前release程序
+./scripts/measure-release-size.ps1
+```
+
+清理脚本保留 `var` 中的 PDF、视频、参考调研和工具目录；失败测试可暂留用于诊断。成功的安装测试、打包暂存与 UI 导航测试会自行清理。文档采用的截图放在 `docs/images`。
+
+成功打包后，开发目录 `dist` 只保留本次版本的安装器、便携包和校验清单；历史发布仍可从GitHub下载。这与安装版 `E:\installer` 的单份更新缓存是两套独立规则。

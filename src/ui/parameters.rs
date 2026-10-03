@@ -3,7 +3,6 @@ use super::theme;
 use crate::config::config_type::{EnumConfig, NumericConfig};
 use crate::config::envelope_configs::*;
 use crate::config::filter_configs::*;
-use crate::dsp::envelope::{AhdsrParams, AhdsrState};
 use eframe::egui::{self, Color32, Stroke, pos2};
 
 pub fn number(ui: &mut egui::Ui, config: &mut NumericConfig, min: usize, max: usize, log: bool) {
@@ -181,103 +180,248 @@ pub fn filter(ui: &mut egui::Ui, config: &mut FilterConfigs, full: bool) {
 }
 
 pub fn envelope(ui: &mut egui::Ui, config: &mut EnvelopeConfigs) {
-    ui.columns(2, |columns| {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
+    // Curve and precise controls edit the very same values. Zero-duration segments
+    // remain selectable through the labels/knobs even when their nodes coincide.
+    envelope_curve(ui, config);
+    ui.columns(2, |cols| {
         number(
-            &mut columns[0],
+            &mut cols[0],
             &mut config.attack_ms,
             0,
             ENVELOPE_ATTACK_MAX_MS,
-            false,
+            true,
         );
         number(
-            &mut columns[0],
+            &mut cols[0],
             &mut config.hold_ms,
             0,
             ENVELOPE_HOLD_MAX_MS,
-            false,
+            true,
         );
         number(
-            &mut columns[0],
+            &mut cols[0],
             &mut config.decay_ms,
             0,
             ENVELOPE_DECAY_MAX_MS,
-            false,
+            true,
         );
-        number(&mut columns[0], &mut config.sustain_pct, 0, 100, false);
+        number(&mut cols[0], &mut config.sustain_pct, 0, 100, false);
         number(
-            &mut columns[0],
+            &mut cols[0],
             &mut config.release_ms,
             1,
             ENVELOPE_RELEASE_MAX_MS,
-            false,
+            true,
         );
-        number(&mut columns[1], &mut config.start_pct, 0, 100, false);
-        number(
-            &mut columns[1],
-            &mut config.tension_a,
-            0,
-            ENVELOPE_TENSION_MAX,
-            false,
-        );
-        number(
-            &mut columns[1],
-            &mut config.tension_d,
-            0,
-            ENVELOPE_TENSION_MAX,
-            false,
-        );
-        number(
-            &mut columns[1],
-            &mut config.tension_r,
-            0,
-            ENVELOPE_TENSION_MAX,
-            false,
-        );
+        number(&mut cols[1], &mut config.start_pct, 0, 100, false);
+        for (value, en, cn) in [
+            (&mut config.tension_a, "Attack curve", "起音曲率"),
+            (&mut config.tension_d, "Decay curve", "衰减曲率"),
+            (&mut config.tension_r, "Release curve", "释音曲率"),
+        ] {
+            let mut curve = ((value.value as f32 - 100.0) / 100.0).clamp(-1.0, 1.0);
+            if cols[1]
+                .add(egui::Slider::new(&mut curve, -1.0..=1.0).text(lang.choose(en, cn)))
+                .changed()
+            {
+                value.value = (100.0 + curve * 100.0).round() as usize;
+            }
+            if value.value > 200 {
+                theme::caption(
+                    &mut cols[1],
+                    lang.choose(
+                        "Legacy steep curve retained; moving this control replaces it.",
+                        "已保留旧版陡峭曲线；拖动此控件会替换它。",
+                    ),
+                );
+            }
+        }
+        if cols[1]
+            .button(lang.choose("Reset to gentle envelope", "重置为平滑包络"))
+            .clicked()
+        {
+            *config = EnvelopeConfigs::new();
+        }
     });
-    let params = AhdsrParams {
-        attack_ms: config.attack_ms.value as f32,
-        hold_ms: config.hold_ms.value as f32,
-        decay_ms: config.decay_ms.value as f32,
-        sustain_level: config.sustain_pct.value as f32 / 100.0,
-        release_ms: config.release_ms.value.max(1) as f32,
-        start_level: config.start_pct.value as f32 / 100.0,
-        tension_attack: tension(config.tension_a.value),
-        tension_decay: tension(config.tension_d.value),
-        tension_release: tension(config.tension_r.value),
-    };
-    let gate_ms = params.attack_ms + params.hold_ms + params.decay_ms + 300.0;
-    let total_ms = gate_ms + params.release_ms + 100.0;
+    theme::caption(ui,lang.choose("Drag A/H/D/R nodes horizontally for time; drag Start/S vertically for level. Small midpoint handles bend the curve. Values and graph stay synchronized; the dotted line is Note Off.","横拖 A/H/D/R 节点调整时间，竖拖 Start/S 调整电平；小中点调整曲率。参数与图形同步，虚线为音符松开。"));
+}
+fn envelope_curve(ui: &mut egui::Ui, c: &mut EnvelopeConfigs) {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
     let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), 200.0),
+        egui::vec2(ui.available_width(), 230.0),
         egui::Sense::hover(),
     );
     ui.painter().rect_filled(rect, 6.0, theme::BACKGROUND);
-    let plot = rect.shrink(12.0);
-    let mut env = AhdsrState::new();
+    let plot = rect.shrink2(egui::vec2(20.0, 28.0));
+    let a = c.attack_ms.value as f32;
+    let h = c.hold_ms.value as f32;
+    let d = c.decay_ms.value as f32;
+    let r = c.release_ms.value.max(1) as f32;
+    let sustain_hold = 300.0;
+    let total = (a + h + d + r + sustain_hold).max(500.0);
+    let snapshot_id = ui.id().with("envelope_drag_scale");
+    let any_down = ui.input(|i| i.pointer.primary_down());
+    if !any_down {
+        ui.ctx().data_mut(|data| data.remove::<f32>(snapshot_id));
+    }
+    let scale = ui.ctx().data_mut(|data| {
+        if any_down {
+            *data.get_temp_mut_or_insert_with(snapshot_id, || total)
+        } else {
+            total
+        }
+    });
+    let sustain = c.sustain_pct.value as f32 / 100.0;
+    let start = c.start_pct.value as f32 / 100.0;
+    let off = a + h + d + sustain_hold;
+    let point = |ms: f32, v: f32| {
+        pos2(
+            plot.left() + plot.width() * ms / scale,
+            plot.bottom() - plot.height() * v,
+        )
+    };
+    let anchors = [
+        (0.0, start, lang.choose("Start", "起点")),
+        (a, 1.0, if h == 0.0 { "A/H" } else { "A" }),
+        (a + h, 1.0, "H"),
+        (a + h + d, sustain, "D / S"),
+        (off, sustain, lang.choose("Off", "松键")),
+        (off + r, 0.0, "R"),
+    ];
+    for n in 0..=4 {
+        let y = plot.bottom() - plot.height() * n as f32 / 4.0;
+        ui.painter()
+            .hline(plot.x_range(), y, Stroke::new(1.0, Color32::from_gray(45)));
+    }
+    let shape = |ms: f32| {
+        if ms < a && a > 0.0 {
+            start + (1.0 - start) * (ms / a).powf(tension(c.tension_a.value))
+        } else if ms < a + h {
+            1.0
+        } else if ms < a + h + d && d > 0.0 {
+            sustain
+                + (1.0 - sustain)
+                    * (1.0 - (ms - a - h) / d)
+                        .clamp(0.0, 1.0)
+                        .powf(tension(c.tension_d.value))
+        } else if ms < off {
+            sustain
+        } else {
+            sustain
+                * (1.0 - (ms - off) / r)
+                    .clamp(0.0, 1.0)
+                    .powf(tension(c.tension_r.value))
+        }
+    };
     let points = (0..600)
         .map(|i| {
-            let elapsed = total_ms * i as f32 / 600.0;
-            let level = env.next(elapsed < gate_ms, false, params, total_ms / 600000.0);
-            pos2(
-                plot.left() + plot.width() * i as f32 / 599.0,
-                plot.bottom() - level * plot.height(),
-            )
+            let time = scale * i as f32 / 599.0;
+            point(time, shape(time))
         })
         .collect();
     ui.painter().add(egui::Shape::line(
         points,
         Stroke::new(2.0, theme::accent(ui)),
     ));
-    let off_x = plot.left() + plot.width() * gate_ms / total_ms;
-    ui.painter()
-        .vline(off_x, plot.y_range(), Stroke::new(1.0, theme::MUTED));
-    theme::caption(
-        ui,
-        format!(
-            "A / H / D / S / R • {:.2} s preview • vertical line = note off • Tension 100 = linear",
-            total_ms / 1000.0
-        ),
+    ui.painter().vline(
+        point(off, 0.0).x,
+        plot.y_range(),
+        Stroke::new(1.0, theme::MUTED),
     );
+    for (index, (time, value, label)) in anchors.iter().enumerate() {
+        // A zero hold shares the attack endpoint. One hit target avoids an
+        // invisible H handle stealing drags intended for the visible A peak.
+        if index == 2 && h == 0.0 {
+            continue;
+        }
+        let pos = point(*time, *value);
+        let hit = egui::Rect::from_center_size(pos, egui::vec2(14.0, 14.0));
+        let response = ui.interact(
+            hit,
+            ui.id().with(("envelope_node", index)),
+            egui::Sense::drag(),
+        );
+        ui.painter().circle_filled(
+            pos,
+            5.0,
+            if index == 4 {
+                theme::MUTED
+            } else {
+                theme::accent(ui)
+            },
+        );
+        ui.painter().text(
+            pos + egui::vec2(0.0, if *value > 0.8 { -8.0 } else { 10.0 }),
+            if *value > 0.8 {
+                egui::Align2::CENTER_BOTTOM
+            } else {
+                egui::Align2::CENTER_TOP
+            },
+            label,
+            egui::FontId::monospace(12.0),
+            theme::MUTED,
+        );
+        if response.dragged() {
+            if let Some(p) = response.interact_pointer_pos() {
+                let ms = ((p.x - plot.left()) / plot.width() * scale).max(0.0);
+                let level =
+                    ((plot.bottom() - p.y) / plot.height() * 100.0).clamp(0.0, 100.0) as usize;
+                match index {
+                    0 => c.start_pct.value = level,
+                    1 => c.attack_ms.value = (ms as usize).min(ENVELOPE_ATTACK_MAX_MS),
+                    2 => c.hold_ms.value = ((ms - a).max(0.0) as usize).min(ENVELOPE_HOLD_MAX_MS),
+                    3 => {
+                        c.decay_ms.value =
+                            ((ms - a - h).max(0.0) as usize).min(ENVELOPE_DECAY_MAX_MS);
+                        c.sustain_pct.value = level;
+                    }
+                    4 => c.sustain_pct.value = level,
+                    5 => {
+                        c.release_ms.value =
+                            ((ms - off).max(1.0) as usize).min(ENVELOPE_RELEASE_MAX_MS)
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    for (index, begin, end, y0, y1, value) in [
+        (0, 0.0, a, start, 1.0, &mut c.tension_a),
+        (1, a + h, a + h + d, 1.0, sustain, &mut c.tension_d),
+        (2, off, off + r, sustain, 0.0, &mut c.tension_r),
+    ] {
+        if end - begin < 1.0 {
+            continue;
+        }
+        let mid_value = if index == 0 {
+            y0 + (y1 - y0) * 0.5f32.powf(tension(value.value))
+        } else {
+            y1 + (y0 - y1) * 0.5f32.powf(tension(value.value))
+        };
+        let pos = point((begin + end) * 0.5, mid_value);
+        let response = ui.interact(
+            egui::Rect::from_center_size(pos, egui::vec2(12.0, 12.0)),
+            ui.id().with(("envelope_midpoint", index)),
+            egui::Sense::click_and_drag(),
+        );
+        ui.painter().circle_filled(pos, 3.5, theme::secondary(ui));
+        if response.dragged() {
+            if let Some(p) = response.interact_pointer_pos() {
+                let y = ((plot.bottom() - p.y) / plot.height()).clamp(0.0, 1.0);
+                let normalized = if index == 0 {
+                    (y - y0) / (y1 - y0).max(0.001)
+                } else {
+                    (y - y1) / (y0 - y1).max(0.001)
+                };
+                let exponent = normalized.clamp(0.01, 0.99).ln() / 0.5f32.ln();
+                value.value = (100.0 + 50.0 * exponent.log2()).clamp(0.0, 200.0).round() as usize;
+            }
+        }
+        if response.double_clicked() {
+            value.value = 100;
+        }
+    }
 }
 
 fn tension(value: usize) -> f32 {

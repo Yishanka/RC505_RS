@@ -1,6 +1,6 @@
 [package]
 name = "rc505_rs"
-version = "0.2.8"
+version = "0.3.0"
 edition = "2024"
 
 [features]
@@ -21,7 +21,7 @@ ringbuf = "0.3"
 anyhow = "1.0"
 eframe = "0.27"
 chrono = "0.4"
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 hound = "3.5"
 fs2 = "0.4"
@@ -30,5 +30,13 @@ sha2 = "0.10"
 [build-dependencies]
 winres = "0.1.12"
 
+# Keep DSP speed optimizations; remove unused cross-crate code and debug data.
+# Do not use opt-level="z" (disables vectorization) or panic="abort" here.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.54", features = ["Win32_Media_Audio", "Win32_System_Com"] }
+windows = { version = "0.54", features = ["Win32_Media_Audio", "Win32_System_Com", "Win32_UI_Controls_Dialogs"] }

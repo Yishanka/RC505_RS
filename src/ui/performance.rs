@@ -129,6 +129,9 @@ fn transport(ui: &mut egui::Ui, app: &mut MyApp) {
         theme::keycap(ui, "F6");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             app.language_switch(ui);
+            if nav::button(ui, lang.choose("Keys", "键位")).clicked() {
+                app.shortcut_editor.open(&app.shortcuts);
+            }
             if nav::register(theme::action(ui, Icon::Help, lang.text("Help"), "F12")).clicked() {
                 app.help_open = true;
             }
@@ -157,16 +160,15 @@ fn transport(ui: &mut egui::Ui, app: &mut MyApp) {
         ui.label("BPM");
         nav::register(
             ui.add_enabled(
-                app.stopped(),
+                app.tempo_edit_allowed(),
                 egui::DragValue::new(&mut app.config.beat_config.input_bpm.value)
                     .clamp_range(30..=300)
                     .speed(0.2),
             ),
         );
-        ui.add_enabled_ui(app.stopped(), |ui| {
+        ui.add_enabled_ui(app.tempo_edit_allowed(), |ui| {
             if nav::register(theme::action(ui, Icon::None, lang.text("Tap tempo"), "T")).clicked() {
-                app.config.beat_config.tap_calc.calculate_avg_bpm();
-                app.config.beat_config.input_bpm.value = app.config.beat_config.tap_calc.value;
+                app.tap_tempo(ui.input(|i| i.time));
             }
         });
         if nav::register(theme::action(
@@ -181,9 +183,15 @@ fn transport(ui: &mut egui::Ui, app: &mut MyApp) {
         }
         ui.separator();
         let mut click = app.view.metronome;
+        let mut silent = !app.config.input_thru;
+        if nav::register(ui.checkbox(&mut silent, lang.choose("Silent input", "静默录入")))
+            .on_hover_text(lang.choose("Input Thru OFF: input and its FX still record into tracks, but are not sent straight to the output. Existing loops keep playing.","关闭输入直通：输入与输入效果仍录入轨道，但不直接送往输出；已有循环照常播放。"))
+            .changed() { app.config.input_thru = !silent; }
+        theme::keycap(ui, "J");
         if nav::register(ui.checkbox(&mut click, lang.choose("Metronome", "节拍器"))).changed() {
             app.action(crate::engine::core::Action::Metronome(click));
         }
+        theme::keycap(ui, "K");
         ui.scope(|ui| {
             ui.spacing_mut().slider_width = 95.0;
             let mut volume = app.config.metronome_volume * 100.0;
@@ -439,6 +447,8 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
             });
         }
         LeftPage::Audio => {
+            super::audio_fx_panel::master(ui, &mut app.config.master_fx, &mut app.master_fx_open);
+            ui.separator();
             let mut follow = app.config.system_config.follow_system_output;
             if nav::register(ui.checkbox(
                 &mut follow,
@@ -574,6 +584,9 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
                         .response,
                 );
             });
+            if app.config.input_routing == InputRouting::Legacy {
+                theme::caption(ui, lang.choose("Legacy groups put new audio effects after the original groups, then Input Roll last. Choose Slot A → D for explicit slot order.","旧版固定分组之后处理新增音频效果，Input Roll 位于最后；推荐选择「槽位 A → D」按机架顺序处理。"));
+            }
             if nav::button(ui, lang.text("Replay library & import")).clicked() {
                 app.open_replays();
             }
@@ -705,7 +718,10 @@ fn rack(ui: &mut egui::Ui, app: &mut MyApp, track_fx: bool) {
             if app.player_open {
                 lang.choose("Recorded FX switches", "录制时的效果开关")
             } else {
-                lang.text("Shift: hold effect · Alt: bank · Ctrl: edit")
+                lang.choose(
+                    "Hold, bank and edit keys: see Keys",
+                    "临时开启、切组与编辑快捷键：见「键位」",
+                )
             },
         );
     });
@@ -787,8 +803,15 @@ fn track(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
                     }
                 }
             });
-            let (rect, _) = ui
-                .allocate_exact_size(egui::vec2(ui.available_width(), 36.0), egui::Sense::hover());
+            let wave_height = if ui.ctx().screen_rect().height() < 800.0 {
+                24.0
+            } else {
+                36.0
+            };
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), wave_height),
+                egui::Sense::hover(),
+            );
             ui.painter().rect_filled(rect, 5.0, theme::BACKGROUND);
             for (bin, amplitude) in view.wave.iter().enumerate() {
                 let x = rect.left() + bin as f32 / 24.0 * rect.width();
@@ -845,16 +868,26 @@ fn track(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
             }
             ui.spacing_mut().slider_width = (ui.available_width() - 4.0).max(40.0);
             let mut level = crate::app::faders::decibels(app.config.track_levels[index]);
-            if ui
-                .add(egui::Slider::new(&mut level, -60.0..=0.0).show_value(false))
-                .changed()
-            {
+            let fader = ui.add(egui::Slider::new(&mut level, -60.0..=0.0).show_value(false));
+            #[cfg(debug_assertions)]
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(
+                    egui::Id::new(("regression-fader", index)),
+                    (fader.id, fader.rect),
+                )
+            });
+            if fader.changed() {
                 app.config.track_levels[index] = crate::app::faders::gain(level);
             }
-            let keys = ["Z / X", "C / V", "B / N", "M / ,", ". / /"][index];
+            use crate::app::shortcuts::Command;
+            let keys = format!(
+                "↓ {}  ↑ {}",
+                app.shortcuts.label(Command::FaderDown(index)),
+                app.shortcuts.label(Command::FaderUp(index))
+            );
             ui.horizontal(|ui| {
                 ui.label(format!("{level:.1} dB"));
-                theme::keycap(ui, keys);
+                theme::keycap(ui, &keys);
             });
             ui.horizontal(|ui| {
                 ui.label(lang.text("Speed"));
@@ -863,9 +896,13 @@ fn track(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
                         .clamp_range(1.0..=60.0)
                         .speed(0.25)
                         .suffix(" dB/s"),
-                );
+                )
+                .on_hover_text(format!(
+                    "− {}  + {}",
+                    app.shortcuts.label(Command::Slower(index)),
+                    app.shortcuts.label(Command::Faster(index))
+                ));
             });
-            theme::keycap(ui, &format!("Shift + {keys}"));
             let action = match view.mode {
                 Mode::Empty => lang.text("Record"),
                 Mode::Stopped => lang.text("Play"),
@@ -883,7 +920,7 @@ fn track(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
             }
             ui.horizontal(|ui| {
                 if theme::action(ui, theme::Icon::Stop, "", &format!("F{}", index + 1))
-                    .on_hover_text(format!("Shift+{}", index + 1))
+                    .on_hover_text(app.shortcuts.label(Command::Stop(index)))
                     .clicked()
                 {
                     app.pause_track(index);
@@ -891,9 +928,9 @@ fn track(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
                 ui.add_enabled_ui(view.undo, |ui| {
                     if theme::action(ui, theme::Icon::Undo, "", "")
                         .on_hover_text(format!(
-                            "{} · Alt+{} · {}",
+                            "{} · {} · {}",
                             lang.text("Undo"),
-                            index + 1,
+                            app.shortcuts.label(Command::Undo(index)),
                             view.undo_depth
                         ))
                         .clicked()
@@ -904,9 +941,9 @@ fn track(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
                 ui.add_enabled_ui(view.redo, |ui| {
                     if theme::action(ui, theme::Icon::Redo, "", "")
                         .on_hover_text(format!(
-                            "{} · Ctrl+Alt+{} · {}",
+                            "{} · {} · {}",
                             lang.text("Redo"),
-                            index + 1,
+                            app.shortcuts.label(Command::Redo(index)),
                             view.redo_depth
                         ))
                         .clicked()
@@ -929,8 +966,21 @@ fn track(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
 
 fn clear_button(ui: &mut egui::Ui, app: &mut MyApp, index: usize) {
     let lang = crate::app_support::language::Language::current(ui.ctx());
-    let response = nav::register(theme::action(ui, theme::Icon::Trash, lang.text("Clear audio"), "Del"))
-        .on_hover_text(format!("{}\n{}", lang.text("Hold Delete for 0.75 s or double-press within 350 ms. Clear can be undone from track history."), lang.text("Click twice within 350 ms, or hold for 0.75 s. Release to cancel a hold.")));
+    let response = nav::register(theme::action(
+        ui,
+        theme::Icon::Trash,
+        lang.text("Clear audio"),
+        "Delete",
+    ))
+    .on_hover_text(format!(
+        "{} · {}\n{}",
+        app.shortcuts.label(crate::app::shortcuts::Command::Clear),
+        lang.choose(
+            "Hold 0.75 s or double-press within 350 ms; undo is available.",
+            "长按 0.75 秒或 350 毫秒内双击；可撤销。"
+        ),
+        lang.text("Click twice within 350 ms, or hold for 0.75 s. Release to cancel a hold.")
+    ));
     let id = response.id.with("clear-gesture");
     let mut gesture = ui
         .ctx()

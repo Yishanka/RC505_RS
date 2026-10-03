@@ -3,7 +3,7 @@
 //! underlying key, not the text. Poll only these keys, only while our foreground
 //! performance surface is active; leave egui's original text events untouched.
 use eframe::egui::{Event, InputState, Key};
-const BINDINGS: [(Key, i32); 34] = [
+const BINDINGS: &[(Key, i32)] = &[
     (Key::Num1, 0x31),
     (Key::Num2, 0x32),
     (Key::Num3, 0x33),
@@ -38,17 +38,53 @@ const BINDINGS: [(Key, i32); 34] = [
     (Key::ArrowLeft, 0x25),
     (Key::ArrowRight, 0x27),
     (Key::Delete, 0x2e),
+    (Key::A, 0x41),
+    (Key::D, 0x44),
+    (Key::F, 0x46),
+    (Key::G, 0x47),
+    (Key::H, 0x48),
+    (Key::J, 0x4a),
+    (Key::K, 0x4b),
+    (Key::L, 0x4c),
+    (Key::S, 0x53),
+    (Key::Num0, 0x30),
+    (Key::Num6, 0x36),
+    (Key::Num7, 0x37),
+    (Key::Num8, 0x38),
+    (Key::Num9, 0x39),
+    (Key::F6, 0x75),
+    (Key::F7, 0x76),
+    (Key::F8, 0x77),
+    (Key::F9, 0x78),
+    (Key::F10, 0x79),
+    (Key::F11, 0x7a),
+    (Key::F12, 0x7b),
+    (Key::ArrowUp, 0x26),
+    (Key::ArrowDown, 0x28),
+    (Key::Home, 0x24),
+    (Key::End, 0x23),
+    (Key::PageUp, 0x21),
+    (Key::PageDown, 0x22),
+    (Key::Insert, 0x2d),
+    (Key::Backspace, 0x08),
+    (Key::Minus, 0xbd),
+    (Key::Equals, 0xbb),
+    (Key::Semicolon, 0xba),
+    (Key::OpenBracket, 0xdb),
+    (Key::CloseBracket, 0xdd),
+    (Key::Backslash, 0xdc),
+    (Key::Backtick, 0xc0),
 ];
 pub struct PerformanceKeys {
-    previous: [bool; 34],
-    suppressed: [bool; 34],
+    previous: [bool; BINDINGS.len()],
+    suppressed: [bool; BINDINGS.len()],
     armed: bool,
 }
 impl Default for PerformanceKeys {
     fn default() -> Self {
         Self {
-            previous: [false; 34],
-            suppressed: [false; 34],
+            previous: [false; BINDINGS.len()],
+            suppressed: [false; BINDINGS.len()],
             armed: false,
         }
     }
@@ -58,6 +94,18 @@ impl PerformanceKeys {
         *self = Self::default();
     }
     pub fn poll(&mut self, input: &mut InputState) {
+        #[cfg(debug_assertions)]
+        {
+            static HEADLESS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *HEADLESS.get_or_init(|| std::env::args().any(|a| a == "--ui-regression")) {
+                // The isolated regression process has no native foreground
+                // window. Exercise the same repeat/focus state machine using
+                // its synthetic physical events instead of global OS key state.
+                let down = std::array::from_fn(|i| input.key_down(BINDINGS[i].0));
+                self.apply(input, down);
+                return;
+            }
+        }
         #[cfg(windows)]
         let down = {
             #[link(name = "user32")]
@@ -75,25 +123,44 @@ impl PerformanceKeys {
             }
             if owner != std::process::id() {
                 self.suspend();
-                self.apply(input, [false; 34]);
+                self.apply(input, [false; BINDINGS.len()]);
                 self.suspend();
                 return;
             }
             // The caller has already checked foreground focus and text/editor isolation.
-            std::array::from_fn(|i| unsafe { GetAsyncKeyState(BINDINGS[i].1) } < 0)
+            std::array::from_fn(|i| {
+                let primary = unsafe { GetAsyncKeyState(BINDINGS[i].1) } < 0;
+                let keypad = match BINDINGS[i].0 {
+                    Key::Num0 => Some(0x60),
+                    Key::Num1 => Some(0x61),
+                    Key::Num2 => Some(0x62),
+                    Key::Num3 => Some(0x63),
+                    Key::Num4 => Some(0x64),
+                    Key::Num5 => Some(0x65),
+                    Key::Num6 => Some(0x66),
+                    Key::Num7 => Some(0x67),
+                    Key::Num8 => Some(0x68),
+                    Key::Num9 => Some(0x69),
+                    Key::Minus => Some(0x6d),
+                    Key::Period => Some(0x6e),
+                    Key::Slash => Some(0x6f),
+                    _ => None,
+                };
+                primary || keypad.is_some_and(|vk| unsafe { GetAsyncKeyState(vk) } < 0)
+            })
         };
         #[cfg(not(windows))]
         let down = std::array::from_fn(|i| input.key_down(BINDINGS[i].0));
         self.apply(input, down);
     }
-    fn apply(&mut self, input: &mut InputState, down: [bool; 34]) {
+    fn apply(&mut self, input: &mut InputState, down: [bool; BINDINGS.len()]) {
         let was_armed = self.armed;
         if !self.armed {
             self.previous = down;
             self.suppressed = down;
             self.armed = true;
         }
-        let mut quick_press = [false; 34];
+        let mut quick_press = [false; BINDINGS.len()];
         input.events.retain(|event| {
             if let Event::Key {
                 key,
@@ -142,10 +209,10 @@ mod tests {
     fn shifted_digits_and_punctuation_are_independent_of_text_and_repeat() {
         let mut state = PerformanceKeys::default();
         let mut input = InputState::default();
-        state.apply(&mut input, [false; 34]);
+        state.apply(&mut input, [false; BINDINGS.len()]);
         input.modifiers.shift = true;
         input.events = vec![Event::Text("!>?".into())];
-        let mut down = [false; 34];
+        let mut down = [false; BINDINGS.len()];
         for i in [0, 28, 29] {
             down[i] = true;
         }
@@ -163,18 +230,18 @@ mod tests {
         state.apply(&mut input, down);
         assert!(!input.key_pressed(Key::Slash));
         input.events.clear();
-        state.apply(&mut input, [false; 34]);
+        state.apply(&mut input, [false; BINDINGS.len()]);
         assert!(!input.key_down(Key::Slash));
     }
     #[test]
     fn focus_resume_suppresses_already_held_keys_until_release() {
         let mut state = PerformanceKeys::default();
         let mut input = InputState::default();
-        let mut down = [false; 34];
+        let mut down = [false; BINDINGS.len()];
         down[0] = true;
         state.apply(&mut input, down);
         assert!(!input.key_down(Key::Num1) && !input.key_pressed(Key::Num1));
-        state.apply(&mut input, [false; 34]);
+        state.apply(&mut input, [false; BINDINGS.len()]);
         state.apply(&mut input, down);
         assert!(input.key_pressed(Key::Num1));
         state.suspend();

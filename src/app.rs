@@ -5,6 +5,8 @@ mod keyboard;
 mod monitoring;
 mod performance_keys;
 mod replay_management;
+mod replay_playback;
+pub mod shortcuts;
 mod workflow;
 use crate::{
     config::AppConfig,
@@ -52,7 +54,15 @@ pub struct HeldFx {
     pub previous: bool,
 }
 pub enum JobResult {
-    PlayerReady(Vec<[f32; 2]>, Arc<crate::replay::ReplayVisuals>),
+    PlayerReady(
+        crate::replay::streaming::Consumer,
+        crate::replay::streaming::Session,
+    ),
+    ReplayImported {
+        index: usize,
+        data: project::ProjectData,
+        core: Box<RenderCore>,
+    },
     Update(crate::updater::Release),
     UpdateDownloaded(PathBuf),
     Loaded {
@@ -63,11 +73,14 @@ pub enum JobResult {
     Saved,
     Rendered {
         root: PathBuf,
-        result: crate::replay::RenderResult,
+        result: crate::replay::Exported,
     },
     Error(String),
 }
 pub struct MyApp {
+    pub shortcuts: shortcuts::Bindings,
+    pub shortcut_editor: ui::shortcuts::ShortcutEditor,
+    pub master_fx_open: bool,
     pub replay_panel: Option<Box<ui::replay_panel::ReplayPanel>>,
     pub theme: crate::app_support::appearance::ThemeColor,
     pub audition_target: Option<(crate::presets::FxTarget, usize)>,
@@ -89,6 +102,8 @@ pub struct MyApp {
     pub config: AppConfig,
     pub audio: AudioIO,
     pub view: EngineView,
+    tempo_start_queued: Option<u64>,
+    tap_epoch: std::time::Instant,
     pub app_state: AppState,
     pub track_sel: Option<usize>,
     pub focus: Focus,
@@ -114,8 +129,9 @@ pub struct MyApp {
     pub draft: Option<PathBuf>,
     pub take_name: String,
     pub replay_list: Vec<(PathBuf, String)>,
+    pub replay_exports: Vec<PathBuf>,
     pub player_open: bool,
-    pub rendered: Option<(PathBuf, crate::replay::RenderResult)>,
+    pub rendered: Option<(PathBuf, crate::replay::Exported)>,
     pub render_progress: Arc<AtomicU64>,
     pub replay_import_path: String,
     pub replay_browser: bool,
@@ -199,6 +215,9 @@ impl MyApp {
             .and_then(|s| projects.iter().position(|p| p.name == s.last_project))
             .unwrap_or(0);
         Self {
+            shortcuts: shortcuts::Bindings::load(),
+            shortcut_editor: ui::shortcuts::ShortcutEditor::default(),
+            master_fx_open: false,
             replay_panel: None,
             theme,
             audition_target: None,
@@ -229,6 +248,8 @@ impl MyApp {
             config,
             audio,
             view: EngineView::default(),
+            tempo_start_queued: None,
+            tap_epoch: std::time::Instant::now(),
             app_state: AppState::Init,
             track_sel: Some(0),
             focus: Focus::Performance,
@@ -254,6 +275,7 @@ impl MyApp {
             draft: None,
             take_name: String::new(),
             replay_list: Vec::new(),
+            replay_exports: Vec::new(),
             player_open: false,
             rendered: None,
             render_progress: Arc::new(AtomicU64::new(0)),
@@ -311,6 +333,18 @@ impl MyApp {
     pub fn stopped(&self) -> bool {
         !self.view.running && self.view.tracks.iter().all(|t| !t.pending)
     }
+    pub fn tempo_edit_allowed(&self) -> bool {
+        self.stopped() && self.tempo_start_queued.is_none()
+    }
+    pub fn tap_tempo(&mut self, ui_time: f64) {
+        if self.tempo_edit_allowed() && ui_time.is_finite() && ui_time >= 0.0 {
+            if let Ok(elapsed) = Duration::try_from_secs_f64(ui_time) {
+                if let Some(now) = self.tap_epoch.checked_add(elapsed) {
+                    self.config.beat_config.tap_at(now);
+                }
+            }
+        }
+    }
     pub fn beats(&self) -> Option<f64> {
         self.view.running.then(|| {
             self.view.elapsed as f64 / self.view.sample_rate as f64
@@ -328,6 +362,7 @@ impl MyApp {
         }
     }
     fn sync_config(&mut self) -> bool {
+        self.config.poll_synth_assets();
         if self.previewing
             && (self.audition_target != self.audition_selection()
                 || self
@@ -337,7 +372,7 @@ impl MyApp {
         {
             self.stop_audition();
         }
-        let data = project::data_from_config(&self.config);
+        let data = project::fingerprint_data_from_config(&self.config);
         let Ok(bytes) = serde_json::to_vec(&data) else {
             return false;
         };
@@ -395,6 +430,8 @@ impl MyApp {
         self.stop_audition();
         self.player_open = false;
         self.replay_panel = None;
+        self.master_fx_open = false;
+        self.shortcut_editor.open = false;
         self.send(Control::Action(crate::engine::core::Action::Panic));
         self.send(Control::Enable(false));
         self.previewing = false;
@@ -415,6 +452,15 @@ impl MyApp {
     }
     fn poll(&mut self) {
         if let Some(view) = self.audio.poll() {
+            if self
+                .tempo_start_queued
+                .is_some_and(|at| view.running || view.frame > at)
+            {
+                self.tempo_start_queued = None;
+            }
+            if view.running {
+                self.config.beat_config.accept_engine_bpm(view.bpm as usize);
+            }
             self.view = view;
         }
         self.previewing = self.audio.diagnostics.auditioning.load(Ordering::Relaxed);
@@ -475,20 +521,44 @@ impl MyApp {
             self.job = None;
             self.engine_transition = false;
             match result {
-                JobResult::PlayerReady(samples, visuals) => {
+                JobResult::PlayerReady(stream, session) => {
                     if self.replay_autoplay && !self.show_save_prompt {
                         self.replay_panel =
-                            Some(Box::new(ui::replay_panel::ReplayPanel::new(visuals)));
+                            Some(Box::new(ui::replay_panel::ReplayPanel::streaming(session)));
                         self.replay_browser = false;
                         self.player_open = self.send(Control::Player(Some(Box::new(
-                            crate::engine::audio_io::Player {
-                                samples,
-                                cursor: 0,
-                                playing: true,
-                            },
+                            crate::engine::audio_io::Player { stream },
                         ))));
                     }
                     self.replay_autoplay = false;
+                }
+                JobResult::ReplayImported {
+                    index,
+                    mut data,
+                    core,
+                } => {
+                    self.close_player();
+                    // The import stays in working memory. Saving is explicit;
+                    // Discard on project exit returns to the untouched disk file.
+                    data.snapshot = project::load_project(&self.projects[index])
+                        .ok()
+                        .flatten()
+                        .and_then(|d| d.snapshot);
+                    let input = self.config.system_config.input_device.value.clone();
+                    let output = self.config.system_config.output_device.value.clone();
+                    project::apply_data_to_config(&mut self.config, data);
+                    self.config.system_config.input_device.value = input;
+                    self.config.system_config.output_device.value = output;
+                    if self.send(Control::Replace(core)) {
+                        self.active_project_idx = Some(index);
+                        self.app_state = AppState::MainLoop;
+                        self.editor = ui::editor::EditorState::default();
+                        self.focus = Focus::Performance;
+                        self.last_config.clear();
+                        self.sync_config();
+                        self.send(Control::Enable(true));
+                        self.status = self.language.choose("Replay position imported. Save config + audio snapshot to keep it; Discard restores the saved project.","已导入当前回放位置。保存配置与音频快照可保留，放弃修改可回到导入前的已保存工程。").into();
+                    }
                 }
                 JobResult::Update(release) => {
                     self.status = if crate::updater::newer(&release.version) {
@@ -504,6 +574,7 @@ impl MyApp {
                 }
                 JobResult::Loaded { index, data, core } => {
                     self.stop_audition();
+                    let migrated_sample_source = project::has_legacy_mydelay(&data);
                     let input = self.config.system_config.input_device.value.clone();
                     let output = self.config.system_config.output_device.value.clone();
                     project::apply_data_to_config(&mut self.config, data);
@@ -526,8 +597,14 @@ impl MyApp {
                         self.last_config.clear();
                         self.sync_config();
                         self.send(Control::Enable(true));
-                        self.replay_list = crate::replay::list(&self.projects[index]);
-                        self.status = "Project ready.".into();
+                        self.replay_list = crate::replay::library::list();
+                        self.status = if migrated_sample_source {
+                            self.language.choose("Project ready. Legacy MyDelay is now OSC Sample; capture or import a sample before using it.","工程已打开。旧 MyDelay 已转换为 OSC 采样音源，请先捕获输入或导入素材。").into()
+                        } else {
+                            self.language
+                                .choose("Project ready.", "工程已打开。")
+                                .into()
+                        };
                         let mut preferences =
                             crate::app_support::launcher_config::load().unwrap_or_default();
                         preferences.last_project = self.projects[index].name.clone();
@@ -558,9 +635,7 @@ impl MyApp {
                 JobResult::Rendered { root, result } => {
                     self.status = format!("Rendered WAV: {}", result.wav.display());
                     self.rendered = Some((root, result));
-                    if std::mem::take(&mut self.replay_autoplay) {
-                        self.play_rendered();
-                    }
+                    self.replay_exports = crate::replay::library::exports();
                 }
                 JobResult::Error(error) => {
                     self.replay_autoplay = false;
@@ -597,10 +672,10 @@ impl MyApp {
     fn ui_scene(&self) -> [u64; 16] {
         let target = self.editor.target.map_or(0, |target| match target {
             crate::presets::FxTarget::Input { bank, slot } => {
-                1 + (bank * 4 + slot) * 16 + self.config.input_fx.slot_kind(bank, slot) as usize
+                1 + (bank * 4 + slot) * 128 + self.config.input_fx.slot_kind(bank, slot).ui_tag()
             }
             crate::presets::FxTarget::Track { bank, slot } => {
-                512 + (bank * 4 + slot) * 16 + self.config.track_fx.slot_kind(bank, slot) as usize
+                4096 + (bank * 4 + slot) * 128 + self.config.track_fx.slot_kind(bank, slot).ui_tag()
             }
         });
         [
@@ -608,10 +683,17 @@ impl MyApp {
             self.editor.expanded as u64,
             self.editor.page as u64,
             target as u64,
-            self.help_open as u64,
+            self.help_open as u64
+                | ((self.shortcut_editor.open as u64) << 1)
+                | ((self.master_fx_open as u64) << 2),
             self.help_tab as u64,
             self.replay_browser as u64,
-            self.player_open as u64,
+            self.player_open as u64
+                | ((self
+                    .replay_panel
+                    .as_ref()
+                    .is_some_and(|panel| panel.modal_open()) as u64)
+                    << 1),
             self.draft.is_some() as u64,
             self.show_save_prompt as u64,
             self.project_name_mode.is_some() as u64,
@@ -627,6 +709,8 @@ impl MyApp {
         self.focus_request = self.focus != Focus::Performance
             && !self.show_save_prompt
             && !self.help_open
+            && !self.shortcut_editor.open
+            && !self.master_fx_open
             && !self.player_open
             && !self.replay_browser;
     }
@@ -644,6 +728,7 @@ impl MyApp {
             self.focus_panel(ctx, Focus::Performance);
         }
         let lang = self.language;
+        self.shortcuts.install_hints(ctx);
         ui::theme::set_palette(ctx, self.theme);
         self.language.apply(ctx);
         #[cfg(debug_assertions)]
@@ -677,16 +762,22 @@ impl MyApp {
             if self.visualizer_enabled {
                 ui::visualizer::draw(ui, &self.view.output_spectrum);
             }
-            ui.set_enabled(!self.show_save_prompt);
+            ui.set_enabled(
+                !self.show_save_prompt && !self.shortcut_editor.open && !self.master_fx_open,
+            );
             match self.app_state {
-                AppState::Init => ui::init::draw_init(ui, self),
                 _ if self.player_open => ui::replay_panel::draw(ui, self),
+                AppState::Init => ui::init::draw_init(ui, self),
                 _ => ui::performance::draw(ui, self),
             }
         });
-        ui::help::draw(ctx, self);
-        ui::replays::draw(ctx, self);
-        ui::calibration::draw(ctx, self);
+        if !self.show_save_prompt {
+            ui::help::draw(ctx, self);
+            ui::replays::draw(ctx, self);
+            ui::calibration::draw(ctx, self);
+            ui::shortcuts::draw(ctx, self);
+            ui::audio_fx_panel::draw_master(ctx, self);
+        }
         if self.show_save_prompt {
             let title = if matches!(self.pending_exit, Some(PendingExit::CloseWindow)) {
                 lang.choose("Save before closing RC505 RS", "关闭 RC505 RS 前保存")

@@ -24,6 +24,8 @@ pub struct RollDspState {
     mix: f32,
     sample_rate: f32,
     fade_coefficient: f32,
+    feedback_key: Option<(u32, usize)>,
+    feedback_gain: f32,
 }
 impl RollDspState {
     pub fn new() -> Self {
@@ -44,6 +46,7 @@ impl RollDspState {
         self.frozen = false;
         self.mix = 0.0;
         self.filled = 0;
+        self.feedback_key = None;
     }
 }
 pub fn process_frame(
@@ -87,7 +90,14 @@ pub fn process_frame(
     }
     let feedback = p.feedback.clamp(0.0, 1.0);
     let gain = if step == 1 && p.mode == RollMode::Roll1 {
-        feedback.powf(state.cycles as f32)
+        // Only the repeat boundary or an actual feedback change alters this
+        // gain; avoid a transcendental operation for every stereo sample.
+        let key = (feedback.to_bits(), state.cycles);
+        if state.feedback_key != Some(key) {
+            state.feedback_gain = feedback.powf(state.cycles as f32);
+            state.feedback_key = Some(key);
+        }
+        state.feedback_gain
     } else {
         1.0
     };
@@ -182,5 +192,43 @@ mod tests {
             output = process_frame(&mut state, p, true, 0.0, 0.0);
         }
         assert!(output.0.abs() < 1e-5 && output.1.abs() < 1e-5);
+    }
+    #[test]
+    fn feedback_changes_apply_inside_cycle_and_tiny_slices_remain_bounded() {
+        let mut state = RollDspState::new();
+        state.prepare(48_000.0);
+        let mut p = RollParams {
+            step: 1,
+            time_ms: 50.0,
+            mode: RollMode::Roll1,
+            feedback: 1.0,
+            ..params()
+        };
+        for _ in 0..4800 {
+            process_frame(&mut state, p, false, 0.4, -0.2);
+        }
+        for _ in 0..5000 {
+            process_frame(&mut state, p, true, 0.0, 0.0);
+        }
+        assert_eq!(state.cycles, 2);
+        p.feedback = 0.5;
+        let (l, r) = process_frame(&mut state, p, true, 0.0, 0.0);
+        assert!((l - 0.1).abs() < 1e-5 && (r + 0.05).abs() < 1e-5);
+        p.feedback = 0.8;
+        let (l, r) = process_frame(&mut state, p, true, 0.0, 0.0);
+        assert!((l - 0.256).abs() < 1e-5 && (r + 0.128).abs() < 1e-5);
+        let allocations = crate::test_alloc::count(|| {
+            state.reset();
+            let p = RollParams {
+                step: 16,
+                time_ms: 1.0,
+                ..p
+            };
+            for _ in 0..10000 {
+                let (l, r) = process_frame(&mut state, p, true, 0.9, -0.9);
+                assert!(l.is_finite() && r.is_finite() && l.abs() <= 1.0 && r.abs() <= 1.0);
+            }
+        });
+        assert_eq!(allocations, 0);
     }
 }

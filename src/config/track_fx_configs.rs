@@ -6,6 +6,8 @@ pub const TRACK_FX_BANK_COUNT: usize = 4;
 pub const TRACK_FX_SLOT_COUNT: usize = 4;
 
 pub enum TrackFx {
+    Vocoder(super::vocoder_configs::VocoderConfigs),
+    Audio(super::audio_fx::AudioFxConfig),
     Delay(TrackDelayConfigs),
     Roll(RollConfigs),
     Filter(TrackFilterConfigs),
@@ -13,10 +15,40 @@ pub enum TrackFx {
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum TrackFxKind {
+    Vocoder,
+    Audio(super::audio_fx::AudioFxKind),
     None,
     Delay,
     Roll,
     Filter,
+}
+impl TrackFxKind {
+    pub fn ui_tag(self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::Delay => 1,
+            Self::Roll => 2,
+            Self::Filter => 3,
+            Self::Vocoder => 4,
+            Self::Audio(kind) => 32 + kind as usize,
+        }
+    }
+    pub fn available() -> Vec<Self> {
+        let mut kinds = vec![
+            Self::None,
+            Self::Delay,
+            Self::Roll,
+            Self::Filter,
+            Self::Vocoder,
+        ];
+        kinds.extend(
+            super::audio_fx::AudioFxKind::ALL
+                .into_iter()
+                .filter(|k| *k != super::audio_fx::AudioFxKind::Delay)
+                .map(Self::Audio),
+        );
+        kinds
+    }
 }
 
 pub struct TrackFxSlot {
@@ -30,6 +62,12 @@ impl TrackFxSlot {
 
     pub fn set_kind(&mut self, kind: TrackFxKind) {
         self.fx = match kind {
+            TrackFxKind::Vocoder => Some(TrackFx::Vocoder(
+                super::vocoder_configs::VocoderConfigs::new(),
+            )),
+            TrackFxKind::Audio(kind) => {
+                Some(TrackFx::Audio(super::audio_fx::AudioFxConfig::new(kind)))
+            }
             TrackFxKind::None => None,
             TrackFxKind::Delay => Some(TrackFx::Delay(TrackDelayConfigs::new())),
             TrackFxKind::Roll => Some(TrackFx::Roll(RollConfigs::new())),
@@ -39,6 +77,8 @@ impl TrackFxSlot {
 
     pub fn kind(&self) -> TrackFxKind {
         match self.fx {
+            Some(TrackFx::Vocoder(_)) => TrackFxKind::Vocoder,
+            Some(TrackFx::Audio(ref fx)) => TrackFxKind::Audio(fx.kind),
             None => TrackFxKind::None,
             Some(TrackFx::Delay(_)) => TrackFxKind::Delay,
             Some(TrackFx::Roll(_)) => TrackFxKind::Roll,
@@ -73,7 +113,7 @@ impl TrackFxTrackState {
 }
 
 pub struct TrackFxConfigs {
-    pub banks: [TrackFxBank; TRACK_FX_BANK_COUNT],
+    pub banks: Vec<TrackFxBank>,
     pub tracks: Vec<TrackFxTrackState>,
     pub sel_bank_idx: usize,
 }
@@ -82,7 +122,9 @@ impl TrackFxConfigs {
     pub fn new(track_count: usize) -> Self {
         let safe_count = track_count.max(1);
         Self {
-            banks: std::array::from_fn(TrackFxBank::new_with_preset),
+            banks: (0..TRACK_FX_BANK_COUNT)
+                .map(TrackFxBank::new_with_preset)
+                .collect(),
             tracks: (0..safe_count).map(|_| TrackFxTrackState::new()).collect(),
             sel_bank_idx: 0,
         }
@@ -130,17 +172,9 @@ impl TrackFxConfigs {
 
     pub fn cycle_slot_kind(&mut self, bank_idx: usize, slot_idx: usize, dir: i32) {
         let current = self.slot_kind(bank_idx, slot_idx);
-        let next = match (current, dir.signum()) {
-            (TrackFxKind::Delay, 1) => TrackFxKind::Roll,
-            (TrackFxKind::Roll, 1) => TrackFxKind::Filter,
-            (TrackFxKind::Filter, 1) => TrackFxKind::None,
-            (TrackFxKind::None, 1) => TrackFxKind::Delay,
-            (TrackFxKind::Delay, -1) => TrackFxKind::None,
-            (TrackFxKind::Roll, -1) => TrackFxKind::Delay,
-            (TrackFxKind::Filter, -1) => TrackFxKind::Roll,
-            (TrackFxKind::None, -1) => TrackFxKind::Filter,
-            (_, _) => current,
-        };
+        let kinds = TrackFxKind::available();
+        let index = kinds.iter().position(|k| *k == current).unwrap_or(0);
+        let next = kinds[(index as i32 + dir.signum()).rem_euclid(kinds.len() as i32) as usize];
         self.set_slot_kind(bank_idx, slot_idx, next);
     }
 

@@ -17,20 +17,30 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const RENDERER_VERSION: u32 = 3;
+pub const RENDERER_VERSION: u32 = 4;
+mod assets;
+mod delta;
+pub mod library;
+pub mod streaming;
 pub mod visuals;
 pub use visuals::{ConfigPoint, ReplayVisuals, VisualFrame};
 pub const MAX_TAKE_SECONDS: u64 = 1800;
+const MAX_EVENTS: u64 = 100_000;
+const MAX_LOG_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_EVENT_BYTES: usize = 64_000_000;
 #[derive(Clone, Serialize, Deserialize)]
 pub enum EventKind {
     Action(Action),
     Config(ProjectData),
+    ConfigDelta(delta::ConfigDelta),
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Event {
     pub frame: u64,
     pub sequence: u64,
     pub kind: EventKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sample_assets: Vec<assets::SampleReference>,
 }
 #[derive(Serialize, Deserialize)]
 pub struct ReplayInfo {
@@ -52,7 +62,10 @@ pub struct Writer {
     input: hound::WavWriter<BufWriter<fs::File>>,
     events: BufWriter<fs::File>,
     next_sequence: u64,
+    event_bytes: u64,
     initial: Option<std::thread::JoinHandle<Result<()>>>,
+    assets: assets::AssetWriter,
+    config_state: delta::State,
 }
 impl Writer {
     pub fn begin(
@@ -90,7 +103,10 @@ impl Writer {
             input,
             events,
             next_sequence: 0,
+            event_bytes: 0,
             initial: Some(initial),
+            assets: assets::AssetWriter::default(),
+            config_state: delta::State::default(),
         })
     }
     pub fn audio(&mut self, at: u64, frames: &[[f32; 2]]) -> Result<()> {
@@ -112,15 +128,34 @@ impl Writer {
     }
     pub fn event(&mut self, frame: u64, kind: EventKind) -> Result<()> {
         ensure!(frame >= self.origin, "Invalid replay timestamp");
-        serde_json::to_writer(
-            &mut self.events,
-            &Event {
-                frame: frame - self.origin,
-                sequence: self.next_sequence,
-                kind,
-            },
-        )?;
+        ensure!(
+            self.next_sequence < MAX_EVENTS,
+            "Replay exceeds the 100,000 operation limit"
+        );
+        let (kind, sample_assets) = match kind {
+            EventKind::Config(mut data) => {
+                let refs = self.assets.detach(&self.root, &mut data)?;
+                self.config_state.encode(data, refs)?
+            }
+            EventKind::Action(action) => (EventKind::Action(action), Vec::new()),
+            EventKind::ConfigDelta(_) => {
+                anyhow::bail!("Only the replay writer may create configuration deltas")
+            }
+        };
+        let bytes = serde_json::to_vec(&Event {
+            frame: frame - self.origin,
+            sequence: self.next_sequence,
+            kind,
+            sample_assets,
+        })?;
+        ensure!(bytes.len() <= MAX_EVENT_BYTES, "Replay event is too large");
+        ensure!(
+            self.event_bytes + bytes.len() as u64 + 1 <= MAX_LOG_BYTES,
+            "Replay event log exceeds the 512 MiB limit"
+        );
+        self.events.write_all(&bytes)?;
         self.events.write_all(b"\n")?;
+        self.event_bytes += bytes.len() as u64 + 1;
         self.next_sequence += 1;
         Ok(())
     }
@@ -155,7 +190,7 @@ impl Writer {
 pub fn info(root: &Path) -> Result<ReplayInfo> {
     let value: ReplayInfo = serde_json::from_slice(&fs::read(root.join("replay.json"))?)?;
     ensure!(
-        value.version == 1 && (value.renderer == 2 || value.renderer == RENDERER_VERSION),
+        value.version == 1 && (2..=RENDERER_VERSION).contains(&value.renderer),
         "Replay requires renderer version {}",
         value.renderer
     );
@@ -179,102 +214,15 @@ pub fn save_as(root: &Path, name: &str) -> Result<PathBuf> {
     fs::rename(root, &destination)?;
     Ok(destination)
 }
-pub fn list(entry: &crate::project::ProjectEntry) -> Vec<(PathBuf, String)> {
-    let Ok(root) = session::project_assets(entry) else {
-        return Vec::new();
-    };
-    let Ok(entries) = fs::read_dir(root.join("replays")) else {
-        return Vec::new();
-    };
-    let mut result: Vec<_> = entries
-        .flatten()
-        .filter_map(|e| info(&e.path()).ok().map(|v| (e.path(), v.name)))
-        .collect();
-    result.sort_by(|a, b| a.0.cmp(&b.0));
-    result
-}
-
-/// Rename a managed replay into a recoverable trash directory. No recursive
-/// deletion, arbitrary external-folder move or project-identity substitution.
-pub fn trash(entry: &crate::project::ProjectEntry, source: &Path) -> Result<()> {
-    let assets = session::project_assets(entry)?;
-    trash_in(&assets, source, &entry.file)
-}
-fn trash_in(assets: &Path, source: &Path, project_id: &str) -> Result<()> {
-    let assets = fs::canonicalize(assets)?;
-    let parent = fs::canonicalize(assets.join("replays"))?;
-    ensure!(
-        parent.starts_with(&assets),
-        "Replay directory escaped project assets"
-    );
-    ensure!(
-        !fs::symlink_metadata(source)?.file_type().is_symlink(),
-        "Linked replay folders cannot be deleted"
-    );
-    let source = fs::canonicalize(source)?;
-    ensure!(
-        source.parent() == Some(parent.as_path()),
-        "Only this project's replay library can be deleted"
-    );
-    ensure!(
-        info(&source)?.project_id == project_id,
-        "Replay belongs to another project"
-    );
-    let trash = assets.join("replay-trash");
-    fs::create_dir_all(&trash)?;
-    let trash = fs::canonicalize(trash)?;
-    ensure!(
-        trash.starts_with(&assets),
-        "Trash directory escaped project assets"
-    );
-    fs::rename(source, trash.join(session::id()))?;
-    Ok(())
-}
-pub fn restore_last(entry: &crate::project::ProjectEntry) -> Result<bool> {
-    restore_in(&session::project_assets(entry)?, &entry.file)
-}
-fn restore_in(assets: &Path, project_id: &str) -> Result<bool> {
-    let assets = fs::canonicalize(assets)?;
-    let trash = assets.join("replay-trash");
-    if !trash.exists() {
-        return Ok(false);
-    }
-    let trash = fs::canonicalize(trash)?;
-    ensure!(
-        trash.starts_with(&assets),
-        "Trash directory escaped project assets"
-    );
-    let mut items = fs::read_dir(trash)?
-        .filter_map(Result::ok)
-        .filter(|e| {
-            e.file_type().is_ok_and(|t| t.is_dir() && !t.is_symlink())
-                && info(&e.path()).is_ok_and(|m| m.project_id == project_id)
-        })
-        .collect::<Vec<_>>();
-    items.sort_by_key(|e| e.file_name());
-    let Some(item) = items.pop() else {
-        return Ok(false);
-    };
-    let parent = assets.join("replays");
-    fs::create_dir_all(&parent)?;
-    let parent = fs::canonicalize(parent)?;
-    ensure!(
-        parent.starts_with(&assets),
-        "Replay directory escaped project assets"
-    );
-    fs::rename(
-        item.path(),
-        parent.join(format!("take-restored-{}", session::id())),
-    )?;
-    Ok(true)
-}
-
 pub struct RenderResult {
     pub visuals: std::sync::Arc<ReplayVisuals>,
-    pub project_id: String,
     pub name: String,
     pub snapshot: AudioSnapshot,
     pub config: ProjectData,
+    pub wav: PathBuf,
+}
+pub struct Exported {
+    pub name: String,
     pub wav: PathBuf,
 }
 
@@ -285,6 +233,29 @@ pub fn render(
     destination: &Path,
     progress: &std::sync::atomic::AtomicU64,
 ) -> Result<RenderResult> {
+    render_impl(root, destination, progress, true)
+}
+pub fn export(
+    root: &Path,
+    destination: &Path,
+    progress: &std::sync::atomic::AtomicU64,
+) -> Result<Exported> {
+    let rendered = render_impl(root, destination, progress, false)?;
+    Ok(Exported {
+        name: rendered.name,
+        wav: rendered.wav,
+    })
+}
+fn render_impl(
+    root: &Path,
+    destination: &Path,
+    progress: &std::sync::atomic::AtomicU64,
+    capture_visuals: bool,
+) -> Result<RenderResult> {
+    ensure!(
+        !destination.exists(),
+        "Export already exists; choose a new name"
+    );
     let metadata = info(root)?;
     ensure!(
         session::checksum(&root.join("input.wav"))? == metadata.input_sha256,
@@ -313,9 +284,11 @@ pub fn render(
         name: metadata.name.clone(),
         sample_rate: metadata.sample_rate,
         frames: metadata.frames,
-        views: Vec::with_capacity(
-            (metadata.frames / (metadata.sample_rate as u64 / 30).max(1) + 2) as usize,
-        ),
+        views: Vec::with_capacity(if capture_visuals {
+            (metadata.frames / (metadata.sample_rate as u64 / 30).max(1) + 2) as usize
+        } else {
+            0
+        }),
         initial: data.clone(),
         configs: Vec::new(),
     };
@@ -329,19 +302,37 @@ pub fn render(
     let mut samples = input.samples::<f32>();
     let mut lines = BufReader::new(fs::File::open(root.join("events.jsonl"))?).lines();
     let mut expected = 0;
+    let mut assets = assets::AssetReader::new(root);
+    let mut config_state = delta::State::default();
     let mut next = next_event(&mut lines, expected)?;
     let temporary = destination.with_extension(format!("{}.pending.wav", session::id()));
+    struct PendingWav(PathBuf);
+    impl Drop for PendingWav {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+    let _pending_cleanup = PendingWav(temporary.clone());
     let mut output = hound::WavWriter::create(&temporary, session::wav_spec(metadata.sample_rate))?;
     for frame in 0..metadata.frames {
         while next.as_ref().is_some_and(|event| event.frame == frame) {
             let event = next.take().unwrap();
-            match event.kind {
+            match &event.kind {
                 EventKind::Action(action) => {
-                    core.action(action, &mut OfflinePages);
-                    last_action = Some((frame, action));
+                    ensure!(
+                        event.sample_assets.is_empty(),
+                        "Action events cannot reference samples"
+                    );
+                    core.action(*action, &mut OfflinePages);
+                    last_action = Some((frame, *action));
                 }
-                EventKind::Config(value) => {
-                    visuals.configs.push(ConfigPoint::new(frame, &data, &value));
+                EventKind::Config(_) | EventKind::ConfigDelta(_) => {
+                    let value = config_state
+                        .apply(&event, &mut assets)?
+                        .context("Missing replay config")?;
+                    if capture_visuals {
+                        visuals.configs.push(ConfigPoint::new(frame, &data, &value));
+                    }
                     data = value;
                     crate::project::apply_data_to_config(&mut config, data.clone());
                     core.configure(&mut Parameters::from_config(&config, metadata.sample_rate));
@@ -360,7 +351,7 @@ pub fn render(
         ];
         ensure!(dry.iter().all(|s| s.is_finite()), "Invalid replay sample");
         let wet = core.process(dry, &mut OfflinePages);
-        if frame % (metadata.sample_rate as u64 / 30).max(1) == 0 {
+        if capture_visuals && frame % (metadata.sample_rate as u64 / 30).max(1) == 0 {
             visuals.views.push(VisualFrame {
                 frame,
                 view: core.view(),
@@ -380,15 +371,24 @@ pub fn render(
             event.frame == metadata.frames,
             "Replay command lies beyond its audio"
         );
-        match event.kind {
+        match &event.kind {
             EventKind::Action(action) => {
-                core.action(action, &mut OfflinePages);
-                last_action = Some((metadata.frames, action));
+                ensure!(
+                    event.sample_assets.is_empty(),
+                    "Action events cannot reference samples"
+                );
+                core.action(*action, &mut OfflinePages);
+                last_action = Some((metadata.frames, *action));
             }
-            EventKind::Config(value) => {
-                visuals
-                    .configs
-                    .push(ConfigPoint::new(metadata.frames, &data, &value));
+            EventKind::Config(_) | EventKind::ConfigDelta(_) => {
+                let value = config_state
+                    .apply(&event, &mut assets)?
+                    .context("Missing replay config")?;
+                if capture_visuals {
+                    visuals
+                        .configs
+                        .push(ConfigPoint::new(metadata.frames, &data, &value));
+                }
                 data = value;
                 crate::project::apply_data_to_config(&mut config, data.clone());
                 core.configure(&mut Parameters::from_config(&config, metadata.sample_rate));
@@ -409,15 +409,16 @@ pub fn render(
     fs::rename(&temporary, destination)?;
     let mut snapshot = AudioSnapshot::empty(metadata.sample_rate);
     core.snapshot(&mut snapshot, &mut OfflinePages);
-    visuals.views.push(VisualFrame {
-        frame: metadata.frames,
-        view: core.view(),
-        last_action,
-    });
+    if capture_visuals {
+        visuals.views.push(VisualFrame {
+            frame: metadata.frames,
+            view: core.view(),
+            last_action,
+        });
+    }
     progress.store(metadata.frames, std::sync::atomic::Ordering::Relaxed);
     Ok(RenderResult {
         visuals: std::sync::Arc::new(visuals),
-        project_id: metadata.project_id,
         name: metadata.name,
         snapshot,
         config: data,
@@ -432,7 +433,10 @@ fn next_event(
         return Ok(None);
     };
     let line = line?;
-    ensure!(line.len() <= 2_000_000, "Replay event is too large");
+    ensure!(
+        sequence < MAX_EVENTS && line.len() <= MAX_EVENT_BYTES,
+        "Replay event count or size limit exceeded"
+    );
     let event: Event = serde_json::from_str(&line)?;
     ensure!(
         event.sequence == sequence,
@@ -446,53 +450,8 @@ mod tests {
     use super::*;
     use crate::config::{FxKind, TrackFxKind, track_options::Quantize};
     #[test]
-    fn replay_delete_restore_validates_ownership_and_preserves_exports() {
-        let assets = Path::new("var").join(format!("replay-trash-test-{}", session::id()));
-        let source = assets.join("replays/take-1");
-        fs::create_dir_all(&source).unwrap();
-        let info = ReplayInfo {
-            version: 1,
-            renderer: RENDERER_VERSION,
-            project_id: "example.json".into(),
-            name: "Bass".into(),
-            sample_rate: 48000,
-            frames: 0,
-            input_sha256: String::new(),
-            events_sha256: String::new(),
-            initial_sha256: String::new(),
-        };
-        fs::write(
-            source.join("replay.json"),
-            serde_json::to_vec(&info).unwrap(),
-        )
-        .unwrap();
-        fs::write(source.join("input.wav"), b"original input").unwrap();
-        fs::create_dir_all(assets.join("replays/exports")).unwrap();
-        fs::write(assets.join("replays/exports/export.wav"), b"export").unwrap();
-        assert!(trash_in(&assets, &source, "foreign.json").is_err());
-        assert!(source.exists());
-        assert!(trash_in(&assets, &assets, "example.json").is_err());
-        trash_in(&assets, &source, "example.json").unwrap();
-        assert!(!source.exists());
-        assert_eq!(
-            fs::read(assets.join("replays/exports/export.wav")).unwrap(),
-            b"export"
-        );
-        assert!(restore_in(&assets, "example.json").unwrap());
-        assert!(!restore_in(&assets, "example.json").unwrap());
-        let restored = fs::read_dir(assets.join("replays"))
-            .unwrap()
-            .flatten()
-            .find(|e| e.file_name().to_string_lossy().starts_with("take-restored"))
-            .unwrap();
-        assert_eq!(
-            fs::read(restored.path().join("input.wav")).unwrap(),
-            b"original input"
-        );
-    }
-    #[test]
     fn live_input_and_operations_reproduce_bit_exact_output_and_final_loops() {
-        for renderer in [2, RENDERER_VERSION] {
+        for renderer in [2, 3, RENDERER_VERSION] {
             check_renderer(renderer);
         }
     }
@@ -518,9 +477,29 @@ mod tests {
             &mut config.input_fx.banks[0].slots[1].fx
         {
             osc.threshold.value = 0;
+            if renderer >= 3 {
+                use crate::config::{
+                    note_configs::NoteOct,
+                    sequence_edit::{NoteEvent, PPQ},
+                };
+                osc.note.replace_events(
+                    PPQ * 4,
+                    &[48, 52, 55]
+                        .map(|pitch| NoteEvent::new(0, PPQ * 4, NoteOct::from_pitch_index(pitch))),
+                );
+            }
         }
         config.track_fx.set_slot_kind(0, 0, TrackFxKind::Delay);
         config.track_fx.tracks[0].enabled[0][0] = true;
+        config.track_fx.set_slot_kind(
+            0,
+            1,
+            TrackFxKind::Audio(crate::config::audio_fx::AudioFxKind::Transpose),
+        );
+        config.track_fx.tracks[0].enabled[0][1] = true;
+        if let Some(crate::config::TrackFx::Audio(fx)) = &mut config.track_fx.banks[0].slots[1].fx {
+            fx.semitones = 7.0;
+        }
         let mut core = RenderCore::new(8000);
         core.legacy_renderer(renderer == 2);
         core.configure(&mut Parameters::from_config(&config, 8000));
@@ -550,8 +529,40 @@ mod tests {
                 core.action(action, &mut OfflinePages);
                 writer.event(frame, EventKind::Action(action)).unwrap();
             }
-            if frame == 3100 {
-                config.track_levels[0] = 0.37;
+            if matches!(frame, 900 | 3100 | 3601) {
+                match frame {
+                    900 => config.input_thru = false,
+                    3100 => {
+                        config.track_levels[0] = 0.37;
+                        config.master_fx.compressor_enabled = true;
+                        config.master_fx.reverb_enabled = true;
+                        config.master_fx.compressor.threshold_db = -24.0;
+                        config.master_fx.compressor.ratio = 4.0;
+                        config.master_fx.reverb.mix = 0.19;
+                        if renderer >= 3 {
+                            if let Some(crate::config::InputFx::Oscillator(osc)) =
+                                &mut config.input_fx.banks[0].slots[1].fx
+                            {
+                                use crate::config::osc_configs::{
+                                    SampleAsset, SampleMode, Waveform,
+                                };
+                                osc.sample = Some(std::sync::Arc::new(SampleAsset::new(
+                                    "Replay sample".into(),
+                                    8000,
+                                    (0..2048).map(|i| (i as f32 * 0.12).sin() * 0.4).collect(),
+                                )));
+                                osc.waveform.value = Waveform::Sample;
+                                osc.sample_mode = SampleMode::Sampler;
+                                osc.lfo.enabled = true;
+                                osc.lfo.depth = 0.3;
+                            }
+                        }
+                    }
+                    _ => {
+                        config.input_thru = true;
+                        config.master_fx.compressor.threshold_db = -18.0;
+                    }
+                }
                 let data = crate::project::data_from_config(&config);
                 core.configure(&mut Parameters::from_config(&config, 8000));
                 writer.event(frame, EventKind::Config(data)).unwrap();
@@ -564,11 +575,18 @@ mod tests {
             live.push(core.process(dry, &mut OfflinePages));
         }
         writer.finish(6000).unwrap();
-        if renderer == 2 {
+        if renderer >= 3 {
+            assert_eq!(
+                fs::read_dir(root.join("samples")).unwrap().count(),
+                1,
+                "The same accepted sample across Config events is stored once"
+            );
+        }
+        if renderer != RENDERER_VERSION {
             let path = root.join("replay.json");
             let mut metadata: serde_json::Value =
                 serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-            metadata["renderer"] = 2.into();
+            metadata["renderer"] = renderer.into();
             fs::write(path, serde_json::to_vec(&metadata).unwrap()).unwrap();
         }
         let wav = root.join("rendered.wav");
@@ -604,7 +622,7 @@ mod tests {
             );
         }
         assert_eq!(result.snapshot.tracks[0].len, core.tracks[0].audio.len);
-        if renderer == RENDERER_VERSION {
+        if renderer >= 3 {
             assert_eq!(
                 result.snapshot.histories[0].undo.len,
                 core.tracks[0].history.undo.len

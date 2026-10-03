@@ -1,6 +1,7 @@
 pub(crate) mod config_type;
 
 pub mod app_config;
+pub mod audio_fx;
 pub mod beat_configs;
 pub mod delay_configs;
 pub mod envelope_configs;

@@ -2,7 +2,7 @@
 
 面向键盘演奏和鼠标音色编辑的五轨 Loop Station。使用 Rust、CPAL、egui，逐步参考 RC‑505mkII 的操作语义，同时提供钢琴卷帘和参数可视化。
 
-[English](README.md) · [下载安装包](https://github.com/Yishanka/RC505_RS/releases) · [详细操作手册](docs/USER_GUIDE_CN.md) · [安装与更新](docs/INSTALL_UPDATE_CN.md) · [规划](AGENTS/PLAN.md)
+[English](README.md) · [下载安装包](https://github.com/Yishanka/RC505_RS/releases) · [详细操作手册](docs/USER_GUIDE_CN.md) · [安装与更新](docs/INSTALL_UPDATE_CN.md) · [规划](docs/PLAN.md)
 
 ![演奏台](docs/images/performance.png)
 
@@ -12,7 +12,9 @@ Windows x64 安装包可以分别选择程序、数据、下载目录。数据�
 
 启动进入工程选择页。打开工程后，左侧 **Audio** 检查设备，顶栏设置 BPM。按 `1` 录音，再按结束并循环；播放时再按进入叠录，`Shift+1` 或 `F1` 停止。**Ctrl+Shift+S 保存 config 与音频 snapshot**；Ctrl+S 只保存config并保留上一份音频snapshot。
 
-| 操作 | 按键 |
+顶部 **键位** 可修改以下演奏与全局快捷键，支持两个绑定、冲突检查、取消绑定和恢复默认。表格列的是默认值；软件中的键帽与帮助显示实际配置。
+
+| 操作 | 默认按键 |
 |---|---|
 | 轨1–5录放/叠录/完成 | `1`–`5` |
 | 停止 / 全部开始或停止 | `Shift+1`–`Shift+5` 或 F1–F5 / `Space` |
@@ -25,6 +27,7 @@ Windows x64 安装包可以分别选择程序、数据、下载目录。数据�
 | 顶部 / 左面板 / 效果面板 | `F6` / `F7` / `F8` |
 | 返回演奏，再返回工程 / 帮助 | `Esc` / `F12` |
 | 录制回放 / 回放库 | `F9` / `F10` |
+| 静默录入 / 节拍器开关 | `J` / `K` |
 | 清空所选轨 | 长按 `Delete` 0.75 秒，或 350 ms 内双击 |
 
 推子短按0.5 dB，长按180 ms后逐渐加速；每轨速度1–60 dB/s。支持多键独立控制。参数/文本编辑与演奏键隔离，完整快捷键见内置帮助。
@@ -33,11 +36,12 @@ Windows x64 安装包可以分别选择程序、数据、下载目录。数据�
 
 - 五轨独立Reverse、One Shot、立即/loop结束/淡出停止、固定录音长度及量化；每轨最多 8 步录音/叠录/清空撤销与重做。
 - 后台保存32-bit float WAV、版本化快照和校验清单。工程重开保持config与音频，恢复为停止状态。
-- 回放记录原始输入与采样编号操作，运行同一DSP重算WAV；复现操作状态的临时回放面板、导入原工程或新工程；直接删除/恢复回放与工程。
+- 回放记录原始输入与采样编号操作，在临时演奏面板实时演算；工程首页提供全局回放库，可暂停、拖动，并将当前位置导入任意工程或新工程。仅主动导出才生成 WAV，导出文件也可删除。
 - 单一输出采样时钟、有界控制队列、分页音频和后台回收；输入时钟适配、欠载/回调耗时统计及物理回环补偿建议。
 - 顶部节拍器与音量、独立 FX 序列试听、后台 FFT 频谱背景；节拍器与试听不录入轨道或导出音频。
-- 固定布局快速面板；展开编辑器支持单声部钢琴卷帘、拖动/改长度、撤销、复制、移调、吸附、滤波响应和AHDSR图。
-- 已有FX：Oscillator、Filter、Reverb、MyDelay、Vocoder、Track Delay/Roll/Filter。可选旧分组顺序或Input FX槽位A→D；本版没有增加FX类型。
+- 固定布局快速面板；展开编辑器支持复音钢琴卷帘、力度、独立音色/乐句、滤波响应、可拖动 AHDSR 曲线和独立 LFO。OSC 提供单音、8/16 声部；MyDelay 合并为 OSC 的采样波形/采样音色。
+- 输入和轨道效果增加移调、电音修音、调式和声、失真、动态、均衡、八度、声像、左右延迟及调制类效果；主输出可用压缩与混响。具体覆盖与算法限制见[效果清单](docs/RC505_MK2_FX_CATALOG_CN.md)和[操作手册](docs/USER_GUIDE_CN.md)。新工程默认槽位 A→D，旧工程保留存档中的路由。
+- **静默录入**对应 Input Thru OFF：观众听不到正在录入的输入，但输入效果与轨道录音正常工作，已有循环仍播放；结束录音的行为不变。
 
 ![钢琴卷帘](docs/images/sequence.png)
 
@@ -58,7 +62,7 @@ cargo run --bin rc505_rs -- --offline --data-dir=var/development
 
 [架构](docs/ARCHITECTURE.md) · [验证](docs/VALIDATION.md) · [硬件对照](docs/RC505_REFERENCE.md) · [开发约定](AGENTS.md)
 
-待评审设计：[钢琴卷帘、预设与合成/采样音源](docs/DESIGN_SYNTH_SEQUENCER_CN.md) · [RC‑505mkII 完整 FX 清单及中文解释](docs/RC505_MK2_FX_CATALOG_CN.md)。这些是后续设计提案，不是当前版本已提供的功能。
+设计与实施边界：[钢琴卷帘、预设与合成/采样音源](docs/DESIGN_SYNTH_SEQUENCER_CN.md) · [RC‑505mkII 完整 FX 清单及中文解释](docs/RC505_MK2_FX_CATALOG_CN.md)。组合预设、Pitch Delay 不在实施范围内。
 
 顶部 **主题** 可选择薄荷绿、雾粉、橙红，图标保持不变；**中文 / EN** 可即时切换语言并记住设置。灰底键帽表示快捷键；`F6` 进入顶部栏。返回工程会先提示保存。
 
