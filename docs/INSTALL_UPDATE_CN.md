@@ -99,18 +99,19 @@ Windows x64使用[静态C运行库链接](https://doc.rust-lang.org/reference/li
 
 发布构建保持 `opt-level=3`，使用 Thin LTO、单一 codegen unit 和调试信息剥离；保留 panic 展开与故障日志，不使用禁用向量化的 `opt-level="z"`。这些设置影响编译/链接时间，实际体积比较见 [VALIDATION](VALIDATION.md)。[Cargo 官方构建配置](https://doc.rust-lang.org/cargo/reference/profiles.html)
 
-`target` 是开发编译缓存，不会装进用户的软件目录。需要释放空间时可在没有编译任务运行的情况下执行 `cargo clean`；它不删除源码和 `data`，下次构建会重新编译依赖。默认开发配置仍保留调试信息和增量编译，便于调试。
+`target` 是开发编译缓存，不会装进用户的软件目录。优先在没有编译任务运行时清理本项目的开发产物：`cargo clean --profile dev -p rc505_rs --dry-run --verbose` 先预览，确认后去掉 `--dry-run --verbose`。这会移除本项目的调试程序、测试和增量缓存，保留release程序及依赖缓存；本轮释放了10.5 GiB。需要全部重建时才用 `cargo clean`，它不删除源码和 `data`，但下次连依赖也需重编。默认开发配置仍保留调试信息和增量编译，便于调试。
 
 ```powershell
 # 先预览；只选择至少一天前、名称匹配已知测试/打包规则的临时产物
 ./scripts/clean-dev.ps1
 ./scripts/clean-dev.ps1 -Apply
 # 真正渲染隔离的离线界面（需要 Python 与 Pillow）；PNG 替代体积较大的 PPM
+cargo build --bins
 python scripts/preview-ui.py projects-small performance-small-rose shortcuts-small
 # 可选：同一源码比较原默认发布配置和当前配置，结束后保留当前release程序
 ./scripts/measure-release-size.ps1
 ```
 
-清理脚本保留 `var` 中的 PDF、视频、参考调研和工具目录；失败测试可暂留用于诊断。成功的安装测试、打包暂存与 UI 导航测试会自行清理。文档采用的截图放在 `docs/images`。
+清理脚本保留 `var` 中的 PDF、视频、参考调研和工具目录；失败测试可暂留用于诊断。成功的安装测试、打包暂存与 UI 导航测试会自行清理。文档采用的截图放在 `docs/images`。`--ui-preview` 的样本配置和自动截图仅编入调试构建，不用于正式安装版验收。
 
 成功打包后，开发目录 `dist` 只保留本次版本的安装器、便携包和校验清单；历史发布仍可从GitHub下载。这与安装版 `E:\installer` 的单份更新缓存是两套独立规则。
