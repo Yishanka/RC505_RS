@@ -135,7 +135,11 @@ fn osc_sample(waveform: Waveform, phase: f32, freq: f32, sample_rate: f32) -> (f
     let mut t = phase;
     let sample = match waveform {
         Waveform::Sine => (2.0 * std::f32::consts::PI * t).sin(),
-        Waveform::Vocal | Waveform::Sample => 0.0, // These sources belong to the unified voice engine.
+        Waveform::Vocal
+        | Waveform::Sample
+        | Waveform::Rect
+        | Waveform::DetuneSaw
+        | Waveform::VintageSaw => 0.0, // These sources belong to the unified voice engine.
         Waveform::Saw => {
             let mut v = 2.0 * t - 1.0;
             v -= poly_blep(t, dt);
@@ -189,6 +193,28 @@ pub use voice::{PolyOscRuntime, PolyOscState, process_poly_sample};
 
 /// Read the same prepared source table for the editor; called only by the UI.
 pub fn source_wave_preview(config: &crate::config::OscillatorConfigs) -> [f32; 400] {
+    if config.waveform.value == Waveform::DetuneSaw {
+        return std::array::from_fn(|i| {
+            let phase = i as f64 / 200.0;
+            (osc_sample(
+                Waveform::Saw,
+                (phase * DETUNE_DOWN).fract() as f32,
+                220.0 * DETUNE_DOWN as f32,
+                48000.0,
+            )
+            .0 + osc_sample(
+                Waveform::Saw,
+                (phase * DETUNE_UP + 0.25).fract() as f32,
+                220.0 * DETUNE_UP as f32,
+                48000.0,
+            )
+            .0) * 0.5
+        });
+    }
     let table = sample_tables::WaveBank::prepare(config);
     std::array::from_fn(|i| table.read((i as f64 / 200.0).fract(), 220.0, 48000.0))
 }
+
+// Fixed ±7-cent software detune, computed once as constants.
+pub(super) const DETUNE_DOWN: f64 = 0.9959648048147479;
+pub(super) const DETUNE_UP: f64 = 1.004051543955916;

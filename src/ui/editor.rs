@@ -20,6 +20,7 @@ pub enum EditorPage {
     Filter,
     FilterEnvelope,
     Modulation,
+    Automation,
 }
 
 pub struct EditorState {
@@ -27,6 +28,7 @@ pub struct EditorState {
     pub expanded: bool,
     pub page: EditorPage,
     pub piano: PianoRollState,
+    pub automation: super::automation::EditorState,
     pub preset_name: String,
     pub library_open: bool,
     pub clip_name: String,
@@ -35,6 +37,7 @@ pub struct EditorState {
     pub phrase_manager_open: bool,
     pub clips: Vec<String>,
     pub presets: Vec<String>,
+    pub candidate: Option<presets::SoundCandidate>,
     pub message: String,
 }
 
@@ -45,6 +48,7 @@ impl Default for EditorState {
             expanded: false,
             page: EditorPage::Sound,
             piano: PianoRollState::default(),
+            automation: Default::default(),
             preset_name: String::new(),
             library_open: false,
             clip_name: String::new(),
@@ -53,6 +57,7 @@ impl Default for EditorState {
             phrase_manager_open: false,
             clips: presets::list_clips(),
             presets: presets::list(),
+            candidate: None,
             message: String::new(),
         }
     }
@@ -60,6 +65,17 @@ impl Default for EditorState {
 
 impl EditorState {
     pub fn cycle_page(&mut self, config: &AppConfig, backward: bool) {
+        if self
+            .target
+            .is_some_and(|target| super::automation::family(config, target).is_some())
+        {
+            self.page = if self.page == EditorPage::Automation {
+                EditorPage::Sound
+            } else {
+                EditorPage::Automation
+            };
+            return;
+        }
         let synth = matches!(self.target,Some(FxTarget::Input{bank,slot}) if matches!(config.input_fx.banks[bank].slots[slot].fx,Some(InputFx::Oscillator(_)|InputFx::MyDelay(_))));
         if synth {
             let pages = [
@@ -80,8 +96,10 @@ impl EditorState {
     pub fn select(&mut self, target: FxTarget) {
         if self.target != Some(target) {
             self.piano.reset_history();
+            self.automation.reset();
             self.page = EditorPage::Sound;
             self.message.clear();
+            self.candidate = None;
         }
         self.target = Some(target);
     }
@@ -156,7 +174,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
 
         });
         if full {
-            theme::caption(ui,lang.choose("Tab: next control · Arrows: adjust · Enter: type", "Tab 换参数 · 方向键调整 · Enter 输入"));
+            theme::caption(ui,lang.choose("↑↓ / Tab: select · ←→: adjust · Enter: type", "↑↓ / Tab 选参数 · ←→ 调值 · Enter 输入"));
         }
         let active = match target { FxTarget::Input{bank,..}=>bank==app.config.input_fx.sel_bank_idx, FxTarget::Track{bank,..}=>bank==app.config.track_fx.sel_bank_idx };
         if !active {
@@ -168,29 +186,53 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
         if full && app.editor.library_open {
             theme::control_row(ui, |ui| {
                 ui.label(lang.choose("Sound preset", "音色预设"));
-                ui.add(egui::TextEdit::singleline(&mut app.editor.preset_name).hint_text(lang.text("Name for a new preset")).desired_width(180.0));
-                if ui.button(lang.text("Save as new")).clicked() {
+                let name_field=super::navigation::text(ui.add(egui::TextEdit::singleline(&mut app.editor.preset_name).hint_text(lang.text("Name for a new preset")).desired_width(180.0)));
+                #[cfg(debug_assertions)]
+                ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new("preset-name-field"),name_field.id));
+                #[cfg(not(debug_assertions))]
+                let _ = name_field;
+                if super::navigation::button(ui,lang.text("Save as new")).clicked() {
                     app.editor.message = match presets::save(&app.config, target, &app.editor.preset_name) {
                         Ok(()) => { app.editor.presets = presets::list(); lang.text("Preset saved").into() }, Err(e) => e.to_string()
                     };
                 }
-                egui::ComboBox::from_id_source("load_preset").selected_text(lang.text("Load preset…")).show_ui(ui, |ui| {
+                let response=egui::ComboBox::from_id_source("load_preset").selected_text(lang.choose("Browse sounds…","浏览候选音色…")).show_ui(ui, |ui| {
                     for name in app.editor.presets.clone() {
                         if ui.selectable_label(false, &name).clicked() {
-                            app.editor.message = match presets::load(&mut app.config, target, &name) {
-                                Ok(()) => { format!("Loaded {name}") }, Err(e) => e.to_string()
-                            };
+                            app.choose_preset_candidate(target,&name);
                         }
                     }
-                });
+                });super::navigation::register(response.response);
             });
+            if let Some(candidate)=&app.editor.candidate {
+                let name=candidate.name.clone();let source=candidate.source;let kind=candidate.kind;
+                theme::card().show(ui,|ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(format!("{} · {} · {name}",lang.choose("Candidate sound","候选音色"),lang.text(kind))).strong()).truncate(true));
+                    theme::control_row(ui,|ui| {
+                        let reason=app.candidate_audition_reason();let playing=app.previewing&&app.candidate_audition;
+                        let response=super::navigation::register(ui.add_enabled(playing||reason.is_none(),egui::Button::new(lang.choose(if playing{"Stop candidate preview"}else{"Preview candidate"},if playing{"停止候选试听"}else{"试听候选"}))));
+                        if response.clicked(){app.toggle_candidate_audition();}
+                        if let Some(reason)=reason {response.on_disabled_hover_text(lang.text(reason));}
+                        if super::navigation::button(ui,lang.choose("Apply this sound","应用此音色")).clicked(){app.apply_preset_candidate();}
+                        if super::navigation::button(ui,lang.choose("Cancel candidate","取消候选")).clicked(){app.cancel_preset_candidate();}
+                    });
+                    theme::caption(ui,match source {
+                        presets::CandidateSource::Phrase=>lang.choose("Uses the current phrase; the live patch stays unchanged until Apply.","使用当前乐句试听；点击应用前，正式音色保持不变。"),
+                        presets::CandidateSource::SingleNote=>lang.choose("No phrase: preview a short C4 note only.","没有乐句：仅试听一个 C4 短音，不写入工程。"),
+                        presets::CandidateSource::LiveInput=>lang.choose("Live input → candidate FX. Audio is required; this is not a sequence preview.","实时输入 → 候选效果；需要输入声音，不是序列试听。"),
+                        presets::CandidateSource::TrackLoop=>lang.choose("Selected track audio → candidate FX; the recorded loop is unchanged.","所选轨道音频 → 候选效果；已录音频保持不变。"),
+                        presets::CandidateSource::Empty=>lang.choose("This preset clears the effect slot; there is no processor to preview.","此预设会清除效果类型，没有可试听的处理器。"),
+                    });
+                    theme::caption(ui,lang.choose("Candidate preview temporarily replaces monitoring. Stop or Cancel restores performance monitoring; preview audio is never recorded.","候选试听临时独立监听；停止或取消恢复演奏监听，试听声不会录入轨道或回放。"));
+                });
+            }
             if !app.editor.message.is_empty() { ui.label(&app.editor.message); }
             ui.separator();
         }
         if full && app.editor.library_open && presets::clip(&app.config,target).is_some() {
             theme::control_row(ui,|ui| {
                 ui.label(lang.choose("Phrase", "乐句"));
-                super::navigation::register(ui.add(egui::TextEdit::singleline(&mut app.editor.clip_name).hint_text(lang.choose("New phrase name", "新乐句名称")).desired_width(180.0)));
+                super::navigation::text(ui.add(egui::TextEdit::singleline(&mut app.editor.clip_name).hint_text(lang.choose("New phrase name", "新乐句名称")).desired_width(180.0)));
                 if super::navigation::button(ui,lang.choose("Save phrase", "保存乐句")).clicked() {
                     app.editor.message=match presets::save_clip(&app.config,target,&app.editor.clip_name) {
                         Ok(())=>{app.editor.clips=presets::list_clips();lang.choose("Phrase saved", "乐句已保存").into()},Err(e)=>e.to_string()
@@ -209,7 +251,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
         }
         ui.push_id(target.label(), |ui| {
             let changed = if full {header_kind_changed} else {kind_picker(ui, &mut app.config, target)};
-            if changed { app.editor.piano.reset_history(); app.editor.page = EditorPage::Sound; }
+            if changed { app.editor.piano.reset_history();app.editor.automation.reset(); app.editor.page = EditorPage::Sound; }
             let synth = matches!(target, FxTarget::Input { bank, slot } if matches!(app.config.input_fx.banks[bank].slots[slot].fx, Some(InputFx::Oscillator(_)|InputFx::MyDelay(_))));
             if full && synth {
                 theme::control_row(ui, |ui| {
@@ -224,6 +266,11 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
                 app.editor.page = EditorPage::Sequence; app.open_editor(ui.ctx());
             }
             let page = if full { app.editor.page } else { EditorPage::Sound };
+            if super::automation::family(&app.config,target).is_some(){
+                if full {theme::control_row(ui,|ui|{super::navigation::register(ui.selectable_value(&mut app.editor.page,EditorPage::Sound,lang.choose("Effect controls","效果参数")));super::navigation::register(ui.selectable_value(&mut app.editor.page,EditorPage::Automation,lang.choose("Parameter lane","参数自动化")));theme::keycap(ui,"Ctrl+Tab");});}
+                else if super::navigation::button(ui,lang.choose("Open parameter lane","打开参数自动化")).clicked(){app.editor.page=EditorPage::Automation;app.open_editor(ui.ctx());}
+                if full && app.editor.page==EditorPage::Automation {super::automation::draw(ui,&mut app.config,target,&mut app.editor.automation);return;}
+            }
             if full && synth && page==EditorPage::Sequence {super::phrases::draw(ui,app,target);}
             match target {
                 FxTarget::Input { bank, slot } => {
@@ -344,7 +391,7 @@ fn input_parameters(
                 });
             }
             EditorPage::Modulation => synth_controls::modulation(ui, osc),
-            EditorPage::Sound => synth_controls::sound(ui, osc, full),
+            EditorPage::Sound | EditorPage::Automation => synth_controls::sound(ui, osc, full),
         },
         InputFx::MyDelay(delay) => match page {
             EditorPage::Sequence => piano_roll::draw(ui, &mut delay.note, piano, beats),
@@ -360,7 +407,7 @@ fn input_parameters(
                     ),
                 );
             }
-            EditorPage::Sound => {
+            EditorPage::Sound | EditorPage::Automation => {
                 number(ui, &mut delay.level, 0, 100, false);
                 number(ui, &mut delay.threshold, 0, 100, false);
                 if full {

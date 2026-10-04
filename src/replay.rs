@@ -17,7 +17,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const RENDERER_VERSION: u32 = 5;
+// v6 pins sample generations for held/releasing voices and records parameter lanes.
+pub const RENDERER_VERSION: u32 = 6;
 mod assets;
 mod delta;
 pub mod library;

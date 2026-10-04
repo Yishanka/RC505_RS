@@ -96,6 +96,10 @@ const TRANSLATIONS: &[(&str, &str)] = &[
         "请先录入轨道音频，再试听步进滤波",
     ),
     (
+        "Record track audio before previewing this sound",
+        "请先录入轨道音频，再试听候选音色",
+    ),
+    (
         "Save the replay or keep it as a draft first",
         "请先保存回放或选择保留为草稿",
     ),
@@ -162,6 +166,10 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("Step", "步长"),
     ("Seq", "序列"),
     ("Waveform", "波形"),
+    ("OSC level (%)", "OSC 电平（%）"),
+    ("RECT (25%)", "矩形脉冲（25%）"),
+    ("Detune Saw", "双锯失谐"),
+    ("Vintage Saw", "暖化锯齿"),
     ("Vocal", "人声波形"),
     ("Sample", "采样"),
     (

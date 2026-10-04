@@ -20,6 +20,7 @@ pub struct PolyOscRuntime {
     pub note_revision: u64,
     pub voices: usize,
     pub input_gate: bool,
+    pub input_mod_gain: Option<f32>,
     pub lfos: [PreparedLfo; 2],
     pub mono_legato: bool,
     pub glide_ms: f32,
@@ -34,6 +35,35 @@ pub struct PolyOscRuntime {
     pub sample_start: f32,
     pub sample_end: f32,
     wave_bank: Arc<WaveBank>,
+    sample_material: Option<Arc<SampleMaterial>>,
+    // Moved out with the old runtime through the control envelope; dropped by
+    // the worker, never by a voice ending or being stolen in the callback.
+    retired_materials: [Option<Arc<SampleMaterial>>; MATERIAL_CAPACITY],
+}
+const MATERIAL_CAPACITY: usize = 17; // Sixteen held/releasing versions + current.
+#[derive(Clone)]
+struct SampleMaterial {
+    sample: Arc<SampleAsset>,
+    pyramid: Arc<SamplePyramid>,
+    wave_bank: Arc<WaveBank>,
+    mode: SampleMode,
+    root_frequency: f32,
+    loop_sample: bool,
+    start: f32,
+    end: f32,
+}
+impl SampleMaterial {
+    fn matches(&self, other: &Self) -> bool {
+        self.sample.content_hash == other.sample.content_hash
+            && self.sample.sample_rate == other.sample.sample_rate
+            && self.sample.frames.len() == other.sample.frames.len()
+            && self.mode == other.mode
+            && self.root_frequency == other.root_frequency
+            && self.loop_sample == other.loop_sample
+            && self.start == other.start
+            && self.end == other.end
+            && Arc::ptr_eq(&self.wave_bank, &other.wave_bank)
+    }
 }
 impl PolyOscRuntime {
     pub fn from_config(c: &crate::config::OscillatorConfigs) -> Self {
@@ -50,7 +80,29 @@ impl PolyOscRuntime {
             ^ c.sample_start.to_bits() as u64
             ^ ((c.sample_end.to_bits() as u64) << 32)
             ^ ((c.vocal_formant.to_bits() as u64) << 16);
+        let wave_bank = WaveBank::prepare(c);
+        let sample_pyramid = c.sample.as_ref().map(SamplePyramid::prepare);
+        let root_frequency =
+            NoteOct::from_pitch_index(c.sample_root).freq_hz() * 2.0f32.powf(fine_cents / 1200.0);
+        let sample_material =
+            c.sample
+                .as_ref()
+                .zip(sample_pyramid.as_ref())
+                .map(|(sample, pyramid)| {
+                    Arc::new(SampleMaterial {
+                        sample: sample.clone(),
+                        pyramid: pyramid.clone(),
+                        wave_bank: wave_bank.clone(),
+                        mode: c.sample_mode,
+                        root_frequency,
+                        loop_sample: c.sample_loop,
+                        start: c.sample_start,
+                        end: c.sample_end,
+                    })
+                });
         Self {
+            sample_material,
+            retired_materials: std::array::from_fn(|_| None),
             phrase: super::phrase::PhrasePlan::from_config(&c.note),
             schedule,
             tone_revision,
@@ -58,6 +110,10 @@ impl PolyOscRuntime {
             note_revision,
             voices: c.voices.clamp(1, 16),
             input_gate: c.input_gate,
+            input_mod_gain: c
+                .input_mod_sens
+                .filter(|v| v.is_finite())
+                .map(|v| 4.0 * 10.0f32.powf(v.clamp(-50.0, 50.0) * 0.48 / 20.0)),
             lfos,
             mono_legato: c.mono_legato,
             glide_ms: if c.glide_ms.is_finite() {
@@ -67,15 +123,14 @@ impl PolyOscRuntime {
             },
             glide_mode: c.glide_mode,
             sample: c.sample.clone(),
-            sample_pyramid: c.sample.as_ref().map(SamplePyramid::prepare),
+            sample_pyramid,
             capture: c.capture.clone(),
             sample_mode: c.sample_mode,
-            root_frequency: NoteOct::from_pitch_index(c.sample_root).freq_hz()
-                * 2.0f32.powf(fine_cents / 1200.0),
+            root_frequency,
             loop_sample: c.sample_loop,
             sample_start: c.sample_start,
             sample_end: c.sample_end,
-            wave_bank: WaveBank::prepare(c),
+            wave_bank,
         }
     }
 }
@@ -94,7 +149,10 @@ struct PolyVoice {
     gate: bool,
     active: bool,
     phase: f64,
+    detune_phase: f64,
     sample_pos: f64,
+    sample_slot: Option<u8>,
+    sample_source: bool,
     lfo_phase: [f64; 2],
     amp: AhdsrState,
     filter_env: AhdsrState,
@@ -163,7 +221,10 @@ impl PolyVoice {
             gate: false,
             active: false,
             phase: 0.0,
+            detune_phase: 0.25,
             sample_pos: 0.0,
+            sample_slot: None,
+            sample_source: false,
             lfo_phase: [0.0; 2],
             amp: AhdsrState::new(),
             filter_env: AhdsrState::new(),
@@ -188,6 +249,8 @@ pub struct PolyOscState {
     phrase: super::phrase::PhraseState,
     phrase_restart_pending: bool,
     voices: Box<[PolyVoice; 16]>,
+    materials: Box<[Option<Arc<SampleMaterial>>; MATERIAL_CAPACITY]>,
+    current_material: Option<u8>,
     tick: Option<u64>,
     age: u64,
     last_time: f64,
@@ -205,6 +268,7 @@ pub struct PolyOscState {
     transition_tail: f32,
     last_voice_limit: usize,
     level: f32,
+    input_mod_level: f32,
 }
 impl PolyOscState {
     pub fn phrase_view(&self) -> super::phrase::PhraseView {
@@ -221,6 +285,8 @@ impl PolyOscState {
             phrase: super::phrase::PhraseState::default(),
             phrase_restart_pending: false,
             voices: Box::new(std::array::from_fn(|_| PolyVoice::new())),
+            materials: Box::new(std::array::from_fn(|_| None)),
+            current_material: None,
             tick: None,
             age: 0,
             last_time: -1.0,
@@ -238,6 +304,7 @@ impl PolyOscState {
             transition_tail: 0.0,
             last_voice_limit: 0,
             level: -1.0,
+            input_mod_level: -1.0,
         }
     }
     pub fn reset(&mut self) {
@@ -250,8 +317,63 @@ impl PolyOscState {
         self.tick = None;
         self.last_time = -1.0;
         self.level = -1.0;
+        self.input_mod_level = -1.0;
         self.mono_voice = None;
         self.last_mono_frequency = None;
+    }
+    /// Call before exchanging a prepared runtime. Every released generation is
+    /// moved to the outgoing control payload; the audio callback never destroys
+    /// a last reference. The new runtime starts with an empty retirement array.
+    pub fn retire_materials(&mut self, outgoing: &mut PolyOscRuntime) {
+        for slot in 0..MATERIAL_CAPACITY {
+            if self
+                .voices
+                .iter()
+                .any(|v| v.active && v.sample_slot == Some(slot as u8))
+            {
+                continue;
+            }
+            let Some(free) = outgoing.retired_materials.iter_mut().find(|v| v.is_none()) else {
+                break;
+            };
+            if self.materials[slot].is_some() {
+                *free = self.materials[slot].take();
+                if self.current_material == Some(slot as u8) {
+                    self.current_material = None;
+                }
+            }
+        }
+    }
+    fn bind_material(&mut self, r: &PolyOscRuntime) -> Option<u8> {
+        let Some(material) = &r.sample_material else {
+            self.current_material = None;
+            return None;
+        };
+        if let Some(slot) = self.current_material {
+            if self.materials[slot as usize]
+                .as_ref()
+                .is_some_and(|old| Arc::ptr_eq(old, material) || old.matches(material))
+            {
+                return Some(slot as u8);
+            }
+        }
+        if let Some(slot) = self.materials.iter().position(|old| {
+            old.as_ref()
+                .is_some_and(|old| Arc::ptr_eq(old, material) || old.matches(material))
+        }) {
+            self.current_material = Some(slot as u8);
+            return Some(slot as u8);
+        }
+        let free = self.materials.iter().position(Option::is_none);
+        debug_assert!(
+            free.is_some(),
+            "Prepared runtime exchange must retire unused sample generations"
+        );
+        if let Some(slot) = free {
+            self.materials[slot] = Some(material.clone());
+            self.current_material = Some(slot as u8);
+        }
+        free.map(|slot| slot as u8)
     }
     pub fn capture(&mut self, r: &PolyOscRuntime, input: f32, sr: f32, threshold: f32) {
         use std::sync::atomic::Ordering;
@@ -332,6 +454,14 @@ pub fn process_poly_sample(
     }
     state.last_time = elapsed;
     state.last_running = running;
+    let target_input_mod = r
+        .input_mod_gain
+        .map_or(1.0, |gain| (p.input_level.max(0.0) * gain).clamp(0.0, 1.0));
+    if state.input_mod_level < 0.0 {
+        state.input_mod_level = target_input_mod;
+    } else {
+        state.input_mod_level += (target_input_mod - state.input_mod_level) / (0.005 * sr).max(1.0);
+    }
     let sample_hash = r.tone_revision;
     if state.last_voice_limit != r.voices {
         state.tick = None;
@@ -342,14 +472,20 @@ pub fn process_poly_sample(
     } else {
         state.level += (p.level - state.level) / (0.005 * sr).max(1.0);
     }
+    let current_material = if p.waveform == Waveform::Sample {
+        state.bind_material(r)
+    } else {
+        None
+    };
     if state.sample_identity != sample_hash {
         state.sample_identity = sample_hash;
-        state.transition_tail = state.last_output;
-        state.fade = 0.0;
-        for v in state.voices.iter_mut() {
-            v.sample_pos = 0.0;
-            v.sample_level = 0;
-            v.sample_limit = 1.0;
+        if p.waveform != Waveform::Sample
+            && !state.voices.iter().any(|v| v.active && v.sample_source)
+        {
+            state.transition_tail = state.last_output;
+            state.fade = 0.0;
+        }
+        for v in state.voices.iter_mut().filter(|v| !v.sample_source) {
             v.wave_limit = 0.0;
         }
     }
@@ -381,6 +517,8 @@ pub fn process_poly_sample(
                 schedule[boundary].connected,
                 cycle,
                 sr,
+                p.waveform == Waveform::Sample,
+                current_material,
             );
         } else {
             for v in state.voices.iter_mut() {
@@ -420,6 +558,8 @@ pub fn process_poly_sample(
                 let mut v = PolyVoice::new();
                 v.id = n.id;
                 v.cycle = cycle;
+                v.sample_source = p.waveform == Waveform::Sample;
+                v.sample_slot = current_material;
                 v.frequency = n.frequency;
                 v.target_frequency = n.frequency;
                 v.velocity = n.velocity;
@@ -495,23 +635,46 @@ pub fn process_poly_sample(
         let raw = if nyquist_gain <= 0.0 {
             0.0
         } else {
-            (match p.waveform {
-                Waveform::Sample => sample_voice(v, r, frequency, sr),
-                Waveform::Vocal | Waveform::Triangle => {
-                    r.wave_bank
-                        .read_transition(v.phase, v.wave_level, frequency / v.wave_limit)
+            (if v.sample_source {
+                v.sample_slot
+                    .and_then(|slot| state.materials[slot as usize].as_ref())
+                    .map_or(0.0, |material| sample_voice(v, material, frequency, sr))
+            } else {
+                match p.waveform {
+                    Waveform::Sample => 0.0,
+                    Waveform::DetuneSaw => {
+                        let down = frequency * super::DETUNE_DOWN as f32;
+                        let up = frequency * super::DETUNE_UP as f32;
+                        let low = osc_sample(Waveform::Saw, v.phase as f32, down, sr).0;
+                        let high = osc_sample(Waveform::Saw, v.detune_phase as f32, up, sr).0;
+                        (low + high * ((sr * 0.5 - up) / (sr * 0.05)).clamp(0.0, 1.0)) * 0.5
+                    }
+                    Waveform::Vocal
+                    | Waveform::Triangle
+                    | Waveform::Rect
+                    | Waveform::VintageSaw => {
+                        r.wave_bank
+                            .read_transition(v.phase, v.wave_level, frequency / v.wave_limit)
+                    }
+                    _ => osc_sample(p.waveform, v.phase as f32, frequency, sr).0,
                 }
-                _ => osc_sample(p.waveform, v.phase as f32, frequency, sr).0,
             }) * nyquist_gain
         };
-        v.phase = (v.phase + frequency as f64 / sr as f64).fract();
+        let detuned = !v.sample_source && p.waveform == Waveform::DetuneSaw;
+        v.phase = (v.phase
+            + frequency as f64 / sr as f64 * if detuned { super::DETUNE_DOWN } else { 1.0 })
+        .fract();
+        if detuned {
+            v.detune_phase =
+                (v.detune_phase + frequency as f64 / sr as f64 * super::DETUNE_UP).fract();
+        }
         let cutoff_env = v
             .filter_env
             .next(v.gate, false, p.filter_envelope, 1.0 / sr);
         let min = p.cutoff_min_hz.max(10.0);
         let max = p.filter.cutoff_hz.max(min);
         let volume = modulation.volume;
-        let dry = raw * amp * v.velocity * volume * state.level;
+        let dry = raw * amp * v.velocity * volume * state.level * state.input_mod_level;
         let mut sample = if p.filter.mix <= 0.0 {
             dry
         } else {
@@ -552,6 +715,8 @@ fn reconcile_mono(
     connected: bool,
     cycle: u64,
     sr: f32,
+    sample_source: bool,
+    sample_slot: Option<u8>,
 ) {
     let Some(n) = note else {
         for v in state.voices.iter_mut() {
@@ -592,6 +757,17 @@ fn reconcile_mono(
         v.cycle = cycle;
         v.gate = true;
         v.target_velocity = n.velocity;
+        if matching.is_none() && (v.sample_source != sample_source || v.sample_slot != sample_slot)
+        {
+            v.steal_tail = v.last_output;
+            v.steal_left = 64;
+            v.sample_source = sample_source;
+            v.sample_slot = sample_slot;
+            v.sample_pos = 0.0;
+            v.sample_level = 0;
+            v.sample_limit = 1.0;
+            v.wave_limit = 0.0;
+        }
         v.set_pitch(
             n.frequency,
             if tied || matching.is_some() {
@@ -605,6 +781,8 @@ fn reconcile_mono(
         state.age = state.age.wrapping_add(1);
         let mut voice = PolyVoice::new();
         voice.id = n.id;
+        voice.sample_source = sample_source;
+        voice.sample_slot = sample_slot;
         voice.cycle = cycle;
         voice.active = true;
         voice.gate = true;
@@ -630,19 +808,17 @@ pub fn sequence_tick(elapsed: f64, sample_rate: f32, bpm: usize) -> u64 {
         .min(u64::MAX as u128) as u64
 }
 
-fn sample_voice(v: &mut PolyVoice, r: &PolyOscRuntime, frequency: f32, sr: f32) -> f32 {
-    let Some(s) = &r.sample else {
-        return 0.0;
-    };
+fn sample_voice(v: &mut PolyVoice, r: &SampleMaterial, frequency: f32, sr: f32) -> f32 {
+    let s = &r.sample;
     if s.frames.len() < 4 {
         return 0.0;
     }
-    if r.sample_mode == SampleMode::Wavetable {
+    if r.mode == SampleMode::Wavetable {
         return r
             .wave_bank
             .read_transition(v.phase, v.wave_level, frequency / v.wave_limit);
     }
-    let (start, end) = sample_bounds(s.frames.len(), r.sample_start, r.sample_end);
+    let (start, end) = sample_bounds(s.frames.len(), r.start, r.end);
     let len = end - start;
     if v.sample_pos >= len as f64 && !r.loop_sample {
         return 0.0;
@@ -654,15 +830,14 @@ fn sample_voice(v: &mut PolyVoice, r: &PolyOscRuntime, frequency: f32, sr: f32) 
         v.sample_level = step.max(1.0).log2().ceil() as usize;
         v.sample_limit = (1usize << v.sample_level.min(31)) as f64;
     }
-    let (data, scale) = if let Some(pyramid) = &r.sample_pyramid {
+    let (data, scale) = {
+        let pyramid = &r.pyramid;
         let level = v.sample_level.min(pyramid.levels.len());
         if level > 0 {
             (&pyramid.levels[level - 1][..], (1usize << level) as f64)
         } else {
             (&s.frames[..], 1.0)
         }
-    } else {
-        (&s.frames[..], 1.0)
     };
     let low = (start as f64 / scale).floor() as usize;
     let high = ((end as f64 / scale).ceil() as usize)
@@ -683,7 +858,7 @@ fn sample_voice(v: &mut PolyVoice, r: &PolyOscRuntime, frequency: f32, sr: f32) 
 mod poly_tests {
     use super::*;
     use crate::config::{OscillatorConfigs, sequence_edit::NoteEvent};
-    fn params(sr: f32, waveform: Waveform) -> OscillatorFxParams {
+    pub(super) fn params(sr: f32, waveform: Waveform) -> OscillatorFxParams {
         OscillatorFxParams {
             waveform,
             level: 0.7,
@@ -1166,7 +1341,7 @@ mod poly_tests {
         for i in 0..4500 {
             let value = sample_voice(
                 &mut voice,
-                &runtime,
+                runtime.sample_material.as_ref().unwrap(),
                 NoteOct::from_pitch_index(60).freq_hz(),
                 48000.0,
             );
@@ -1625,3 +1800,11 @@ mod poly_tests {
         assert_eq!(osc.glide_mode, GlideMode::AllNotes);
     }
 }
+
+#[cfg(test)]
+#[path = "sample_lifetime_tests.rs"]
+mod sample_lifetime_tests;
+
+#[cfg(test)]
+#[path = "bot_controls_tests.rs"]
+mod bot_controls_tests;

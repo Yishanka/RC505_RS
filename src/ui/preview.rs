@@ -71,6 +71,18 @@ pub fn configure(app: &mut MyApp, mode: &str) {
                 })
                 .collect::<Vec<_>>(),
         );
+        if mode.starts_with("osc-bot") {
+            use crate::config::osc_configs::Waveform;
+            osc.waveform.value = if mode.contains("rect") {
+                Waveform::Rect
+            } else if mode.contains("vintage") {
+                Waveform::VintageSaw
+            } else {
+                Waveform::DetuneSaw
+            };
+            osc.input_mod_sens = Some(15.0);
+            osc.dry_level = 0.3;
+        }
         if mode.starts_with("poly") {
             use crate::config::{note_configs::NoteOct, sequence_edit::NoteEvent};
             osc.note.replace_events(
@@ -151,6 +163,7 @@ pub fn configure(app: &mut MyApp, mode: &str) {
     }
     app.editor.select(FxTarget::Input { bank: 0, slot: 0 });
     app.editor.expanded = !mode.starts_with("performance")
+        && !mode.contains("-quick")
         && !mode.starts_with("calibration")
         && !mode.starts_with("replays")
         && mode != "help";
@@ -177,7 +190,11 @@ pub fn configure(app: &mut MyApp, mode: &str) {
     }
     if mode.starts_with("audio-fx-") {
         use crate::config::audio_fx::AudioFxKind as K;
-        let kind = if mode.contains("electric") {
+        let kind = if mode.contains("distortion") {
+            K::Distortion
+        } else if mode.contains("dynamics") {
+            K::Dynamics
+        } else if mode.contains("electric") {
             K::Electric
         } else if mode.contains("panning") {
             K::PanningDelay
@@ -211,6 +228,10 @@ pub fn configure(app: &mut MyApp, mode: &str) {
             p.high_mid_db = 3.0;
             p.semitones = 7.0;
             p.pitch_sequence = kind == K::Transpose;
+            if kind == K::Dynamics {
+                p.dynamics_profile = crate::config::dynamics_profiles::DynamicsProfile::PhoneVox;
+                p.dynamics_amount = 4.0;
+            }
             if matches!(kind, K::Phaser | K::Flanger | K::AutoPan | K::Tremolo) {
                 p.mod_stepped = true;
                 p.mod_step_beats = 0.25;
@@ -268,6 +289,49 @@ pub fn configure(app: &mut MyApp, mode: &str) {
     } else {
         EditorPage::Sound
     };
+    if mode.starts_with("automation-") {
+        use crate::config::audio_fx::AudioFxKind;
+        use crate::config::automation::{Interpolation, ParameterLane, Target};
+        let (kind, target) = if mode.contains("delay") {
+            (FxKind::Audio(AudioFxKind::PanningDelay), Target::DelayTime)
+        } else if mode.contains("reverb") {
+            (FxKind::Reverb, Target::ReverbWet)
+        } else {
+            (FxKind::Filter, Target::FilterCutoff)
+        };
+        app.config.input_fx.set_slot_kind(0, 0, kind);
+        let mut lane = ParameterLane::create(target);
+        lane.enabled = true;
+        lane.interpolation = Interpolation::Curve;
+        lane.points[0].curve = -0.5;
+        lane.points[1].curve = 0.6;
+        app.config.input_fx.banks[0].slots[0].parameter_lane = lane;
+        app.editor.page = EditorPage::Automation;
+    }
+    if mode.starts_with("candidate-") {
+        let target = FxTarget::Input { bank: 0, slot: 0 };
+        let mut source = crate::config::AppConfig::new(120, 0, 5);
+        source.input_fx.set_slot_kind(
+            0,
+            0,
+            if mode.contains("audio") {
+                FxKind::Reverb
+            } else {
+                FxKind::Oscillator
+            },
+        );
+        let text = crate::presets::encode(&source, target).unwrap();
+        app.editor.candidate = Some(
+            crate::presets::SoundCandidate::from_text(
+                &app.config,
+                target,
+                "Warm room / 温暖空间".into(),
+                text,
+            )
+            .unwrap(),
+        );
+        app.editor.library_open = true;
+    }
     if mode.starts_with("playback") {
         let mut view = crate::engine::core::EngineView::default();
         view.running = true;

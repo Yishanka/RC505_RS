@@ -7,55 +7,20 @@ pub fn sound(ui: &mut egui::Ui, osc: &mut OscillatorConfigs, full: bool) {
     let lang = crate::app_support::language::Language::current(ui.ctx());
     osc.poll_sample();
     parameters::choice(ui, &mut osc.waveform);
-    parameters::number(ui, &mut osc.level, 0, 100, false);
-    ui.horizontal(|ui| {
-        ui.label(lang.choose("Voices", "声部"));
-        for (count, en, cn) in [
-            (1, "Mono", "单音"),
-            (8, "Poly 8", "复音 8"),
-            (16, "Poly 16", "复音 16"),
-        ] {
-            selectable_value(ui, &mut osc.voices, count, lang.choose(en, cn));
-        }
-    });
-    if full || osc.voices == 1 {
-        ui.add_enabled_ui(osc.voices == 1, |ui| {
-            checkbox(ui, &mut osc.mono_legato, lang.choose("Legato", "连奏"));
-            parameters::float(
-                ui,
-                &mut osc.glide_ms,
-                0.0,
-                2000.0,
-                0.1,
-                lang.choose("Glide (ms)", "滑音（ms）"),
-                true,
-            );
-            if osc.glide_ms > 0.0 {
-                parameters::selector(
-                    ui,
-                    "glide_mode",
-                    &mut osc.glide_mode,
-                    &[
-                        (
-                            GlideMode::Overlap,
-                            lang.choose("Overlapping notes", "重叠音符"),
-                        ),
-                        (GlideMode::AllNotes, lang.choose("All notes", "所有音符")),
-                    ],
-                );
-            }
+    if full {
+        ui.columns(2, |cols| {
+            parameters::number(&mut cols[0], &mut osc.level, 0, 100, false);
+            voice_count(&mut cols[0], osc);
+            mono_controls(&mut cols[0], osc);
+            input_controls(&mut cols[1], osc);
         });
-        if full {
-            theme::caption(ui,lang.choose("Legato keeps envelopes and LFO phase. Glide connects pitches over the chosen time.","连奏保持包络与 LFO 相位；滑音按设定时长连接音高。"));
+    } else {
+        parameters::number(ui, &mut osc.level, 0, 100, false);
+        input_controls(ui, osc);
+        voice_count(ui, osc);
+        if osc.voices == 1 {
+            mono_controls(ui, osc);
         }
-    }
-    checkbox(
-        ui,
-        &mut osc.input_gate,
-        lang.choose("Gate notes with live input", "用输入音量控制音符门控"),
-    );
-    if osc.input_gate || osc.waveform.value == Waveform::Sample {
-        parameters::number(ui, &mut osc.threshold, 0, 100, false);
     }
     if !full {
         if osc.waveform.value == Waveform::Sample && osc.sample.is_none() {
@@ -69,20 +34,14 @@ pub fn sound(ui: &mut egui::Ui, osc: &mut OscillatorConfigs, full: bool) {
         }
         return;
     }
-    theme::caption(
-        ui,
-        lang.choose(
-            "Changing the sound keeps your phrase. Mono preserves chord notes.",
-            "换音色不改乐句；单音模式保留和弦。",
-        ),
-    );
     if osc.waveform.value == Waveform::Vocal {
-        parameters::float(
+        parameters::float_with_keys(
             ui,
             &mut osc.vocal_formant,
             0.0,
             1.0,
             0.01,
+            0.05,
             lang.choose("Vowel A → I", "元音 A → I"),
             false,
         );
@@ -98,6 +57,109 @@ pub fn sound(ui: &mut egui::Ui, osc: &mut OscillatorConfigs, full: bool) {
         sample_controls(ui, osc);
     } else {
         waveform(ui, osc);
+    }
+}
+
+fn mono_controls(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
+    ui.add_enabled_ui(osc.voices == 1, |ui| {
+        checkbox(ui, &mut osc.mono_legato, lang.choose("Legato", "连奏")).on_hover_text(
+            lang.choose(
+                "Keep the envelope and LFO phase between overlapping notes.",
+                "重叠音符保持包络与 LFO 相位。",
+            ),
+        );
+        parameters::float(
+            ui,
+            &mut osc.glide_ms,
+            0.0,
+            2000.0,
+            0.1,
+            lang.choose("Glide (ms)", "滑音（ms）"),
+            true,
+        );
+        if osc.glide_ms > 0.0 {
+            parameters::selector(
+                ui,
+                "glide_mode",
+                &mut osc.glide_mode,
+                &[
+                    (
+                        GlideMode::Overlap,
+                        lang.choose("Overlapping notes", "重叠音符"),
+                    ),
+                    (GlideMode::AllNotes, lang.choose("All notes", "所有音符")),
+                ],
+            );
+        }
+    });
+}
+fn voice_count(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
+    theme::control_row(ui, |ui| {
+        ui.label(lang.choose("Voices", "声部"));
+        for (count, en, cn) in [
+            (1, "Mono", "单音"),
+            (8, "Poly 8", "复音 8"),
+            (16, "Poly 16", "复音 16"),
+        ] {
+            selectable_value(ui, &mut osc.voices, count, lang.choose(en, cn));
+        }
+    });
+}
+fn input_controls(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
+    let mut dry = osc.dry_level * 100.0;
+    if parameters::float(
+        ui,
+        &mut dry,
+        0.0,
+        100.0,
+        1.0,
+        lang.choose("Dry level (%)", "原声电平（%）"),
+        false,
+    )
+    .changed()
+    {
+        osc.dry_level = dry / 100.0;
+    }
+    let mut follow = osc.input_mod_sens.is_some();
+    if checkbox(
+        ui,
+        &mut follow,
+        lang.choose("Follow input envelope", "跟随输入包络"),
+    )
+    .on_hover_text(lang.choose(
+        "Input loudness shapes OSC volume; the phrase still triggers notes.",
+        "输入音量连续控制 OSC 音量，音符仍由乐句触发。",
+    ))
+    .changed()
+    {
+        osc.input_mod_sens = follow.then_some(0.0);
+    }
+    let mut sensitivity = osc.input_mod_sens.unwrap_or(0.0);
+    ui.add_enabled_ui(follow, |ui| {
+        if parameters::float(
+            ui,
+            &mut sensitivity,
+            -50.0,
+            50.0,
+            1.0,
+            lang.choose("Input sensitivity", "输入灵敏度"),
+            false,
+        )
+        .changed()
+        {
+            osc.input_mod_sens = Some(sensitivity);
+        }
+    });
+    checkbox(
+        ui,
+        &mut osc.input_gate,
+        lang.choose("Gate notes with live input", "用输入音量控制音符门控"),
+    );
+    if osc.input_gate || osc.waveform.value == Waveform::Sample {
+        parameters::number(ui, &mut osc.threshold, 0, 100, false);
     }
 }
 
@@ -329,7 +391,10 @@ fn waveform(ui: &mut egui::Ui, osc: &OscillatorConfigs) {
             }
         }
     } else {
-        let source_preview = if osc.waveform.value == Waveform::Vocal {
+        let source_preview = if matches!(
+            osc.waveform.value,
+            Waveform::Vocal | Waveform::Rect | Waveform::VintageSaw | Waveform::DetuneSaw
+        ) {
             Some(crate::dsp::oscillator::source_wave_preview(osc))
         } else {
             None
@@ -348,7 +413,10 @@ fn waveform(ui: &mut egui::Ui, osc: &OscillatorConfigs) {
                         }
                     }
                     Waveform::Triangle => 1.0 - 4.0 * (phase - 0.5).abs(),
-                    Waveform::Vocal => source_preview.as_ref().unwrap()[i],
+                    Waveform::Vocal
+                    | Waveform::Rect
+                    | Waveform::VintageSaw
+                    | Waveform::DetuneSaw => source_preview.as_ref().unwrap()[i],
                     Waveform::Sample => 0.0,
                 };
                 pos2(
@@ -458,22 +526,24 @@ pub fn lfo(ui: &mut egui::Ui, lfo: &mut LfoConfig) {
     });
     checkbox(ui, &mut lfo.sync, lang.choose("Sync to tempo", "跟随速度"));
     if lfo.sync {
-        parameters::float(
+        parameters::float_with_keys(
             ui,
             &mut lfo.beats,
             0.0625,
             32.0,
             0.0625,
+            0.25,
             lang.choose("Period (beats)", "周期（拍）"),
             true,
         );
     } else {
-        parameters::float(
+        parameters::float_with_keys(
             ui,
             &mut lfo.rate_hz,
             0.01,
             40.0,
             0.01,
+            0.1,
             lang.choose("Rate (Hz)", "频率（Hz）"),
             true,
         );

@@ -902,10 +902,13 @@ pub fn draw(
     if !history_action {
         state.remember(before, config);
     }
-    let editing_text = ui
-        .memory(|m| m.focused())
-        .is_some_and(|id| egui::TextEdit::load_state(ui.ctx(), id).is_some());
-    if !editing_text && state.drag.is_none() {
+    let editing_text = super::navigation::text_focused(ui.ctx());
+    if ui.is_enabled()
+        && ui.input(|i| i.focused)
+        && !ui.memory(|m| m.any_popup_open())
+        && !editing_text
+        && state.drag.is_none()
+    {
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, Key::Z)) {
             state.undo(config);
         }
@@ -1077,14 +1080,20 @@ pub fn draw(
                 vec2(58.0 + length as f32 * state.zoom, 25.0 + 120.0 * row_height),
                 egui::Sense::click_and_drag(),
             );
-            let response = super::navigation::parameter(response);
+            let response = super::navigation::canvas(response);
             #[cfg(debug_assertions)]
             ui.ctx()
                 .data_mut(|data| data.insert_temp(egui::Id::new("piano-canvas"), response.id));
             if response.clicked() || response.drag_started() {
                 response.request_focus();
             }
-            if response.has_focus() && !editing_text && state.drag.is_none() {
+            if response.has_focus()
+                && ui.is_enabled()
+                && ui.input(|i| i.focused)
+                && !ui.memory(|m| m.any_popup_open())
+                && !editing_text
+                && state.drag.is_none()
+            {
                 let (dx, dy) = ui.input(|i| {
                     let horizontal = i32::from(i.key_pressed(Key::ArrowRight))
                         - i32::from(i.key_pressed(Key::ArrowLeft));

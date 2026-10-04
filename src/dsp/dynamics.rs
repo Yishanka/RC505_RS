@@ -3,6 +3,7 @@ use super::audio_fx::AudioFxParams;
 use crate::config::audio_fx::DynamicsMode;
 #[derive(Clone)]
 pub struct DynamicsState {
+    profiles: super::dynamics_profiles::ProfileDynamics,
     signature: u64,
     sr: f32,
     attack: f32,
@@ -15,6 +16,7 @@ pub struct DynamicsState {
 impl Default for DynamicsState {
     fn default() -> Self {
         Self {
+            profiles: Default::default(),
             signature: 0,
             sr: 0.0,
             attack: 0.0,
@@ -28,6 +30,7 @@ impl Default for DynamicsState {
 }
 impl DynamicsState {
     pub fn reset(&mut self) {
+        self.profiles.reset();
         self.reduction = 0.0;
         self.gate = 0.0;
     }
@@ -40,6 +43,12 @@ impl DynamicsState {
             self.release = 1.0 - (-1.0 / (sr * p.release_ms * 0.001)).exp();
             self.makeup = 10.0_f32.powf((p.makeup_db + p.level_db) / 20.0);
             self.ceiling = 10.0_f32.powf(p.threshold_db / 20.0) * self.makeup;
+            self.profiles.configure(p, sr);
+        }
+        if p.kind == crate::config::audio_fx::AudioFxKind::Dynamics
+            && p.dynamics_profile != crate::config::dynamics_profiles::DynamicsProfile::Custom
+        {
+            return self.profiles.process(x, p.mix);
         }
         let peak = x[0].abs().max(x[1].abs()).max(1e-9);
         let db = 20.0 * peak.log10();

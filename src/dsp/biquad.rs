@@ -51,6 +51,24 @@ pub fn peak(sr: f32, hz: f32, q: f32, db: f32) -> Coeff {
         [1.0 + alpha / a, -2.0 * w.cos(), 1.0 - alpha / a],
     )
 }
+pub fn lowpass(sr: f32, hz: f32, q: f32) -> Coeff {
+    let w = TAU * hz.clamp(1.0, sr * 0.49) / sr;
+    let c = w.cos();
+    let a = w.sin() / (2.0 * q.max(0.1));
+    normalize(
+        [(1.0 - c) * 0.5, 1.0 - c, (1.0 - c) * 0.5],
+        [1.0 + a, -2.0 * c, 1.0 - a],
+    )
+}
+pub fn highpass(sr: f32, hz: f32, q: f32) -> Coeff {
+    let w = TAU * hz.clamp(1.0, sr * 0.49) / sr;
+    let c = w.cos();
+    let a = w.sin() / (2.0 * q.max(0.1));
+    normalize(
+        [(1.0 + c) * 0.5, -1.0 - c, (1.0 + c) * 0.5],
+        [1.0 + a, -2.0 * c, 1.0 - a],
+    )
+}
 pub fn shelf(sr: f32, hz: f32, db: f32, high: bool) -> Coeff {
     let a = 10.0_f32.powf(db / 40.0);
     let w = TAU * hz.clamp(1.0, sr * 0.45) / sr;

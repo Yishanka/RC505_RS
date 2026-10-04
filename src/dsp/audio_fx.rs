@@ -48,6 +48,7 @@ pub struct AudioFxState {
     delay: super::delay::DelayDspState,
     delay_feedback: f32,
     dynamics: super::dynamics::DynamicsState,
+    distortion: super::distortion::DistortionState,
     dynamics_params: AudioFxParams,
     sr: f32,
     ring: Vec<[f32; 2]>,
@@ -132,6 +133,7 @@ impl AudioFxState {
             delay: super::delay::DelayDspState::new(sr),
             delay_feedback: 0.35,
             dynamics: super::dynamics::DynamicsState::default(),
+            distortion: super::distortion::DistortionState::new(sr),
             dynamics_params: AudioFxParams::new(&AudioFxConfig::new(K::Dynamics)),
             sr,
             ring: vec![[0.0; 2]; (sr * 0.12).ceil() as usize + 4],
@@ -210,6 +212,7 @@ impl AudioFxState {
         }
         self.delay.reset();
         self.dynamics.reset();
+        self.distortion.reset();
         // Logical clearing: reads are gated by `filled`, never scan the two-second ring in a callback.
         self.write = 0;
         self.filled = 0;
@@ -256,6 +259,9 @@ impl AudioFxState {
             self.ratio = [2.0_f32.powf(p.semitones / 12.0), 0.25];
         }
         self.signature = r.signature;
+        if p.kind == K::Distortion {
+            self.distortion.configure(p, self.sr);
+        }
         self.enhance.configure(p);
         let formant_ratio = 2.0_f32.powf(p.formant_shift_semitones / 12.0);
         for voice in &mut self.pitch {
@@ -404,13 +410,31 @@ impl AudioFxState {
         clock_active: bool,
         input: (f32, f32),
     ) -> (f32, f32) {
+        self.process_automated(r, bpm, elapsed, clock_active, input, None)
+    }
+    pub fn process_automated(
+        &mut self,
+        r: &AudioFxParams,
+        bpm: usize,
+        elapsed: f64,
+        clock_active: bool,
+        input: (f32, f32),
+        lane: Option<super::automation::Value>,
+    ) -> (f32, f32) {
+        use super::automation::Value;
+        use crate::config::automation::Target;
         if self.signature != r.signature || self.kind != Some(r.config.kind) {
             self.configure(r);
         }
         let p = &r.config;
         let dry = [finite(input.0), finite(input.1)];
         self.level += (self.level_target - self.level) * self.smooth;
-        self.mix += (p.mix - self.mix) * self.smooth;
+        let target_mix = if p.kind == K::Reverb {
+            Value::get(lane, Target::ReverbWet, p.mix)
+        } else {
+            p.mix
+        };
+        self.mix += (target_mix - self.mix) * self.smooth;
         let freq = if p.sync_beats > 0.0 {
             bpm.max(1) as f32 / (60.0 * p.sync_beats)
         } else {
@@ -534,19 +558,24 @@ impl AudioFxState {
                 ];
             }
             K::Distortion => {
-                for ch in 0..2 {
-                    // Two oversampled shaping evaluations, plus DC rejection and
-                    // post tone filtering. This reduces aliases but is not a brickwall oversampler.
-                    let previous = self.drive_previous[ch];
-                    self.drive_previous[ch] = dry[ch];
-                    let shaped = (shape((previous + dry[ch]) * 0.5 * self.drive, p.drive_style)
-                        + shape(dry[ch] * self.drive, p.drive_style))
-                        * 0.5;
-                    self.lp[ch] += (shaped - self.lp[ch]) * self.tone_alpha;
-                    let dc = self.lp[ch] - self.dc_x[ch] + self.dc_coefficient * self.dc_y[ch];
-                    self.dc_x[ch] = self.lp[ch];
-                    self.dc_y[ch] = dc;
-                    wet[ch] = dc * 0.5;
+                if p.distortion_type != crate::config::audio_fx::DistortionType::Legacy {
+                    wet = self.distortion.process(dry);
+                } else {
+                    for ch in 0..2 {
+                        // Two oversampled shaping evaluations, plus DC rejection and
+                        // post tone filtering. This reduces aliases but is not a brickwall oversampler.
+                        let previous = self.drive_previous[ch];
+                        self.drive_previous[ch] = dry[ch];
+                        let shaped =
+                            (shape((previous + dry[ch]) * 0.5 * self.drive, p.drive_style)
+                                + shape(dry[ch] * self.drive, p.drive_style))
+                                * 0.5;
+                        self.lp[ch] += (shaped - self.lp[ch]) * self.tone_alpha;
+                        let dc = self.lp[ch] - self.dc_x[ch] + self.dc_coefficient * self.dc_y[ch];
+                        self.dc_x[ch] = self.lp[ch];
+                        self.dc_y[ch] = dc;
+                        wet[ch] = dc * 0.5;
+                    }
                 }
             }
             K::Dynamics | K::Sustainer => {
@@ -597,12 +626,12 @@ impl AudioFxState {
                     p.time_ms
                 };
                 let params = super::delay::DelayParams {
-                    time_ms,
-                    feedback: self.delay_feedback,
+                    time_ms: Value::get(lane, Target::DelayTime, time_ms),
+                    feedback: Value::get(lane, Target::DelayFeedback, self.delay_feedback),
                     high_damp_hz: p.high_cut_hz,
                     low_cut_hz: p.low_cut_hz,
                     direct: p.direct,
-                    effect: p.effect_level,
+                    effect: Value::get(lane, Target::DelayWet, p.effect_level),
                 };
                 let y = if p.kind == K::PanningDelay {
                     super::delay::process_panning_sample(
@@ -773,7 +802,7 @@ impl AudioFxState {
                         wet_level: 1.0,
                         density: p.density as f32,
                         size_ms: 20.0 + 100.0 * p.depth,
-                        rt60_ms: p.decay_ms,
+                        rt60_ms: Value::get(lane, Target::ReverbAudioDecay, p.decay_ms),
                         predelay_ms: p.predelay_ms,
                         width: p.width.min(1.0),
                         high_cut_hz: p.high_cut_hz,
@@ -793,9 +822,16 @@ impl AudioFxState {
         }
         self.control_tick = (self.control_tick + 1) % 16;
         self.aligned_dry = mix_dry;
+        let mix = if p.kind == K::Distortion
+            && p.distortion_type != crate::config::audio_fx::DistortionType::Legacy
+        {
+            1.0
+        } else {
+            self.mix
+        };
         let out = [
-            (mix_dry[0] * (1.0 - self.mix) + wet[0] * self.mix) * self.level,
-            (mix_dry[1] * (1.0 - self.mix) + wet[1] * self.mix) * self.level,
+            (mix_dry[0] * (1.0 - mix) + wet[0] * mix) * self.level,
+            (mix_dry[1] * (1.0 - mix) + wet[1] * mix) * self.level,
         ];
         (finite(out[0]), finite(out[1]))
     }

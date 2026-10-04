@@ -178,6 +178,20 @@ impl WaveBank {
             for (i, x) in wave.iter_mut().enumerate() {
                 x.re = 1.0 - 4.0 * (i as f32 / N as f32 - 0.5).abs();
             }
+        } else if c.waveform.value == Waveform::Rect {
+            for (i, x) in wave.iter_mut().enumerate() {
+                x.re = if i < N / 4 { 1.0 } else { -1.0 };
+            }
+        } else if c.waveform.value == Waveform::VintageSaw {
+            // Software warm saw: progressively attenuated upper harmonics,
+            // with no randomized drift or hardware waveform claim.
+            for harmonic in 1..=256 {
+                let gain = -1.0 / (harmonic as f32).powf(1.35);
+                for (i, x) in wave.iter_mut().enumerate() {
+                    x.re += gain
+                        * (std::f32::consts::TAU * harmonic as f32 * i as f32 / N as f32).sin();
+                }
+            }
         } else if let Some(s) = &c.sample {
             if s.frames.len() >= 4 {
                 let (start, end) = sample_bounds(s.frames.len(), c.sample_start, c.sample_end);

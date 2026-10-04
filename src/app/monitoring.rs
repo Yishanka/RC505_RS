@@ -4,6 +4,140 @@ use crate::{
     presets::FxTarget,
 };
 impl MyApp {
+    fn enqueue_audition(&mut self, voice: Option<Box<Audition>>) -> bool {
+        let enabled = voice.is_some();
+        let serial = self.audition_requests.next(
+            self.audio
+                .diagnostics
+                .audition_commands
+                .load(Ordering::Acquire),
+        );
+        if !self.send(Control::Audition(voice)) {
+            return false;
+        }
+        self.audition_requests.sent(serial, enabled);
+        true
+    }
+    pub fn choose_preset_candidate(&mut self, target: FxTarget, name: &str) {
+        match crate::presets::SoundCandidate::load(&self.config, target, name) {
+            Ok(candidate) => {
+                if self.previewing && !self.stop_audition() {
+                    return;
+                }
+                self.editor.candidate = Some(candidate);
+                self.editor.message.clear();
+            }
+            Err(error) => self.editor.message = error.to_string(),
+        }
+    }
+    pub fn candidate_audition_reason(&self) -> Option<&'static str> {
+        if !self.audio.online {
+            return Some("Connect audio before auditioning");
+        }
+        if self.busy() {
+            return Some("Wait for the current operation");
+        }
+        if self.calibration_held() {
+            return Some("Disconnect the loopback cable and restore monitoring first");
+        }
+        if self.taking() || self.take_pending {
+            return Some("Finish replay recording first");
+        }
+        if self.player_open {
+            return Some("Close the replay player first");
+        }
+        let candidate = self.editor.candidate.as_ref()?;
+        match candidate.source {
+            crate::presets::CandidateSource::Empty => Some("Choose an effect."),
+            crate::presets::CandidateSource::TrackLoop
+                if self.view.tracks[self.track_sel.unwrap_or(0)].frames == 0 =>
+            {
+                Some("Record track audio before previewing this sound")
+            }
+            _ => None,
+        }
+    }
+    pub fn toggle_candidate_audition(&mut self) {
+        if self.candidate_audition && self.previewing {
+            self.stop_audition();
+            return;
+        }
+        if let Some(reason) = self.candidate_audition_reason() {
+            self.editor.message = self.language.text(reason).into();
+            return;
+        }
+        let Some(candidate) = self.editor.candidate.as_ref() else {
+            return;
+        };
+        let target = candidate.target;
+        let staging = match candidate.staging(&self.config) {
+            Ok(config) => config,
+            Err(e) => {
+                self.editor.message = e.to_string();
+                return;
+            }
+        };
+        if let FxTarget::Input { bank, slot } = target {
+            if let Some(crate::config::InputFx::Oscillator(osc)) =
+                &staging.input_fx.banks[bank].slots[slot].fx
+            {
+                if osc.waveform.value == crate::config::osc_configs::Waveform::Sample
+                    && osc.sample.is_none()
+                {
+                    self.editor.message = self
+                        .language
+                        .text("Capture or import a sample first")
+                        .into();
+                    return;
+                }
+            }
+        }
+        let track = if matches!(target, FxTarget::Track { .. }) {
+            self.track_sel.unwrap_or(0)
+        } else {
+            0
+        };
+        if let Some(params) = AuditionParameters::candidate(&staging, target, track) {
+            let note = matches!(params, AuditionParameters::Note { .. });
+            let voice =
+                Box::new(Audition::new(params, self.audio.config.sample_rate.0).exclusive());
+            if self.enqueue_audition(Some(voice)) {
+                self.previewing = true;
+                self.candidate_audition = true;
+                self.note_audition = note;
+                self.audition_target = Some((target, track));
+            }
+        }
+    }
+    pub fn apply_preset_candidate(&mut self) {
+        if self.candidate_audition && !self.stop_audition() {
+            return;
+        }
+        let Some(candidate) = self.editor.candidate.take() else {
+            return;
+        };
+        match candidate.apply(&mut self.config) {
+            Ok(()) => {
+                self.editor.message = format!(
+                    "{} {}",
+                    self.language.choose("Applied", "已应用"),
+                    candidate.name
+                );
+                self.editor.page = crate::ui::editor::EditorPage::Sound;
+            }
+            Err(e) => {
+                self.editor.message = e.to_string();
+                self.editor.candidate = Some(candidate);
+            }
+        }
+    }
+    pub fn cancel_preset_candidate(&mut self) {
+        if self.candidate_audition && !self.stop_audition() {
+            return;
+        }
+        self.editor.candidate = None;
+        self.editor.message.clear();
+    }
     pub fn audition_note(
         &mut self,
         target: FxTarget,
@@ -22,7 +156,8 @@ impl MyApp {
             AuditionParameters::single_note(&self.config, target, note.pitch, note.velocity)
         {
             let voice = Box::new(Audition::new(params, self.audio.config.sample_rate.0));
-            if self.send(Control::Audition(Some(voice))) {
+            if self.enqueue_audition(Some(voice)) {
+                self.candidate_audition = false;
                 self.audition_target = Some((target, 0));
                 self.previewing = true;
                 self.note_audition = true;
@@ -171,7 +306,8 @@ impl MyApp {
         if let Some((target, track)) = self.audition_selection() {
             if let Some(params) = AuditionParameters::new(&self.config, target, track) {
                 let voice = Box::new(Audition::new(params, self.audio.config.sample_rate.0));
-                if self.send(Control::Audition(Some(voice))) {
+                if self.enqueue_audition(Some(voice)) {
+                    self.candidate_audition = false;
                     self.note_audition = false;
                     self.audition_target = Some((target, track));
                     self.previewing = true;
@@ -179,11 +315,17 @@ impl MyApp {
             }
         }
     }
-    pub fn stop_audition(&mut self) {
-        self.send(Control::Audition(None));
-        self.previewing = false;
-        self.note_audition = false;
-        self.audition_target = None;
+    pub fn stop_audition(&mut self) -> bool {
+        if self.audition_requests.stopping() {
+            return true;
+        }
+        if !self.previewing
+            && !self.audition_requests.pending()
+            && !self.audio.diagnostics.auditioning.load(Ordering::Relaxed)
+        {
+            return true;
+        }
+        self.enqueue_audition(None)
     }
     pub fn editor_beats(&self) -> Option<f64> {
         if self.previewing && !self.note_audition {

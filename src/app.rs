@@ -85,6 +85,8 @@ pub struct MyApp {
     pub theme: crate::app_support::appearance::ThemeColor,
     pub audition_target: Option<(crate::presets::FxTarget, usize)>,
     pub note_audition: bool,
+    pub candidate_audition: bool,
+    pub audition_requests: crate::engine::audition::Requests,
     pub calibration_open: bool,
     pub loopback_connected: bool,
     pub visualizer_enabled: bool,
@@ -223,6 +225,8 @@ impl MyApp {
             theme,
             audition_target: None,
             note_audition: false,
+            candidate_audition: false,
+            audition_requests: Default::default(),
             calibration_open: guard,
             loopback_connected: false,
             visualizer_enabled,
@@ -365,12 +369,21 @@ impl MyApp {
     }
     fn sync_config(&mut self) -> bool {
         self.config.poll_synth_assets();
+        if self.editor.candidate.as_ref().is_some_and(|c| {
+            !self.editor.expanded
+                || !self.editor.library_open
+                || !c.matches_target(&self.config, self.editor.target)
+        }) {
+            self.editor.candidate = None;
+        }
+        if self.candidate_audition && self.editor.candidate.is_none() {
+            self.stop_audition();
+        }
         if self.previewing
             && (self.audition_target != self.audition_selection()
-                || self
-                    .editor
-                    .target
-                    .is_none_or(|t| !crate::engine::audition::supports(&self.config, t)))
+                || self.editor.target.is_none_or(|t| {
+                    !self.candidate_audition && !crate::engine::audition::supports(&self.config, t)
+                }))
         {
             self.stop_audition();
         }
@@ -382,10 +395,9 @@ impl MyApp {
             match self.audio.configure(&self.config) {
                 Ok(()) => {
                     self.last_config = bytes;
-                    if let Some((target, track)) = self
-                        .audition_target
-                        .filter(|_| self.previewing && !self.note_audition)
-                    {
+                    if let Some((target, track)) = self.audition_target.filter(|_| {
+                        self.previewing && !self.note_audition && !self.candidate_audition
+                    }) {
                         if let Some(params) = crate::engine::audition::AuditionParameters::new(
                             &self.config,
                             target,
@@ -431,14 +443,15 @@ impl MyApp {
             self.update_after_save = false;
         }
         self.send(Control::Player(None));
-        self.stop_audition();
+        if !self.stop_audition() {
+            return;
+        }
         self.player_open = false;
         self.replay_panel = None;
         self.master_fx_open = false;
         self.shortcut_editor.open = false;
         self.send(Control::Action(crate::engine::core::Action::Panic));
         self.send(Control::Enable(false));
-        self.previewing = false;
         self.editor.expanded = false;
         self.show_save_prompt = false;
         self.exit_after_save = false;
@@ -468,9 +481,19 @@ impl MyApp {
             self.view = view;
             crate::phrases::commit_applied(&mut self.config, &self.view.phrases);
         }
-        self.previewing = self.audio.diagnostics.auditioning.load(Ordering::Relaxed);
+        let processed = self
+            .audio
+            .diagnostics
+            .audition_commands
+            .load(Ordering::Acquire);
+        let auditioning = self.audio.diagnostics.auditioning.load(Ordering::Relaxed);
+        if let Some(enabled) = self.audition_requests.observe(processed, auditioning) {
+            self.previewing = enabled;
+        }
         if !self.previewing {
             self.note_audition = false;
+            self.candidate_audition = false;
+            self.audition_target = None;
         }
         if self.taking() && !self.take_ending {
             self.take_pending = false;
@@ -600,7 +623,6 @@ impl MyApp {
                         self.active_project_idx = Some(index);
                         self.app_state = AppState::MainLoop;
                         self.editor = ui::editor::EditorState::default();
-                        self.previewing = false;
                         self.focus = Focus::Performance;
                         self.last_config.clear();
                         self.sync_config();
@@ -660,8 +682,9 @@ impl MyApp {
     }
 }
 impl eframe::App for MyApp {
-    #[cfg(debug_assertions)]
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, input: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        ui::navigation::prepare_input(ctx, input);
+        #[cfg(debug_assertions)]
         if std::env::args().any(|arg| arg.starts_with("--ui-preview=")) {
             input.events.retain(|e| {
                 !matches!(
@@ -724,6 +747,7 @@ impl MyApp {
     }
     pub(crate) fn render_frame(&mut self, ctx: &egui::Context) {
         let scene = self.ui_scene();
+        let fx_target_before = self.editor.target;
         if self.last_ui_scene.is_some_and(|old| old != scene) {
             self.release_hidden_focus(ctx);
         }
@@ -808,9 +832,24 @@ impl MyApp {
         self.sync_config();
         let scene_after = self.ui_scene();
         if scene_after != scene {
-            self.release_hidden_focus(ctx);
+            let only_kind_changed = fx_target_before == self.editor.target
+                && scene
+                    .iter()
+                    .zip(scene_after)
+                    .enumerate()
+                    .all(|(i, (a, b))| i == 3 || *a == b);
+            let kind_picker_focused = ctx.memory(|m| m.focused()).is_some_and(|id| {
+                ctx.data(|data| data.get_temp::<egui::Id>(egui::Id::new("fx-kind-picker")))
+                    == Some(id)
+            });
+            // This selector remains drawn while its parameter list changes.
+            // Keep horizontal selection usable without retaining hidden fields.
+            if !only_kind_changed || !kind_picker_focused {
+                self.release_hidden_focus(ctx);
+            }
         }
         self.last_ui_scene = Some(scene_after);
+        ui::navigation::remember_text_focus(ctx);
         if self.close_window_queued {
             self.close_window_queued = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);

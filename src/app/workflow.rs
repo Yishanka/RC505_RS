@@ -181,6 +181,11 @@ impl MyApp {
             }
         };
         self.audio = audio;
+        self.audition_requests = Default::default();
+        self.previewing = false;
+        self.candidate_audition = false;
+        self.note_audition = false;
+        self.audition_target = None;
         self.send(Control::Spectrum(self.visualizer_enabled));
         if self.audio.online {
             self.config.system_config.output_device.value =

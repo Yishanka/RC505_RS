@@ -13,6 +13,9 @@ pub enum Waveform {
     Triangle,
     Vocal,
     Sample,
+    Rect,
+    DetuneSaw,
+    VintageSaw,
 }
 
 impl std::fmt::Display for Waveform {
@@ -27,6 +30,9 @@ impl std::fmt::Display for Waveform {
                 Waveform::Triangle => "Triangle",
                 Waveform::Vocal => "Vocal",
                 Waveform::Sample => "Sample",
+                Waveform::Rect => "RECT (25%)",
+                Waveform::DetuneSaw => "Detune Saw",
+                Waveform::VintageSaw => "Vintage Saw",
             }
         )
     }
@@ -39,6 +45,8 @@ pub struct OscillatorConfigs {
     pub waveform: EnumConfig<Waveform>,
     pub voices: usize,
     pub input_gate: bool,
+    pub dry_level: f32,
+    pub input_mod_sens: Option<f32>,
     pub lfo: LfoConfig,
     pub lfo2: LfoConfig,
     pub mono_legato: bool,
@@ -81,10 +89,15 @@ impl OscillatorConfigs {
                     Waveform::Triangle,
                     Waveform::Vocal,
                     Waveform::Sample,
+                    Waveform::Rect,
+                    Waveform::DetuneSaw,
+                    Waveform::VintageSaw,
                 ],
             ),
             voices: 8,
             input_gate: false,
+            dry_level: 1.0,
+            input_mod_sens: None,
             lfo: LfoConfig::default(),
             lfo2: LfoConfig::default(),
             mono_legato: false,
@@ -103,7 +116,7 @@ impl OscillatorConfigs {
             capture: None,
             sample_message: String::new(),
             sample_job: None,
-            level: NumericConfig::new("Level", 70),
+            level: NumericConfig::new("OSC level (%)", 70),
             threshold: NumericConfig::new("Threshold", 10),
             note: NoteConfigs::new(),
             envelope: EnvelopeConfigs::new(),
@@ -245,6 +258,11 @@ fn finite(v: f32, fallback: f32) -> f32 {
 impl OscillatorConfigs {
     pub fn sanitize_source(&mut self) {
         self.glide_ms = finite(self.glide_ms, 0.0).clamp(0.0, 2000.0);
+        self.dry_level = finite(self.dry_level, 1.0).clamp(0.0, 1.0);
+        self.input_mod_sens = self
+            .input_mod_sens
+            .filter(|v| v.is_finite())
+            .map(|v| v.clamp(-50.0, 50.0));
         let minimum = self
             .sample
             .as_ref()

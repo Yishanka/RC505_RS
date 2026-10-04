@@ -34,13 +34,25 @@ pub fn float(
     label: &str,
     log: bool,
 ) -> egui::Response {
+    float_with_keys(ui, value, min, max, step, 1.0, label, log)
+}
+pub fn float_with_keys(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    min: f32,
+    max: f32,
+    precision: f32,
+    keyboard_step: f32,
+    label: &str,
+    log: bool,
+) -> egui::Response {
     let mut edit = f64::from(*value);
     let response = super::parameter_input::slider(
         ui,
         &mut edit,
         f64::from(min),
         f64::from(max),
-        f64::from(step),
+        super::parameter_input::Step::new(f64::from(precision), f64::from(keyboard_step)),
         label,
         log,
     );
@@ -140,6 +152,10 @@ pub fn selector<T: Copy + PartialEq>(
         })
         .response;
     let delta = super::parameter_input::enum_step(&response);
+    if id == "kind" {
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(egui::Id::new("fx-kind-picker"), response.id));
+    }
     #[cfg(debug_assertions)]
     ui.ctx()
         .data_mut(|data| data.insert_temp(egui::Id::new(("selector", id)), response.id));
@@ -199,12 +215,13 @@ pub fn filter_sweep(ui: &mut egui::Ui, sweep: &mut FilterSweepConfig, full: bool
             ],
         );
     } else {
-        float(
+        float_with_keys(
             ui,
             &mut sweep.rate_hz,
             0.01,
             20.0,
             0.01,
+            0.1,
             lang.choose("Sweep rate (Hz)", "扫频速度（Hz）"),
             true,
         );
@@ -264,11 +281,12 @@ pub fn filter(ui: &mut egui::Ui, config: &mut FilterConfigs, full: bool) {
         true,
     );
     let mut q = config.resonance_x10.value as f32 / 10.0;
-    if float(
+    if float_with_keys(
         ui,
         &mut q,
         FILTER_Q_MIN_X10 as f32 / 10.0,
         FILTER_Q_MAX_X10 as f32 / 10.0,
+        0.1,
         0.1,
         lang.choose("Resonance (Q)", "共振（Q）"),
         false,
@@ -387,12 +405,13 @@ pub fn envelope(ui: &mut egui::Ui, config: &mut EnvelopeConfigs) {
             (&mut config.tension_r, "Release curve", "释音曲率"),
         ] {
             let mut curve = ((value.value as f32 - 100.0) / 100.0).clamp(-1.0, 1.0);
-            if float(
+            if float_with_keys(
                 &mut cols[1],
                 &mut curve,
                 -1.0,
                 1.0,
                 0.01,
+                0.05,
                 lang.choose(en, cn),
                 false,
             )

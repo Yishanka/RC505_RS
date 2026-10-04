@@ -600,6 +600,188 @@ mod tests {
         fixture_at(8000)
     }
     #[test]
+    fn parameter_lanes_and_updated_distortion_dynamics_reproduce_live_seek_and_export() {
+        use crate::config::{
+            FxKind, InputFx, TrackFx, TrackFxKind,
+            audio_fx::{AudioFxKind as K, DistortionType},
+            automation::{Interpolation, ParameterLane, Target},
+            dynamics_profiles::DynamicsProfile,
+            track_options::InputRouting,
+        };
+        let root = PathBuf::from("var").join(format!("stream-replay-test-{}", session::id()));
+        let origin = 81723;
+        let mut config = AppConfig::new(120, 0, 5);
+        config.input_routing = InputRouting::Serial;
+        for (slot, kind) in [
+            (0, FxKind::Audio(K::Distortion)),
+            (1, FxKind::Filter),
+            (2, FxKind::Audio(K::PanningDelay)),
+            (3, FxKind::Reverb),
+        ] {
+            config.input_fx.set_slot_kind(0, slot, kind);
+            config.input_fx.banks[0].slots[slot].is_enabled = true;
+        }
+        for (slot, kind) in [
+            (0, TrackFxKind::Filter),
+            (1, TrackFxKind::Delay),
+            (2, TrackFxKind::Audio(K::Reverb)),
+            (3, TrackFxKind::Audio(K::Dynamics)),
+        ] {
+            config.track_fx.set_slot_kind(0, slot, kind);
+            config.track_fx.tracks[0].enabled[0][slot] = true;
+        }
+        let lane = |target| {
+            let mut lane = ParameterLane::create(target);
+            lane.enabled = true;
+            lane.interpolation = Interpolation::Curve;
+            lane.points[0].curve = 0.6;
+            lane
+        };
+        for (slot, target) in [
+            (1, Target::FilterCutoff),
+            (2, Target::DelayTime),
+            (3, Target::ReverbDecay),
+        ] {
+            config.input_fx.banks[0].slots[slot].parameter_lane = lane(target);
+        }
+        for (slot, target) in [
+            (0, Target::FilterQ),
+            (1, Target::DelayFeedback),
+            (2, Target::ReverbAudioDecay),
+        ] {
+            config.track_fx.banks[0].slots[slot].parameter_lane = lane(target);
+        }
+        if let Some(InputFx::Audio(p)) = &mut config.input_fx.banks[0].slots[0].fx {
+            p.distortion_type = DistortionType::Metal;
+        }
+        if let Some(TrackFx::Audio(p)) = &mut config.track_fx.banks[0].slots[3].fx {
+            p.dynamics_profile = DynamicsProfile::PhoneVox;
+            p.dynamics_amount = 7.0;
+        }
+        let mut core = RenderCore::new(8000);
+        core.configure(&mut Parameters::from_config(&config, 8000));
+        let mut initial = AudioSnapshot::empty(8000);
+        for frame in 0..480 {
+            initial.tracks[0].write(
+                frame,
+                [(frame as f32 * 0.23).sin() * 0.025; 2],
+                &mut OfflinePages,
+            );
+        }
+        core.restore(&mut initial);
+        core.clock.frame = origin;
+        core.snapshot(&mut initial, &mut OfflinePages);
+        let mut writer = Writer::begin(
+            root.clone(),
+            "lanes.json".into(),
+            origin,
+            initial,
+            crate::project::data_from_config(&config),
+        )
+        .unwrap();
+        let mut live = Vec::new();
+        for frame in 0..5200 {
+            if matches!(frame, 0 | 4500) {
+                core.action(Action::All, &mut OfflinePages);
+                writer
+                    .event(origin + frame, EventKind::Action(Action::All))
+                    .unwrap();
+            }
+            if matches!(frame, 700 | 1300 | 2400 | 3200) {
+                if frame == 700 {
+                    if let Some(InputFx::Audio(p)) = &mut config.input_fx.banks[0].slots[0].fx {
+                        p.distortion_type = DistortionType::Fuzz;
+                    }
+                    if let Some(TrackFx::Audio(p)) = &mut config.track_fx.banks[0].slots[3].fx {
+                        p.dynamics_profile = DynamicsProfile::LowBoost;
+                    }
+                    config.input_fx.banks[0].slots[1]
+                        .parameter_lane
+                        .interpolation = Interpolation::Step;
+                }
+                if frame == 1300 {
+                    config.input_fx.banks[0].slots[2].parameter_lane.target = Target::DelayWet;
+                    config.input_fx.banks[0].slots[3].parameter_lane.target = Target::ReverbWet;
+                    config.track_fx.banks[0].slots[2].parameter_lane.target = Target::ReverbWet;
+                    config.track_fx.banks[0].slots[0]
+                        .parameter_lane
+                        .interpolation = Interpolation::Linear;
+                }
+                if frame == 2400 {
+                    config
+                        .input_fx
+                        .set_slot_kind(0, 0, FxKind::Audio(K::Transpose));
+                    if let Some(InputFx::Audio(p)) = &mut config.input_fx.banks[0].slots[0].fx {
+                        p.semitones = 7.0;
+                    }
+                }
+                if frame == 3200 {
+                    config.input_fx.banks[0].slots[1].parameter_lane.enabled = false;
+                    for point in &mut config.track_fx.banks[0].slots[1].parameter_lane.points {
+                        point.value = 1.0;
+                    }
+                }
+                core.configure(&mut Parameters::from_config(&config, 8000));
+                writer
+                    .event(
+                        origin + frame,
+                        EventKind::Config(crate::project::data_from_config(&config)),
+                    )
+                    .unwrap();
+            }
+            let dry = [
+                (frame as f32 * 0.113).sin() * 0.025,
+                (frame as f32 * 0.197).cos() * 0.02,
+            ];
+            writer.audio(origin + frame, &[dry]).unwrap();
+            live.push(core.process(dry, &mut OfflinePages));
+        }
+        writer.finish(origin + 5200).unwrap();
+        let source = Source::open(&root).unwrap();
+        let mut replay = Machine::new(source.clone()).unwrap();
+        for (frame, expected) in live.iter().enumerate() {
+            assert_eq!(
+                replay.next().unwrap().unwrap().map(f32::to_bits),
+                expected.map(f32::to_bits),
+                "parameter lane frame {frame}"
+            );
+        }
+        for target in [0, 699, 700, 1300, 2399, 2400, 3200, 4500] {
+            let mut seek = Machine::new(source.clone()).unwrap();
+            seek.advance_to(target, || false).unwrap();
+            for expected in &live[target as usize..target as usize + 60] {
+                assert_eq!(
+                    seek.next().unwrap().unwrap().map(f32::to_bits),
+                    expected.map(f32::to_bits)
+                );
+            }
+        }
+        let (imported, _) = prepare_import(source.clone(), 3300, 8000).unwrap();
+        assert_eq!(
+            imported.track_fx.banks[0].slots[1].parameter_lane.points[0].value,
+            1.0
+        );
+        assert!(!imported.input_fx.banks[0].slots[1].parameter_lane.enabled);
+        let output = root.join("explicit.wav");
+        super::super::render(&root, &output, &AtomicU64::new(0)).unwrap();
+        let exported: Vec<f32> = hound::WavReader::open(output)
+            .unwrap()
+            .into_samples()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            exported.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            live.iter()
+                .flatten()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
+        drop(replay);
+        drop(source);
+        drop(core);
+        cleanup(&root);
+    }
+    #[test]
     fn free_filter_sweep_and_mono_enhance_replay_through_transport_changes_and_seek() {
         use crate::config::{FxKind, InputFx, audio_fx::AudioFxKind, track_options::InputRouting};
         let root = PathBuf::from("var").join(format!("stream-replay-test-{}", session::id()));

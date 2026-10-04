@@ -1,4 +1,5 @@
 pub mod audio_fx_panel;
+pub mod automation;
 mod beat;
 pub mod calibration;
 pub mod editor;

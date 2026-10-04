@@ -9,6 +9,64 @@ use crate::{
     config::{AppConfig, InputFx, TrackFx},
     presets::FxTarget,
 };
+/// UI-side tracking for the existing audition command queue. A stale boolean
+/// cannot acknowledge an unprocessed start/stop or a rapid replacement.
+#[derive(Default)]
+pub struct Requests {
+    issued: u64,
+    pending: Option<(u64, bool)>,
+}
+impl Requests {
+    pub fn next(&self, processed: u64) -> u64 {
+        self.issued.max(processed).saturating_add(1)
+    }
+    pub fn sent(&mut self, serial: u64, enabled: bool) {
+        self.issued = serial;
+        self.pending = Some((serial, enabled));
+    }
+    pub fn stopping(&self) -> bool {
+        self.pending.is_some_and(|(_, enabled)| !enabled)
+    }
+    pub fn pending(&self) -> bool {
+        self.pending.is_some()
+    }
+    pub fn observe(&mut self, processed: u64, enabled: bool) -> Option<bool> {
+        if self.pending.is_some_and(|(serial, _)| processed < serial) {
+            return None;
+        }
+        self.pending = None;
+        Some(enabled)
+    }
+}
+#[cfg(test)]
+mod request_tests {
+    use super::Requests;
+    #[test]
+    fn queued_requests_ignore_stale_booleans_and_ack_short_notes_and_new_bridges() {
+        let mut requests = Requests::default();
+        let start = requests.next(0);
+        requests.sent(start, true);
+        assert_eq!(requests.observe(0, false), None);
+        let stop = requests.next(0);
+        requests.sent(stop, false);
+        let replacement = requests.next(0);
+        requests.sent(replacement, true);
+        assert_eq!(requests.observe(start, true), None);
+        assert_eq!(requests.observe(stop, false), None);
+        assert_eq!(requests.observe(replacement, true), Some(true));
+        let short = requests.next(replacement);
+        requests.sent(short, true);
+        assert_eq!(
+            requests.observe(short, false),
+            Some(false),
+            "An already finished short note must not remain pending"
+        );
+        requests.sent(requests.next(short), true);
+        requests = Requests::default();
+        assert_eq!(requests.observe(0, false), Some(false));
+        assert_eq!(requests.next(0), 1);
+    }
+}
 pub enum AuditionParameters {
     Note {
         runtime: Option<super::input_fx::OscillatorRuntime>,
@@ -18,6 +76,7 @@ pub enum AuditionParameters {
         runtime: InputFxRuntime,
         bpm: usize,
         uses_input: bool,
+        subtract_dry: bool,
     },
     Track {
         runtime: TrackFxRuntime,
@@ -38,6 +97,24 @@ pub fn supports(config: &AppConfig, target: FxTarget) -> bool {
     }
 }
 impl AuditionParameters {
+    /// An isolated candidate processor. Audio effects use real input / a loop,
+    /// never a fabricated note sequence. No live configuration is modified.
+    pub fn candidate(config: &AppConfig, target: FxTarget, source: usize) -> Option<Self> {
+        if let FxTarget::Input { bank, slot } = target {
+            match config.input_fx.banks[bank].slots[slot].fx.as_ref()? {
+                InputFx::Oscillator(osc) if osc.note.event_slice().is_empty() => {
+                    return Self::single_note(
+                        config,
+                        target,
+                        crate::config::note_configs::NoteOct::from_pitch_index(48),
+                        100,
+                    );
+                }
+                _ => {}
+            }
+        }
+        Self::prepare(config, target, source, true)
+    }
     pub fn single_note(
         config: &AppConfig,
         target: FxTarget,
@@ -77,6 +154,7 @@ impl AuditionParameters {
             .take()?;
         runtime.threshold = 0.0;
         runtime.poly.input_gate = false;
+        runtime.poly.input_mod_gain = None;
         runtime.poly.capture = None;
         let seconds = 0.25
             + runtime
@@ -94,6 +172,14 @@ impl AuditionParameters {
         if !supports(config, target) {
             return None;
         }
+        Self::prepare(config, target, source, false)
+    }
+    fn prepare(
+        config: &AppConfig,
+        target: FxTarget,
+        source: usize,
+        candidate: bool,
+    ) -> Option<Self> {
         let bpm = config.beat_config.current_bpm();
         Some(match target {
             FxTarget::Input { bank, slot } => {
@@ -110,10 +196,15 @@ impl AuditionParameters {
                 }
                 runtime.selected_bank_idx = bank;
                 let chosen = &mut runtime.banks[bank].slots[slot];
-                let uses_input = chosen.my_delay.is_some();
+                let uses_input = if candidate {
+                    chosen.osc.is_none()
+                } else {
+                    chosen.my_delay.is_some()
+                };
                 if let Some(osc) = &mut chosen.osc {
                     osc.threshold = 0.0;
                     osc.poly.input_gate = false;
+                    osc.poly.input_mod_gain = None;
                     // Audition follows the phrase currently visible in the
                     // editor. A formal next-loop request must not secretly
                     // switch a private preview ahead of the performance clock.
@@ -126,6 +217,7 @@ impl AuditionParameters {
                     runtime,
                     bpm,
                     uses_input,
+                    subtract_dry: !candidate,
                 }
             }
             FxTarget::Track { bank, slot } => {
@@ -149,6 +241,8 @@ enum Voice {
     Track(TrackFxEngine),
 }
 pub struct Audition {
+    exclusive: bool,
+    subtract_dry: bool,
     note: Option<super::input_fx::OscillatorRuntime>,
     until: Option<u64>,
     voice: Voice,
@@ -175,6 +269,8 @@ impl Audition {
             }
         };
         let mut result = Self {
+            exclusive: false,
+            subtract_dry: true,
             note: None,
             until: None,
             voice,
@@ -188,7 +284,11 @@ impl Audition {
     }
     pub fn update(&mut self, params: &mut AuditionParameters) {
         match (&mut self.voice, params) {
-            (Voice::Note(_), AuditionParameters::Note { runtime, seconds }) => {
+            (Voice::Note(state), AuditionParameters::Note { runtime, seconds }) => {
+                state.reset();
+                if let Some(previous) = &mut self.note {
+                    state.retire_materials(&mut previous.poly);
+                }
                 std::mem::swap(&mut self.note, runtime);
                 self.frame = 0;
                 self.until = Some((*seconds * self.sr as f32).ceil() as u64);
@@ -199,11 +299,13 @@ impl Audition {
                     runtime,
                     bpm,
                     uses_input,
+                    subtract_dry,
                 },
             ) => {
                 *runtime = engine.swap_runtime(std::mem::replace(runtime, InputFxRuntime::empty()));
                 engine.set_clock(true, *bpm);
                 self.uses_input = *uses_input;
+                self.subtract_dry = *subtract_dry;
             }
             (
                 Voice::Track(engine),
@@ -257,10 +359,33 @@ impl Audition {
             }
             Voice::Input(engine) => {
                 let input = if self.uses_input { dry } else { [0.0; 2] };
-                let (l, r) = engine.process_frame(time, input[0], input[1], &[None; 5]);
-                [l - input[0], r - input[1]]
+                let carriers: [Option<(f32, f32)>; 5] = std::array::from_fn(|i| {
+                    let audio = &core.tracks[i].audio;
+                    if audio.len == 0 {
+                        None
+                    } else {
+                        let frame = audio.read(self.frame as usize % audio.len);
+                        Some((frame[0], frame[1]))
+                    }
+                });
+                let (l, r) = engine.process_frame(time, input[0], input[1], &carriers);
+                if self.subtract_dry {
+                    [l - input[0], r - input[1]]
+                } else {
+                    [l, r]
+                }
             }
             Voice::Track(engine) => {
+                let carriers: [Option<(f32, f32)>; 5] = std::array::from_fn(|i| {
+                    let audio = &core.tracks[i].audio;
+                    if audio.len == 0 {
+                        None
+                    } else {
+                        let frame = audio.read(self.frame as usize % audio.len);
+                        Some((frame[0], frame[1]))
+                    }
+                });
+                engine.set_vocoder_sources((dry[0], dry[1]), carriers);
                 let audio = &core.tracks[self.source.min(4)].audio;
                 let input = audio.read(self.frame as usize % audio.len.max(1));
                 let (l, r) = engine.process_frame(0, time, input[0], input[1]);
@@ -272,6 +397,13 @@ impl Audition {
     }
     pub fn finished(&self) -> bool {
         self.until.is_some_and(|until| self.frame >= until)
+    }
+    pub fn exclusive(mut self) -> Self {
+        self.exclusive = true;
+        self
+    }
+    pub fn is_exclusive(&self) -> bool {
+        self.exclusive
     }
 }
 #[cfg(test)]

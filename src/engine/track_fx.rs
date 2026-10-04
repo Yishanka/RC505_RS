@@ -84,6 +84,7 @@ pub struct TrackFilterRuntime {
 
 #[derive(Clone)]
 pub struct TrackFxSlotRuntime {
+    pub parameter_lane: Option<std::sync::Arc<crate::dsp::automation::PreparedLane>>,
     pub vocoder: Option<super::input_fx::VocoderRuntime>,
     pub audio: Option<crate::dsp::audio_fx::AudioFxParams>,
     pub delay: Option<DelayRuntime>,
@@ -420,6 +421,8 @@ impl TrackFxEngine {
                 continue;
             }
             let point = point.unwrap();
+            let lane =
+                crate::dsp::automation::sample(&slot.parameter_lane, point, self.sample_rate);
             if let Some(roll) = slot.roll {
                 (out_l, out_r) = process_roll_frame(
                     &mut bank_state.slots[idx].roll,
@@ -454,12 +457,13 @@ impl TrackFxEngine {
 
             if let Some(audio) = &slot.audio {
                 bank_state.slots[idx].audio.set_pdc(self.pdc_enabled);
-                let wet = bank_state.slots[idx].audio.process(
+                let wet = bank_state.slots[idx].audio.process_automated(
                     audio,
                     point.bpm,
                     point.elapsed as f64 / self.sample_rate as f64,
                     point.active,
                     (out_l, out_r),
+                    lane,
                 );
                 (out_l, out_r) = if track_enabled[bank_idx][idx] {
                     wet
@@ -511,11 +515,23 @@ impl TrackFxEngine {
                 let (l, r) = process_delay_sample(
                     &mut bank_state.slots[idx].delay,
                     DelayParams {
-                        time_ms: delay.time_mode.milliseconds_f32(delay.time_ms, point.bpm),
-                        feedback: delay.feedback,
+                        time_ms: crate::dsp::automation::Value::get(
+                            lane,
+                            crate::config::automation::Target::DelayTime,
+                            delay.time_mode.milliseconds_f32(delay.time_ms, point.bpm),
+                        ),
+                        feedback: crate::dsp::automation::Value::get(
+                            lane,
+                            crate::config::automation::Target::DelayFeedback,
+                            delay.feedback,
+                        ),
                         high_damp_hz: delay.high_damp_hz,
                         direct: delay.direct,
-                        effect: delay.effect,
+                        effect: crate::dsp::automation::Value::get(
+                            lane,
+                            crate::config::automation::Target::DelayWet,
+                            delay.effect,
+                        ),
                         low_cut_hz: delay.low_cut_hz,
                     },
                     self.sample_rate,
@@ -549,7 +565,12 @@ impl TrackFxEngine {
                     .next(gate_on, retrigger, filter.envelope, dt)
                     .clamp(0.0, 1.0);
                 let cutoff_min = FILTER_CUTOFF_MIN_HZ as f32;
-                let cutoff_max = filter.cutoff_hz.max(cutoff_min);
+                let cutoff_max = crate::dsp::automation::Value::get(
+                    lane,
+                    crate::config::automation::Target::FilterCutoff,
+                    filter.cutoff_hz,
+                )
+                .max(cutoff_min);
                 let cutoff_hz = cutoff_min + (cutoff_max - cutoff_min) * cutoff_env;
                 let cutoff_hz = bank_state.slots[idx].filter.sweep.cutoff(
                     filter.sweep,
@@ -566,7 +587,11 @@ impl TrackFxEngine {
                 let filter_params = FilterParams {
                     filter_type: filter.filter_type,
                     cutoff_hz,
-                    q: filter.q,
+                    q: crate::dsp::automation::Value::get(
+                        lane,
+                        crate::config::automation::Target::FilterQ,
+                        filter.q,
+                    ),
                     drive: filter.drive,
                     mix: filter.mix,
                 };
@@ -602,6 +627,7 @@ impl TrackFxRuntime {
         Self {
             banks: std::array::from_fn(|_| TrackFxBankRuntime {
                 slots: std::array::from_fn(|_| TrackFxSlotRuntime {
+                    parameter_lane: None,
                     vocoder: None,
                     audio: None,
                     delay: None,
@@ -720,6 +746,10 @@ impl TrackFxRuntime {
                     None | Some(TrackFx::Audio(_) | TrackFx::Vocoder(_)) => (None, None, None),
                 };
                 TrackFxSlotRuntime {
+                    parameter_lane: crate::dsp::automation::PreparedLane::prepare(
+                        &slot.parameter_lane,
+                        crate::config::automation::track_family(slot.fx.as_ref()),
+                    ),
                     vocoder: match &slot.fx {
                         Some(TrackFx::Vocoder(v)) => {
                             Some(super::input_fx::VocoderRuntime::from_config(v))
@@ -997,6 +1027,96 @@ mod tests {
             assert_eq!(
                 a, b,
                 "Different loop lengths changed synchronized modulation at {n}"
+            );
+        }
+    }
+    #[test]
+    #[ignore = "manual worst-case callback timing, not a physical device deadline guarantee"]
+    fn benchmark_twenty_automated_filters_and_unity_delays() {
+        use crate::config::{
+            audio_fx::AudioFxKind as K,
+            automation::{Interpolation, ParameterLane, Target},
+        };
+        for (kind, target) in [
+            (TrackFxKind::Filter, Target::FilterCutoff),
+            (TrackFxKind::Delay, Target::DelayTime),
+            (TrackFxKind::Audio(K::PanningDelay), Target::DelayTime),
+        ] {
+            let mut config = TrackFxConfigs::new(5);
+            for slot in 0..4 {
+                config.set_slot_kind(0, slot, kind);
+                let fx_slot = &mut config.banks[0].slots[slot];
+                let mut lane = ParameterLane::create(target);
+                lane.enabled = true;
+                lane.interpolation = Interpolation::Curve;
+                for (i, p) in lane.points.iter_mut().enumerate() {
+                    p.value = if i == 1 { 1.0 } else { 0.0 };
+                    p.curve = if i == 0 { -0.5 } else { 0.5 };
+                }
+                fx_slot.parameter_lane = lane;
+                match &mut fx_slot.fx {
+                    Some(TrackFx::Filter(p)) => {
+                        p.filter.mix.value = 100;
+                        p.filter.resonance_x10.value = 20;
+                        p.seq.set_seq(vec![true; 48]);
+                    }
+                    Some(TrackFx::Delay(p)) => {
+                        p.feedback_repeats.value = 0;
+                        p.feedback_pct.value = 100;
+                        p.high_damp_hz.value = 0;
+                        p.low_cut_hz.value = 0;
+                        p.effect_pct.value = 100;
+                    }
+                    Some(TrackFx::Audio(p)) => {
+                        p.feedback_repeats = 0;
+                        p.feedback = 1.0;
+                        p.high_cut_hz = 0.0;
+                        p.low_cut_hz = 0.0;
+                        p.effect_level = 1.0;
+                        p.sync_beats = 0.0;
+                    }
+                    _ => unreachable!(),
+                }
+                for track in &mut config.tracks {
+                    track.enabled[0][slot] = true;
+                }
+            }
+            let mut engine = TrackFxEngine::new(48000.0, 5);
+            engine.prepare();
+            engine.swap_runtime(TrackFxRuntime::from_config(&config));
+            engine.set_clock(120, true);
+            let mut times = Vec::with_capacity(1125);
+            let mut checksum = 0.0;
+            let allocations = crate::test_alloc::count(|| {
+                for block in 0..1125 {
+                    let before = std::time::Instant::now();
+                    for offset in 0..128 {
+                        let n = block * 128 + offset;
+                        let t = n as f64 / 48000.0;
+                        engine.set_transport_elapsed(t);
+                        let input = if n < 24000 {
+                            (std::f32::consts::TAU * 55.0 * t as f32).sin() * 0.35
+                        } else {
+                            0.0
+                        };
+                        for track in 0..5 {
+                            let (l, r) = engine.process_frame(track, t, input, input * 0.8);
+                            assert!(l.is_finite() && r.is_finite());
+                            checksum += std::hint::black_box(l + r) as f64;
+                        }
+                    }
+                    times.push(before.elapsed().as_secs_f64() * 1000.0);
+                }
+            });
+            assert_eq!(allocations, 0);
+            let total = times.iter().sum::<f64>();
+            times.sort_by(f64::total_cmp);
+            println!(
+                "20 x {} with continuous lane: 3 s audio, CPU {total:.2} ms; 128f p95 {:.3}, p99 {:.3}, max {:.3} ms; allocations {allocations}; checksum {checksum}",
+                kind.name(),
+                times[1068],
+                times[1113],
+                times[1124]
             );
         }
     }

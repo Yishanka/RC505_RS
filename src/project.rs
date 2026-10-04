@@ -125,6 +125,8 @@ pub struct TrackFxBankData {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackFxSlotData {
     #[serde(default)]
+    pub parameter_lane: crate::config::automation::ParameterLane,
+    #[serde(default)]
     pub vocoder: Option<VocoderData>,
     #[serde(default)]
     pub audio: Option<crate::config::audio_fx::AudioFxConfig>,
@@ -219,6 +221,8 @@ pub struct FxBankData {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct FxSlotData {
     #[serde(default)]
+    pub parameter_lane: crate::config::automation::ParameterLane,
+    #[serde(default)]
     pub clip_link: Option<String>,
     #[serde(default)]
     pub roll: Option<TrackRollData>,
@@ -242,6 +246,10 @@ pub struct FxSlotData {
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct OscData {
+    #[serde(default = "default_osc_dry_level")]
+    pub dry_level: f32,
+    #[serde(default)]
+    pub input_mod_sens: Option<f32>,
     #[serde(default)]
     pub phrase_serial: u64,
     #[serde(default)]
@@ -298,6 +306,9 @@ pub struct OscData {
     pub osc_filter_envelope: EnvelopeData,
 }
 
+fn default_osc_dry_level() -> f32 {
+    1.0
+}
 fn default_osc_voices() -> usize {
     8
 }
@@ -610,6 +621,7 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
         let mut slots = Vec::with_capacity(FX_SLOT_COUNT);
         for slot in &bank.slots {
             let mut slot_data = FxSlotData {
+                parameter_lane: slot.parameter_lane.sanitized(),
                 clip_link: slot.clip_link.clone(),
                 roll: None,
                 audio: None,
@@ -655,6 +667,8 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                             clip: Some(osc.note.clip()),
                             voices: osc.voices,
                             input_gate: osc.input_gate,
+                            dry_level: osc.dry_level,
+                            input_mod_sens: osc.input_mod_sens,
                             lfo: osc.lfo.clone(),
                             lfo2: osc.lfo2.clone(),
                             mono_legato: osc.mono_legato,
@@ -822,6 +836,7 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
         let mut track_slots = Vec::with_capacity(TRACK_FX_SLOT_COUNT);
         for slot in &bank.slots {
             let mut slot_data = TrackFxSlotData {
+                parameter_lane: slot.parameter_lane.sanitized(),
                 vocoder: None,
                 audio: None,
                 is_enabled: false,
@@ -977,6 +992,7 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
         for (slot_idx, slot_data) in bank_data.slots.iter().take(FX_SLOT_COUNT).enumerate() {
             let slot = &mut config.input_fx.banks[bank_idx].slots[slot_idx];
             slot.fx = None;
+            slot.parameter_lane = slot_data.parameter_lane.sanitized();
             slot.clip = slot_data.detached_clip.clone();
             slot.clip_link = slot_data
                 .clip_link
@@ -1010,6 +1026,8 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                             }
                             osc.voices = osc_data.voices.clamp(1, 16);
                             osc.input_gate = osc_data.input_gate;
+                            osc.dry_level = osc_data.dry_level;
+                            osc.input_mod_sens = osc_data.input_mod_sens;
                             osc.lfo = osc_data.lfo.clone();
                             osc.lfo.sanitize();
                             osc.lfo2 = osc_data.lfo2.clone();
@@ -1364,6 +1382,8 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
 
     for (bank_idx, bank_data) in binding_banks.iter().take(TRACK_FX_BANK_COUNT).enumerate() {
         for (slot_idx, slot_data) in bank_data.slots.iter().take(TRACK_FX_SLOT_COUNT).enumerate() {
+            config.track_fx.banks[bank_idx].slots[slot_idx].parameter_lane =
+                slot_data.parameter_lane.sanitized();
             match slot_data.kind.as_str() {
                 "Audio" => {
                     if let Some(audio) = &slot_data.audio {
@@ -1575,6 +1595,9 @@ fn waveform_to_string(w: Waveform) -> &'static str {
         Waveform::Triangle => "Triangle",
         Waveform::Vocal => "Vocal",
         Waveform::Sample => "Sample",
+        Waveform::Rect => "Rect",
+        Waveform::DetuneSaw => "DetuneSaw",
+        Waveform::VintageSaw => "VintageSaw",
     }
 }
 
@@ -1586,6 +1609,9 @@ fn string_to_waveform(s: &str) -> Option<Waveform> {
         "Triangle" => Some(Waveform::Triangle),
         "Vocal" => Some(Waveform::Vocal),
         "Sample" => Some(Waveform::Sample),
+        "Rect" => Some(Waveform::Rect),
+        "DetuneSaw" => Some(Waveform::DetuneSaw),
+        "VintageSaw" => Some(Waveform::VintageSaw),
         _ => None,
     }
 }
@@ -1635,6 +1661,68 @@ fn vocoder_data(v: &crate::config::vocoder_configs::VocoderConfigs) -> VocoderDa
 #[cfg(test)]
 mod audio_effect_tests {
     use super::*;
+    #[test]
+    fn priority_distortion_and_dynamics_preserve_old_json_and_roundtrip_new_settings() {
+        use crate::config::{
+            audio_fx::{AudioFxConfig, AudioFxKind as K, DistortionType as D},
+            dynamics_profiles::DynamicsProfile as P,
+        };
+        let old: AudioFxConfig = serde_json::from_str(
+            r#"{"kind":"Distortion","drive_style":"Hard","drive_db":27.5,"mix":0.35}"#,
+        )
+        .unwrap();
+        assert_eq!(old.distortion_type, D::Legacy);
+        assert_eq!(old.drive_db, 27.5);
+        assert_eq!(old.mix, 0.35);
+        let old: AudioFxConfig =
+            serde_json::from_str(r#"{"kind":"Dynamics","threshold_db":-23.0,"ratio":3.5}"#)
+                .unwrap();
+        assert_eq!(old.dynamics_profile, P::Custom);
+        assert_eq!(old.threshold_db, -23.0);
+        assert_eq!(old.ratio, 3.5);
+        for (kind, dist, profile) in D::ALL
+            .into_iter()
+            .map(|d| (K::Distortion, d, P::Custom))
+            .chain(P::ALL.into_iter().map(|p| (K::Dynamics, D::Legacy, p)))
+        {
+            let mut c = AppConfig::new(120, 0, 5);
+            let mut p = AudioFxConfig::new(kind);
+            p.distortion_type = dist;
+            p.distortion_tone = -12.5;
+            p.distortion_direct = 0.32;
+            p.distortion_effect = 0.76;
+            p.dynamics_profile = profile;
+            p.dynamics_amount = 7.2;
+            c.input_fx.set_slot_kind(0, 0, FxKind::Audio(kind));
+            c.input_fx.banks[0].slots[0].fx = Some(InputFx::Audio(p));
+            c.track_fx.set_slot_kind(1, 2, TrackFxKind::Audio(kind));
+            *c.track_fx.slot_fx_mut(1, 2).unwrap() = TrackFx::Audio(p);
+            c.master_fx.compressor = p;
+            c.master_fx.compressor.kind = K::Dynamics;
+            let saved = data_from_config(&c);
+            let decoded: ProjectData =
+                serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
+            let mut restored = AppConfig::new(120, 0, 5);
+            apply_data_to_config(&mut restored, decoded);
+            let again = data_from_config(&restored);
+            assert_eq!(again.input_fx.banks[0].slots[0].audio, Some(p));
+            assert_eq!(again.track_fx.banks[1].slots[2].audio, Some(p));
+            assert_eq!(again.master_fx, saved.master_fx);
+            let preset =
+                crate::presets::encode(&c, crate::presets::FxTarget::Input { bank: 0, slot: 0 })
+                    .unwrap();
+            crate::presets::decode(
+                &mut restored,
+                crate::presets::FxTarget::Input { bank: 1, slot: 0 },
+                &preset,
+            )
+            .unwrap();
+            assert_eq!(
+                data_from_config(&restored).input_fx.banks[1].slots[0].audio,
+                Some(p)
+            );
+        }
+    }
     #[test]
     fn fractional_delay_time_and_unity_feedback_preserve_old_json_and_round_trip() {
         let mut c = AppConfig::new(120, 0, 5);

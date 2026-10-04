@@ -121,6 +121,8 @@ pub fn decode(config: &mut AppConfig, target: FxTarget, text: &str) -> Result<()
             // Keep live bypass state; loading a preset should not turn an effect on.
             config.input_fx.banks[bank].slots[slot].fx =
                 staging.input_fx.banks[0].slots[0].fx.take();
+            config.input_fx.banks[bank].slots[slot].parameter_lane =
+                std::mem::take(&mut staging.input_fx.banks[0].slots[0].parameter_lane);
             if let Some(note) = note_mut(config, target) {
                 if let Some(previous) = &previous {
                     note.set_clip(previous);
@@ -139,6 +141,8 @@ pub fn decode(config: &mut AppConfig, target: FxTarget, text: &str) -> Result<()
             project::apply_data_to_config(&mut staging, data);
             config.track_fx.banks[bank].slots[slot].fx =
                 staging.track_fx.banks[0].slots[0].fx.take();
+            config.track_fx.banks[bank].slots[slot].parameter_lane =
+                std::mem::take(&mut staging.track_fx.banks[0].slots[0].parameter_lane);
         }
         _ => bail!("Input FX and Track FX presets belong to different chains."),
     }
@@ -164,10 +168,168 @@ pub fn load(config: &mut AppConfig, target: FxTarget, name: &str) -> Result<()> 
     decode(config, target, &fs::read_to_string(file(name)?)?)
 }
 
+/// A browsed sound is separate from the live project until explicitly applied.
+/// Keep the validated text so a file changing on disk cannot change what Apply
+/// means after the user has auditioned it.
+pub struct SoundCandidate {
+    pub name: String,
+    pub target: FxTarget,
+    text: String,
+    source_id: Option<String>,
+    pub source: CandidateSource,
+    pub kind: &'static str,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CandidateSource {
+    Phrase,
+    SingleNote,
+    LiveInput,
+    TrackLoop,
+    Empty,
+}
+impl SoundCandidate {
+    pub fn load(config: &AppConfig, target: FxTarget, name: &str) -> Result<Self> {
+        Self::from_text(
+            config,
+            target,
+            name.to_owned(),
+            fs::read_to_string(file(name)?)?,
+        )
+    }
+    pub fn from_text(
+        config: &AppConfig,
+        target: FxTarget,
+        name: String,
+        text: String,
+    ) -> Result<Self> {
+        let source_id = match target {
+            FxTarget::Input { bank, slot } => {
+                Some(config.input_fx.banks[bank].slots[slot].source_id.clone())
+            }
+            _ => None,
+        };
+        let mut candidate = Self {
+            name,
+            target,
+            text,
+            source_id,
+            source: CandidateSource::Empty,
+            kind: "Empty",
+        };
+        let staging = candidate.staging(config)?;
+        candidate.kind = match target {
+            FxTarget::Input { bank, slot } => {
+                staging.input_fx.banks[bank].slots[slot].kind().name()
+            }
+            FxTarget::Track { bank, slot } => {
+                staging.track_fx.banks[bank].slots[slot].kind().name()
+            }
+        };
+        candidate.source = match target {
+            FxTarget::Input { bank, slot } => match &staging.input_fx.banks[bank].slots[slot].fx {
+                Some(crate::config::InputFx::Oscillator(osc)) => {
+                    if osc.note.event_slice().is_empty() {
+                        CandidateSource::SingleNote
+                    } else {
+                        CandidateSource::Phrase
+                    }
+                }
+                Some(_) => CandidateSource::LiveInput,
+                None => CandidateSource::Empty,
+            },
+            FxTarget::Track { bank, slot } => {
+                if staging.track_fx.banks[bank].slots[slot].fx.is_some() {
+                    CandidateSource::TrackLoop
+                } else {
+                    CandidateSource::Empty
+                }
+            }
+        };
+        Ok(candidate)
+    }
+    pub fn matches_target(&self, config: &AppConfig, target: Option<FxTarget>) -> bool {
+        target == Some(self.target)
+            && match self.target {
+                FxTarget::Input { bank, slot } => {
+                    self.source_id.as_ref()
+                        == Some(&config.input_fx.banks[bank].slots[slot].source_id)
+                }
+                FxTarget::Track { .. } => true,
+            }
+    }
+    pub fn staging(&self, config: &AppConfig) -> Result<AppConfig> {
+        anyhow::ensure!(
+            self.matches_target(config, Some(self.target)),
+            "The candidate source moved; select the sound again"
+        );
+        let mut staging = AppConfig::new(120, 0, 5);
+        project::apply_data_to_config(&mut staging, project::data_from_config(config));
+        decode(&mut staging, self.target, &self.text)?;
+        Ok(staging)
+    }
+    pub fn apply(&self, config: &mut AppConfig) -> Result<()> {
+        anyhow::ensure!(
+            self.matches_target(config, Some(self.target)),
+            "The candidate source moved; select the sound again"
+        );
+        decode(config, self.target, &self.text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{FxKind, InputFx};
+    #[test]
+    fn candidate_selection_and_cancel_do_not_mutate_live_patch_and_apply_keeps_music() {
+        let mut config = AppConfig::new(137, 41, 5);
+        let source = FxTarget::Input { bank: 0, slot: 0 };
+        let target = FxTarget::Input { bank: 1, slot: 2 };
+        config.input_fx.set_slot_kind(0, 0, FxKind::Oscillator);
+        config.input_fx.set_slot_kind(1, 2, FxKind::Oscillator);
+        if let Some(InputFx::Oscillator(osc)) = &mut config.input_fx.banks[0].slots[0].fx {
+            osc.level.value = 17;
+        }
+        note_mut(&mut config, target).unwrap().push();
+        let music = clip(&config, target).unwrap();
+        config.input_fx.banks[1].slots[2].clip_link = Some("existing-link".into());
+        let text = encode(&config, source).unwrap();
+        let before = serde_json::to_vec(&project::data_from_config(&config)).unwrap();
+        let candidate =
+            SoundCandidate::from_text(&config, target, "Quiet patch".into(), text.clone()).unwrap();
+        assert_eq!(candidate.source, CandidateSource::Phrase);
+        let staged = candidate.staging(&config).unwrap();
+        assert_eq!(clip(&staged, target).unwrap(), music);
+        let Some(InputFx::Oscillator(osc)) = &staged.input_fx.banks[1].slots[2].fx else {
+            panic!()
+        };
+        assert_eq!(osc.level.value, 17);
+        assert_eq!(
+            before,
+            serde_json::to_vec(&project::data_from_config(&config)).unwrap()
+        );
+        drop(candidate);
+        assert_eq!(
+            before,
+            serde_json::to_vec(&project::data_from_config(&config)).unwrap()
+        );
+        let candidate =
+            SoundCandidate::from_text(&config, target, "Quiet patch".into(), text).unwrap();
+        candidate.apply(&mut config).unwrap();
+        assert_eq!(clip(&config, target).unwrap(), music);
+        assert_eq!(
+            config.input_fx.banks[1].slots[2].clip_link.as_deref(),
+            Some("existing-link")
+        );
+        assert!(!config.input_fx.banks[1].slots[2].is_enabled);
+        assert_eq!(config.beat_config.current_bpm(), 137);
+        let Some(InputFx::Oscillator(osc)) = &config.input_fx.banks[1].slots[2].fx else {
+            panic!()
+        };
+        assert_eq!(osc.level.value, 17);
+        config.input_fx.banks[1].slots.swap(2, 3);
+        assert!(candidate.apply(&mut config).is_err());
+    }
     #[test]
     fn preset_roundtrip_keeps_devices_tempo_and_bypass() {
         let mut config = AppConfig::new(137, 85, 5);

@@ -125,6 +125,7 @@ impl FxKind {
 }
 
 pub struct FxSlot {
+    pub parameter_lane: super::automation::ParameterLane,
     pub clip_link: Option<String>,
     pub source_id: String,
     pub clip: Option<crate::config::sequence_edit::NoteClip>,
@@ -135,6 +136,7 @@ pub struct FxSlot {
 impl FxSlot {
     pub fn new() -> Self {
         Self {
+            parameter_lane: Default::default(),
             clip_link: None,
             source_id: new_source_id(),
             clip: None,
@@ -175,6 +177,13 @@ impl FxSlot {
         };
         if let (Some(clip), Some(InputFx::Oscillator(osc))) = (&self.clip, &mut self.fx) {
             osc.note.set_clip(clip);
+        }
+        if !self
+            .parameter_lane
+            .target
+            .accepts(super::automation::input_family(self.fx.as_ref()))
+        {
+            self.parameter_lane.enabled = false;
         }
     }
 }

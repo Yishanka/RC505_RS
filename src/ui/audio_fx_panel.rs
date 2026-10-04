@@ -1,7 +1,10 @@
 //! The same controls back the compact rack and expanded audio-effect editor.
 use super::{navigation, parameters, theme};
 use crate::app_support::language::Language;
-use crate::config::audio_fx::{AudioFxConfig, AudioFxKind as K, DriveStyle, DynamicsMode, Scale};
+use crate::config::audio_fx::{
+    AudioFxConfig, AudioFxKind as K, DistortionType, DriveStyle, DynamicsMode, Scale,
+};
+use crate::config::dynamics_profiles::DynamicsProfile;
 use eframe::egui::{self, Stroke, pos2};
 
 fn value(ui: &mut egui::Ui, v: &mut f32, min: f32, max: f32, en: &str, zh: &str, log: bool) {
@@ -31,7 +34,23 @@ fn value(ui: &mut egui::Ui, v: &mut f32, min: f32, max: f32, en: &str, zh: &str,
         } else {
             0.1
         };
-        parameters::float(ui, v, min, max, step, lang.choose(en, zh), log);
+        let keyboard_step = if en.contains("(dB") {
+            0.5
+        } else if en.contains("(Hz") && max <= 50.0 || en.ends_with(" Q") || en == "Ratio" {
+            0.1
+        } else {
+            1.0
+        };
+        parameters::float_with_keys(
+            ui,
+            v,
+            min,
+            max,
+            step,
+            keyboard_step,
+            lang.choose(en, zh),
+            log,
+        );
     }
 }
 fn section(ui: &mut egui::Ui, en: &str, zh: &str) {
@@ -316,16 +335,31 @@ pub fn draw(ui: &mut egui::Ui, p: &mut AudioFxConfig, full: bool) {
             );
         }
         K::Distortion => {
-            parameters::selector(
-                ui,
-                "drive-style",
-                &mut p.drive_style,
-                &[
-                    (DriveStyle::Soft, lang.choose("Overdrive", "柔和过载")),
-                    (DriveStyle::Hard, lang.choose("Hard clip", "硬削波")),
-                    (DriveStyle::Fuzz, lang.choose("Fuzz", "法兹")),
-                ],
-            );
+            let types = DistortionType::ALL.map(|kind| {
+                let zh = match kind {
+                    DistortionType::Legacy => "旧版风格",
+                    DistortionType::Vocal => "人声失真",
+                    DistortionType::Boost => "增益推动",
+                    DistortionType::Overdrive => "柔和过载（OD）",
+                    DistortionType::Distortion => "硬失真（DS）",
+                    DistortionType::Metal => "金属失真",
+                    DistortionType::Fuzz => "法兹",
+                };
+                (kind, lang.choose(kind.name(), zh))
+            });
+            parameters::selector(ui, "distortion-type", &mut p.distortion_type, &types);
+            if p.distortion_type == DistortionType::Legacy {
+                parameters::selector(
+                    ui,
+                    "drive-style",
+                    &mut p.drive_style,
+                    &[
+                        (DriveStyle::Soft, lang.choose("Overdrive", "柔和过载")),
+                        (DriveStyle::Hard, lang.choose("Hard clip", "硬削波")),
+                        (DriveStyle::Fuzz, lang.choose("Fuzz", "法兹")),
+                    ],
+                );
+            }
             value(
                 ui,
                 &mut p.drive_db,
@@ -335,98 +369,199 @@ pub fn draw(ui: &mut egui::Ui, p: &mut AudioFxConfig, full: bool) {
                 "驱动（dB）",
                 false,
             );
-            value(
-                ui,
-                &mut p.tone_hz,
-                200.0,
-                20000.0,
-                "Tone low-pass (Hz)",
-                "音色低通（Hz）",
-                true,
-            );
-            if full {}
+            if p.distortion_type == DistortionType::Legacy {
+                value(
+                    ui,
+                    &mut p.tone_hz,
+                    200.0,
+                    20000.0,
+                    "Tone low-pass (Hz)",
+                    "音色低通（Hz）",
+                    true,
+                );
+            } else {
+                parameters::float(
+                    ui,
+                    &mut p.distortion_tone,
+                    -50.0,
+                    50.0,
+                    0.1,
+                    lang.choose("Tone", "音色"),
+                    false,
+                );
+                for (value, en, zh) in [
+                    (
+                        &mut p.distortion_direct,
+                        "Direct level (%)",
+                        "原声音量（%）",
+                    ),
+                    (
+                        &mut p.distortion_effect,
+                        "Effect level (%)",
+                        "效果音量（%）",
+                    ),
+                ] {
+                    let mut percent = *value * 100.0;
+                    if parameters::float(
+                        ui,
+                        &mut percent,
+                        0.0,
+                        100.0,
+                        0.1,
+                        lang.choose(en, zh),
+                        false,
+                    )
+                    .changed()
+                    {
+                        *value = percent / 100.0;
+                    }
+                }
+            }
         }
         K::Dynamics | K::Sustainer => {
-            if p.kind == K::Sustainer {
-                value(
-                    ui,
-                    &mut p.low_db,
-                    -20.0,
-                    20.0,
-                    "Low tone (dB)",
-                    "低音（dB）",
-                    false,
-                );
-                value(
-                    ui,
-                    &mut p.high_db,
-                    -20.0,
-                    20.0,
-                    "High tone (dB)",
-                    "高音（dB）",
-                    false,
-                );
-            }
-            parameters::selector(
-                ui,
-                "dynamics-mode",
-                &mut p.dynamics_mode,
-                &[
-                    (DynamicsMode::Compressor, lang.choose("Compressor", "压缩")),
-                    (DynamicsMode::Limiter, lang.choose("Limiter", "限幅")),
-                    (DynamicsMode::Gate, lang.choose("Noise gate", "噪声门")),
-                ],
-            );
-            value(
-                ui,
-                &mut p.threshold_db,
-                -60.0,
-                0.0,
-                "Threshold (dBFS)",
-                "阈值（dBFS）",
-                false,
-            );
-            if p.dynamics_mode == DynamicsMode::Compressor {
-                value(ui, &mut p.ratio, 1.0, 20.0, "Ratio", "压缩比", false);
-            }
-            value(
-                ui,
-                &mut p.makeup_db,
-                -12.0,
-                24.0,
-                "Makeup (dB)",
-                "补偿增益（dB）",
-                false,
-            );
-            if full {
-                value(
-                    ui,
-                    &mut p.attack_ms,
-                    0.1,
-                    200.0,
-                    "Attack (ms)",
-                    "启动（ms）",
-                    true,
-                );
-                value(
-                    ui,
-                    &mut p.release_ms,
-                    10.0,
-                    2000.0,
-                    "Release (ms)",
-                    "释放（ms）",
-                    true,
-                );
-                if p.dynamics_mode != DynamicsMode::Gate {
-                    value(
+            if p.kind == K::Dynamics {
+                let profiles = DynamicsProfile::ALL.map(|kind| {
+                    let zh = match kind {
+                        DynamicsProfile::Custom => "自定义参数",
+                        DynamicsProfile::NaturalComp => "自然压缩",
+                        DynamicsProfile::MixerComp => "混音压缩",
+                        DynamicsProfile::LiveComp => "现场压缩",
+                        DynamicsProfile::NaturalLim => "自然限幅",
+                        DynamicsProfile::HardLim => "硬限幅",
+                        DynamicsProfile::JinglComp => "广播片头压缩",
+                        DynamicsProfile::HardComp => "硬压缩",
+                        DynamicsProfile::SoftComp => "柔和压缩",
+                        DynamicsProfile::CleanComp => "清晰压缩",
+                        DynamicsProfile::DanceComp => "舞曲压缩",
+                        DynamicsProfile::OrchComp => "管弦压缩",
+                        DynamicsProfile::VocalComp => "人声压缩",
+                        DynamicsProfile::Acoustic => "原声乐器",
+                        DynamicsProfile::RockBand => "摇滚乐队",
+                        DynamicsProfile::Orchestra => "管弦乐团",
+                        DynamicsProfile::LowBoost => "低频增强",
+                        DynamicsProfile::Brighten => "提亮",
+                        DynamicsProfile::DjsVoice => "DJ 人声",
+                        DynamicsProfile::PhoneVox => "电话人声",
+                    };
+                    (kind, lang.choose(kind.name(), zh))
+                });
+                parameters::selector(ui, "dynamics-profile", &mut p.dynamics_profile, &profiles);
+                if p.dynamics_profile != DynamicsProfile::Custom {
+                    parameters::float(
                         ui,
-                        &mut p.knee_db,
-                        0.0,
-                        18.0,
-                        "Knee (dB)",
-                        "软拐点（dB）",
+                        &mut p.dynamics_amount,
+                        -20.0,
+                        20.0,
+                        0.1,
+                        lang.choose("Compression amount", "压缩强度"),
                         false,
                     );
+                    if full {
+                        let r = p.dynamics_profile.recipe(p.dynamics_amount);
+                        theme::caption(
+                            ui,
+                            lang.choose(
+                                "+ compresses more. Custom restores manual settings.",
+                                "正值加强压缩；自定义恢复手动参数。",
+                            ),
+                        );
+                        ui.label(format!(
+                            "{} · {:.1} dBFS · {:.1}:1 · {:.1} / {:.0} ms",
+                            if r.rms {
+                                "RMS"
+                            } else {
+                                lang.choose("Peak", "峰值")
+                            },
+                            r.threshold,
+                            r.ratio,
+                            r.attack,
+                            r.release
+                        ));
+                    }
+                }
+            }
+            if p.kind == K::Sustainer || p.dynamics_profile == DynamicsProfile::Custom {
+                if p.kind == K::Sustainer {
+                    value(
+                        ui,
+                        &mut p.low_db,
+                        -20.0,
+                        20.0,
+                        "Low tone (dB)",
+                        "低音（dB）",
+                        false,
+                    );
+                    value(
+                        ui,
+                        &mut p.high_db,
+                        -20.0,
+                        20.0,
+                        "High tone (dB)",
+                        "高音（dB）",
+                        false,
+                    );
+                }
+                parameters::selector(
+                    ui,
+                    "dynamics-mode",
+                    &mut p.dynamics_mode,
+                    &[
+                        (DynamicsMode::Compressor, lang.choose("Compressor", "压缩")),
+                        (DynamicsMode::Limiter, lang.choose("Limiter", "限幅")),
+                        (DynamicsMode::Gate, lang.choose("Noise gate", "噪声门")),
+                    ],
+                );
+                value(
+                    ui,
+                    &mut p.threshold_db,
+                    -60.0,
+                    0.0,
+                    "Threshold (dBFS)",
+                    "阈值（dBFS）",
+                    false,
+                );
+                if p.dynamics_mode == DynamicsMode::Compressor {
+                    value(ui, &mut p.ratio, 1.0, 20.0, "Ratio", "压缩比", false);
+                }
+                value(
+                    ui,
+                    &mut p.makeup_db,
+                    -12.0,
+                    24.0,
+                    "Makeup (dB)",
+                    "补偿增益（dB）",
+                    false,
+                );
+                if full {
+                    value(
+                        ui,
+                        &mut p.attack_ms,
+                        0.1,
+                        200.0,
+                        "Attack (ms)",
+                        "启动（ms）",
+                        true,
+                    );
+                    value(
+                        ui,
+                        &mut p.release_ms,
+                        10.0,
+                        2000.0,
+                        "Release (ms)",
+                        "释放（ms）",
+                        true,
+                    );
+                    if p.dynamics_mode != DynamicsMode::Gate {
+                        value(
+                            ui,
+                            &mut p.knee_db,
+                            0.0,
+                            18.0,
+                            "Knee (dB)",
+                            "软拐点（dB）",
+                            false,
+                        );
+                    }
                 }
             }
         }
@@ -1020,7 +1155,9 @@ pub fn draw(ui: &mut egui::Ui, p: &mut AudioFxConfig, full: bool) {
     if full {
         ui.separator();
     }
-    if !matches!(p.kind, K::PanningDelay | K::Delay) {
+    if !matches!(p.kind, K::PanningDelay | K::Delay)
+        && !(p.kind == K::Distortion && p.distortion_type != DistortionType::Legacy)
+    {
         value(ui, &mut p.mix, 0.0, 1.0, "Wet / dry", "干湿比例", false);
     }
     value(

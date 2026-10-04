@@ -2,8 +2,10 @@ pub(crate) mod config_type;
 
 pub mod app_config;
 pub mod audio_fx;
+pub mod automation;
 pub mod beat_configs;
 pub mod delay_configs;
+pub mod dynamics_profiles;
 pub mod envelope_configs;
 pub mod filter_configs;
 pub mod input_fx_configs;

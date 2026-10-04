@@ -40,6 +40,7 @@ const DEFAULT_BPM: usize = 120;
 
 #[derive(Clone)]
 pub struct OscillatorRuntime {
+    pub dry_level: f32,
     pub poly: crate::dsp::oscillator::PolyOscRuntime,
     pub waveform: Waveform,
     pub level: f32,
@@ -123,6 +124,7 @@ impl VocoderRuntime {
 
 #[derive(Clone)]
 pub struct FxSlotRuntime {
+    pub parameter_lane: Option<std::sync::Arc<crate::dsp::automation::PreparedLane>>,
     pub source_key: u64,
     pub roll: Option<super::track_fx::RollRuntime>,
     pub audio: Option<crate::dsp::audio_fx::AudioFxParams>,
@@ -136,6 +138,7 @@ pub struct FxSlotRuntime {
 
 #[derive(Clone)]
 pub struct FxSlotState {
+    pub osc_dry_gain: f32,
     pub generator_align: super::pdc::AlignDelay,
     pub modulator_align: super::pdc::AlignDelay,
     pub carrier_align: super::pdc::AlignDelay,
@@ -292,8 +295,17 @@ impl InputFxEngine {
     pub fn swap_runtime(&mut self, runtime: InputFxRuntime) -> InputFxRuntime {
         for (bank_index, bank) in self.state.banks.iter_mut().enumerate() {
             for (slot_index, state) in bank.slots.iter_mut().enumerate() {
-                let old = &self.runtime.banks[bank_index].slots[slot_index];
+                let old = &mut self.runtime.banks[bank_index].slots[slot_index];
                 let new = &runtime.banks[bank_index].slots[slot_index];
+                if old.osc.is_some() != new.osc.is_some() {
+                    state.osc_dry_gain = -1.0;
+                }
+                if new.osc.is_none() {
+                    state.poly_osc.reset();
+                }
+                if let Some(osc) = &mut old.osc {
+                    state.poly_osc.retire_materials(&mut osc.poly);
+                }
                 if self.runtime.selected_bank_idx != runtime.selected_bank_idx {
                     state.generator_align.reset();
                     state.modulator_align.reset();
@@ -357,6 +369,9 @@ impl InputFxEngine {
                         {
                             state.audio.reset();
                         }
+                    }
+                    if let Some(osc) = &mut current.osc {
+                        state.poly_osc.retire_materials(&mut osc.poly);
                     }
                     std::mem::swap(current, next);
                 }
@@ -452,6 +467,7 @@ impl InputFxEngine {
         let state_bank = &mut self.state.banks[bank_idx];
 
         let mut osc_mix = 0.0f32;
+        let mut osc_dry = 1.0f32;
         let mut active_osc_count = 0usize;
 
         for idx in 0..FX_SLOT_COUNT {
@@ -472,6 +488,13 @@ impl InputFxEngine {
                 state_bank.slots[idx].poly_osc.reset();
                 continue;
             }
+            let dry_gain = &mut state_bank.slots[idx].osc_dry_gain;
+            if *dry_gain < 0.0 {
+                *dry_gain = osc.dry_level;
+            } else {
+                *dry_gain += (osc.dry_level - *dry_gain) / (self.sample_rate * 0.005).max(1.0);
+            }
+            osc_dry *= *dry_gain;
             let note = if !self.legacy_fallback && (!self.clock_active || osc.note_seq.is_empty()) {
                 None
             } else if osc.note_seq.is_empty() {
@@ -516,8 +539,14 @@ impl InputFxEngine {
                 cutoff_min_hz: FILTER_CUTOFF_MIN_HZ as f32,
             };
             let osc_filtered = if self.legacy_fallback
-                && !matches!(osc.waveform, Waveform::Sample | Waveform::Vocal)
-            {
+                && !matches!(
+                    osc.waveform,
+                    Waveform::Sample
+                        | Waveform::Vocal
+                        | Waveform::Rect
+                        | Waveform::DetuneSaw
+                        | Waveform::VintageSaw
+                ) {
                 process_osc_fx_sample(&mut state_bank.slots[idx].osc, params)
             } else {
                 crate::dsp::oscillator::process_poly_sample(
@@ -545,8 +574,8 @@ impl InputFxEngine {
             osc_mix /= active_osc_count as f32;
         }
 
-        let mut out_l = crate::dsp::headroom(input_l + osc_mix);
-        let mut out_r = crate::dsp::headroom(input_r + osc_mix);
+        let mut out_l = crate::dsp::headroom(input_l * osc_dry + osc_mix);
+        let mut out_r = crate::dsp::headroom(input_r * osc_dry + osc_mix);
 
         for idx in 0..FX_SLOT_COUNT {
             let slot = &bank.slots[idx];
@@ -711,9 +740,15 @@ impl InputFxEngine {
             }) else {
                 continue;
             };
+            let lane =
+                crate::dsp::automation::sample(&slot.parameter_lane, point, self.sample_rate);
             let cutoff_hz = state_bank.slots[idx].filter_sweep.cutoff(
                 filter.sweep,
-                filter.cutoff_hz,
+                crate::dsp::automation::Value::get(
+                    lane,
+                    crate::config::automation::Target::FilterCutoff,
+                    filter.cutoff_hz,
+                ),
                 if filter.sweep.sync {
                     point.elapsed
                 } else {
@@ -723,12 +758,17 @@ impl InputFxEngine {
                 point.active,
                 self.sample_rate,
             );
+            let q = crate::dsp::automation::Value::get(
+                lane,
+                crate::config::automation::Target::FilterQ,
+                filter.q,
+            );
             out_l = process_filter_sample(
                 &mut state_bank.slots[idx].filter_l,
                 FilterParams {
                     filter_type: filter.filter_type,
                     cutoff_hz,
-                    q: filter.q,
+                    q,
                     drive: filter.drive,
                     mix: filter.mix,
                 },
@@ -740,7 +780,7 @@ impl InputFxEngine {
                 FilterParams {
                     filter_type: filter.filter_type,
                     cutoff_hz,
-                    q: filter.q,
+                    q,
                     drive: filter.drive,
                     mix: filter.mix,
                 },
@@ -760,14 +800,32 @@ impl InputFxEngine {
             if self.pdc_enabled && self.control_clock.get(pipeline_latency).is_none() {
                 continue;
             }
+            let lane = self
+                .control_clock
+                .get(if self.pdc_enabled {
+                    pipeline_latency
+                } else {
+                    0
+                })
+                .and_then(|point| {
+                    crate::dsp::automation::sample(&slot.parameter_lane, point, self.sample_rate)
+                });
             let (wet_l, wet_r) = process_reverb_frame(
                 &mut state_bank.slots[idx].reverb,
                 ReverbParams {
                     dry_level: reverb.dry_level,
-                    wet_level: reverb.wet_level,
+                    wet_level: crate::dsp::automation::Value::get(
+                        lane,
+                        crate::config::automation::Target::ReverbWet,
+                        reverb.wet_level,
+                    ),
                     density: reverb.density,
                     size_ms: reverb.size_ms,
-                    rt60_ms: reverb.rt60_ms,
+                    rt60_ms: crate::dsp::automation::Value::get(
+                        lane,
+                        crate::config::automation::Target::ReverbDecay,
+                        reverb.rt60_ms,
+                    ),
                     predelay_ms: reverb.predelay_ms,
                     width: reverb.width,
                     high_cut_hz: reverb.high_cut_hz,
@@ -804,12 +862,17 @@ impl InputFxEngine {
                 let point = point.unwrap();
                 if slot.enabled || latency > 0 {
                     state_bank.slots[idx].audio.set_pdc(self.pdc_enabled);
-                    let wet = state_bank.slots[idx].audio.process(
+                    let wet = state_bank.slots[idx].audio.process_automated(
                         audio,
                         point.bpm,
                         point.elapsed as f64 / self.sample_rate as f64,
                         point.active,
                         (out_l, out_r),
+                        crate::dsp::automation::sample(
+                            &slot.parameter_lane,
+                            point,
+                            self.sample_rate,
+                        ),
                     );
                     (out_l, out_r) = if slot.enabled {
                         wet
@@ -877,6 +940,11 @@ impl InputFxRuntime {
                 let (mut osc, filter, reverb, my_delay, vocoder) = match slot.fx.as_ref() {
                     Some(InputFx::Oscillator(osc)) => (
                         Some(OscillatorRuntime {
+                            dry_level: if osc.dry_level.is_finite() {
+                                osc.dry_level.clamp(0.0, 1.0)
+                            } else {
+                                1.0
+                            },
                             poly: crate::dsp::oscillator::PolyOscRuntime::from_config(osc),
                             waveform: osc.waveform.value,
                             level: (osc.level.value as f32 / 100.0).clamp(0.0, 1.0),
@@ -1244,6 +1312,10 @@ impl InputFxRuntime {
                     osc.poly.phrase.source = crate::dsp::oscillator::source_key(&slot.source_id);
                 }
                 FxSlotRuntime {
+                    parameter_lane: crate::dsp::automation::PreparedLane::prepare(
+                        &slot.parameter_lane,
+                        crate::config::automation::input_family(slot.fx.as_ref()),
+                    ),
                     source_key: {
                         use std::hash::{Hash, Hasher};
                         let mut key = std::collections::hash_map::DefaultHasher::new();
@@ -1283,6 +1355,7 @@ impl FxBankRuntime {
     pub fn empty() -> Self {
         Self {
             slots: std::array::from_fn(|_| FxSlotRuntime {
+                parameter_lane: None,
                 source_key: 0,
                 roll: None,
                 audio: None,
@@ -1311,6 +1384,7 @@ impl FxBankState {
     pub fn new(sample_rate: f32) -> Self {
         Self {
             slots: std::array::from_fn(|slot_index| FxSlotState {
+                osc_dry_gain: -1.0,
                 generator_align: super::pdc::AlignDelay::new(sample_rate),
                 modulator_align: super::pdc::AlignDelay::new(sample_rate),
                 carrier_align: super::pdc::AlignDelay::new(sample_rate),

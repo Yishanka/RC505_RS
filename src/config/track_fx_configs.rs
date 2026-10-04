@@ -63,12 +63,16 @@ impl TrackFxKind {
 }
 
 pub struct TrackFxSlot {
+    pub parameter_lane: super::automation::ParameterLane,
     pub fx: Option<TrackFx>,
 }
 
 impl TrackFxSlot {
     pub fn new() -> Self {
-        Self { fx: None }
+        Self {
+            fx: None,
+            parameter_lane: Default::default(),
+        }
     }
 
     pub fn set_kind(&mut self, kind: TrackFxKind) {
@@ -84,6 +88,13 @@ impl TrackFxSlot {
             TrackFxKind::Roll => Some(TrackFx::Roll(RollConfigs::new())),
             TrackFxKind::Filter => Some(TrackFx::Filter(TrackFilterConfigs::new())),
         };
+        if !self
+            .parameter_lane
+            .target
+            .accepts(super::automation::track_family(self.fx.as_ref()))
+        {
+            self.parameter_lane.enabled = false;
+        }
     }
 
     pub fn kind(&self) -> TrackFxKind {

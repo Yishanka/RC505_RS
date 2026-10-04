@@ -33,6 +33,7 @@ impl MyApp {
         }
     }
     pub(super) fn handle_input(&mut self, ctx: &egui::Context) {
+        ui::navigation::restore_input(ctx);
         let mut input = ctx.input(Clone::clone);
         if !self.master_fx_open {
             if let Some(scope) = ui::navigation::focused_scope(ctx) {
@@ -41,16 +42,17 @@ impl MyApp {
         }
         let text = ctx.wants_keyboard_input();
         let pending_text = ui::parameters::take_pending_text(ctx);
-        let typing = pending_text
-            || ctx
-                .memory(|m| m.focused())
-                .is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some());
+        let typing =
+            pending_text || ui::navigation::text_focused(ctx) || ui::navigation::clicking_text(ctx);
         if !typing {
             // egui treats repeated Enter/Space as another widget click. Keep
             // first activation and held state, without repeatedly toggling.
             remove_button_repeat(&mut input);
             ctx.input_mut(remove_button_repeat);
         }
+        // Physical performance polling intentionally removes auto-repeat from
+        // buttons. Panel traversal keeps the original navigation key events.
+        let navigation_input = input.clone();
         let global_keys = !typing && !self.player_open && !self.replay_browser;
         let editing_controls =
             self.editor.expanded || self.master_fx_open || self.focus != Focus::Performance;
@@ -157,12 +159,11 @@ impl MyApp {
             if !typing && pressed(&input, Key::Escape) {
                 self.master_fx_open = false;
             } else if !typing {
-                let parameter = ui::navigation::parameter_focused(ctx);
                 if !input.modifiers.ctrl && !input.modifiers.alt && !popup_open {
-                    let next = input.key_pressed(Key::Tab) && !input.modifiers.shift
-                        || !parameter && input.key_pressed(Key::ArrowDown);
-                    let previous = input.key_pressed(Key::Tab) && input.modifiers.shift
-                        || !parameter && input.key_pressed(Key::ArrowUp);
+                    let next = navigation_input.key_pressed(Key::Tab) && !input.modifiers.shift
+                        || navigation_input.key_pressed(Key::ArrowDown);
+                    let previous = navigation_input.key_pressed(Key::Tab) && input.modifiers.shift
+                        || navigation_input.key_pressed(Key::ArrowUp);
                     if next || previous {
                         consume_navigation_keys(ctx);
                         ui::navigation::advance(ctx, Focus::Editor, if next { 1 } else { -1 });
@@ -319,16 +320,13 @@ impl MyApp {
         if self.focus != Focus::Performance {
             let no_command =
                 !input.modifiers.ctrl && !input.modifiers.alt && !input.modifiers.mac_cmd;
-            let editing = ctx
-                .memory(|m| m.focused())
-                .is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some());
-            let parameter = ui::navigation::parameter_focused(ctx);
+            let canvas = ui::navigation::canvas_focused(ctx);
             let next = no_command
-                && ((!editing && !parameter && input.key_pressed(Key::ArrowDown))
-                    || input.key_pressed(Key::Tab) && !input.modifiers.shift);
+                && ((!canvas && navigation_input.key_pressed(Key::ArrowDown))
+                    || navigation_input.key_pressed(Key::Tab) && !input.modifiers.shift);
             let previous = no_command
-                && ((!editing && !parameter && input.key_pressed(Key::ArrowUp))
-                    || input.key_pressed(Key::Tab) && input.modifiers.shift);
+                && ((!canvas && navigation_input.key_pressed(Key::ArrowUp))
+                    || navigation_input.key_pressed(Key::Tab) && input.modifiers.shift);
             if next || previous {
                 consume_navigation_keys(ctx);
                 ui::navigation::advance(ctx, self.focus, if next { 1 } else { -1 });

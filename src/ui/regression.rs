@@ -16,19 +16,19 @@ fn frame(ctx: &egui::Context, app: &mut MyApp, time: &mut f64, events: Vec<egui:
             }
         })
         .unwrap_or_default();
-    let output = ctx.run(
-        egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(1320.0, 900.0),
-            )),
-            time: Some(*time),
-            modifiers,
-            events,
-            ..Default::default()
-        },
-        |ctx| app.render_frame(ctx),
-    );
+    let mut raw = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            ctx.data(|d| d.get_temp::<egui::Vec2>(egui::Id::new("regression-size")))
+                .unwrap_or(egui::vec2(1320.0, 900.0)),
+        )),
+        time: Some(*time),
+        modifiers,
+        events,
+        ..Default::default()
+    };
+    <MyApp as eframe::App>::raw_input_hook(app, ctx, &mut raw);
+    let output = ctx.run(raw, |ctx| app.render_frame(ctx));
     assert!(
         !output.viewport_output.values().any(|v| v
             .commands
@@ -372,8 +372,8 @@ fn editor_performance_regression(ctx: &egui::Context, app: &mut MyApp, time: &mu
         _ => panic!("Changed pinned effect"),
     };
     assert!(
-        (delay_time(app) - 1.24).abs() < 1e-5,
-        "Arrow precision is independent of slider width"
+        (delay_time(app) - 2.23).abs() < 1e-5,
+        "Performance key adds one millisecond and retains the typed fraction"
     );
     // The offline bridge accepts commands without advancing audio samples.
     assert!(
@@ -394,10 +394,10 @@ fn editor_performance_regression(ctx: &egui::Context, app: &mut MyApp, time: &mu
         "Editor Delete must not clear a track or cancel its Record command"
     );
     press(ctx, app, time, Key::ArrowUp, Modifiers::NONE);
-    assert!(
-        (delay_time(app) - 1.34).abs() < 1e-5,
-        "Up is ten fine steps, not focus traversal"
-    );
+    assert!((delay_time(app) - 2.23).abs() < 1e-5, "Up only moves focus");
+    assert_ne!(ctx.memory(|m| m.focused()), Some(parameter));
+    press(ctx, app, time, Key::ArrowDown, Modifiers::NONE);
+    assert_eq!(ctx.memory(|m| m.focused()), Some(parameter));
     app.config.input_fx.banks[0].slots[1].is_enabled = false;
     let shift = Modifiers {
         shift: true,
@@ -418,7 +418,7 @@ fn editor_performance_regression(ctx: &egui::Context, app: &mut MyApp, time: &mu
     assert!(app.config.input_fx.banks[0].slots[1].is_enabled);
     press(ctx, app, time, Key::ArrowRight, shift);
     assert!(
-        (delay_time(app) - 1.35).abs() < 1e-5,
+        (delay_time(app) - 3.23).abs() < 1e-5,
         "A held momentary FX must not block arrow adjustment"
     );
     assert!(app.config.input_fx.banks[0].slots[1].is_enabled);
@@ -539,6 +539,212 @@ fn fader_panel_transition_regression(ctx: &egui::Context, app: &mut MyApp, time:
     app.close_editor(ctx);
 }
 
+fn compact_parameter_navigation_regression(ctx: &egui::Context, app: &mut MyApp, time: &mut f64) {
+    use crate::{config::InputFx, engine::core::Action};
+    ctx.data_mut(|data| {
+        data.insert_temp(egui::Id::new("regression-size"), egui::vec2(960.0, 720.0))
+    });
+    super::preview::configure(app, "audio-fx-panning");
+    app.editor.expanded = false;
+    app.action(Action::Panic);
+    app.focus_panel(ctx, Focus::Right);
+    frame(ctx, app, time, vec![]);
+    let before = serde_json::to_vec(&crate::project::data_from_config(&app.config)).unwrap();
+    let mut seen = std::collections::HashSet::new();
+    for key in [Key::ArrowDown, Key::ArrowUp] {
+        for n in 0..90 {
+            frame(
+                ctx,
+                app,
+                time,
+                vec![egui::Event::Key {
+                    key,
+                    physical_key: Some(key),
+                    pressed: true,
+                    repeat: n > 0,
+                    modifiers: Modifiers::NONE,
+                }],
+            );
+            assert!(
+                app.focus == Focus::Right,
+                "Vertical traversal must stay in the quick FX panel"
+            );
+            if let Some(id) = ctx.memory(|m| m.focused()) {
+                seen.insert(id);
+            }
+            let after = serde_json::to_vec(&crate::project::data_from_config(&app.config)).unwrap();
+            if after != before {
+                fn differences(
+                    a: &serde_json::Value,
+                    b: &serde_json::Value,
+                    path: &str,
+                    out: &mut Vec<String>,
+                ) {
+                    if a == b {
+                        return;
+                    }
+                    match (a, b) {
+                        (serde_json::Value::Object(a), serde_json::Value::Object(b)) => {
+                            for (k, v) in a {
+                                differences(v, &b[k], &format!("{path}/{k}"), out);
+                            }
+                        }
+                        (serde_json::Value::Array(a), serde_json::Value::Array(b))
+                            if a.len() == b.len() =>
+                        {
+                            for (i, (a, b)) in a.iter().zip(b).enumerate() {
+                                differences(a, b, &format!("{path}/{i}"), out);
+                            }
+                        }
+                        _ => out.push(format!("{path}: {a} -> {b}")),
+                    }
+                }
+                let mut changes = Vec::new();
+                differences(
+                    &serde_json::from_slice(&before).unwrap(),
+                    &serde_json::from_slice(&after).unwrap(),
+                    "",
+                    &mut changes,
+                );
+                panic!("Vertical navigation changed config (event {n}, {key:?}): {changes:?}");
+            }
+            assert!(
+                !ctx.memory(|m| m.any_popup_open()),
+                "Vertical navigation must not open a picker"
+            );
+        }
+        frame(
+            ctx,
+            app,
+            time,
+            vec![egui::Event::Key {
+                key,
+                physical_key: Some(key),
+                pressed: false,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            }],
+        );
+    }
+    assert!(
+        seen.len() > 5,
+        "Held arrows must traverse controls in the small quick panel: {} distinct focus IDs",
+        seen.len()
+    );
+    let kind = ctx
+        .data(|d| d.get_temp::<egui::Id>(egui::Id::new(("selector", "kind"))))
+        .unwrap();
+    ctx.memory_mut(|m| m.request_focus(kind));
+    frame(ctx, app, time, vec![]);
+    let previous = app.config.input_fx.slot_kind(0, 0);
+    press(ctx, app, time, Key::ArrowRight, Modifiers::NONE);
+    assert!(
+        app.config.input_fx.slot_kind(0, 0) != previous,
+        "Horizontal keys edit the focused enum"
+    );
+    press(ctx, app, time, Key::ArrowLeft, Modifiers::NONE);
+    assert!(app.config.input_fx.slot_kind(0, 0) == previous);
+    if let Some(InputFx::Audio(delay)) = &mut app.config.input_fx.banks[0].slots[0].fx {
+        delay.time_ms = 7.53;
+        delay.sync_beats = 0.0;
+    }
+    frame(ctx, app, time, vec![]);
+    let time_id = ctx
+        .data(|d| {
+            d.get_temp::<egui::Id>(egui::Id::new((
+                "parameter",
+                app.language.choose("Time (ms)", "时间（毫秒）"),
+            )))
+        })
+        .unwrap();
+    ctx.memory_mut(|m| m.request_focus(time_id));
+    frame(ctx, app, time, vec![]);
+    press(ctx, app, time, Key::ArrowRight, Modifiers::NONE);
+    if let Some(InputFx::Audio(delay)) = &app.config.input_fx.banks[0].slots[0].fx {
+        assert!((delay.time_ms - 8.53).abs() < 1e-5);
+    }
+    app.config.input_fx.set_slot_kind(
+        0,
+        0,
+        crate::config::FxKind::Audio(crate::config::audio_fx::AudioFxKind::Equalizer),
+    );
+    frame(ctx, app, time, vec![]);
+    let db_id = ctx
+        .data(|d| {
+            d.get_temp::<egui::Id>(egui::Id::new((
+                "parameter",
+                app.language.choose("Low shelf (dB)", "低频搁架（dB）"),
+            )))
+        })
+        .unwrap();
+    ctx.memory_mut(|m| m.request_focus(db_id));
+    frame(ctx, app, time, vec![]);
+    press(ctx, app, time, Key::ArrowRight, Modifiers::NONE);
+    if let Some(InputFx::Audio(eq)) = &app.config.input_fx.banks[0].slots[0].fx {
+        assert_eq!(eq.low_db, 0.5, "dB controls use half-dB keyboard steps");
+    }
+    // The first frame after Enter already belongs to the newly opened input,
+    // even before egui has emitted IME geometry for it.
+    frame(
+        ctx,
+        app,
+        time,
+        vec![egui::Event::Key {
+            key: Key::Enter,
+            physical_key: Some(Key::Enter),
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    frame(
+        ctx,
+        app,
+        time,
+        vec![
+            egui::Event::Key {
+                key: Key::Num1,
+                physical_key: Some(Key::Num1),
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            },
+            egui::Event::Text("1".into()),
+        ],
+    );
+    assert!(
+        matches!(app.view.tracks[0].mode, crate::engine::core::Mode::Empty),
+        "Typing cannot trigger track recording"
+    );
+    frame(
+        ctx,
+        app,
+        time,
+        vec![
+            egui::Event::Key {
+                key: Key::Num1,
+                physical_key: Some(Key::Num1),
+                pressed: false,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            },
+            egui::Event::Key {
+                key: Key::Enter,
+                physical_key: Some(Key::Enter),
+                pressed: false,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            },
+        ],
+    );
+    press(ctx, app, time, Key::Escape, Modifiers::NONE);
+    if let Some(InputFx::Audio(eq)) = &app.config.input_fx.banks[0].slots[0].fx {
+        assert_eq!(eq.low_db, 0.5, "Cancel restores the value before typing");
+    }
+    ctx.data_mut(|data| data.remove::<egui::Vec2>(egui::Id::new("regression-size")));
+    app.focus_panel(ctx, Focus::Performance);
+}
+
 fn phrase_keyboard_regression(ctx: &egui::Context, app: &mut MyApp, time: &mut f64) {
     use crate::{
         config::{FxKind, InputFx},
@@ -548,6 +754,89 @@ fn phrase_keyboard_regression(ctx: &egui::Context, app: &mut MyApp, time: &mut f
     app.language = crate::app_support::language::Language::English;
     app.config.input_fx.set_slot_kind(0, 2, FxKind::Oscillator);
     app.open_editor(ctx);
+    app.editor.library_open = true;
+    frame(ctx, app, time, vec![]);
+    let name_id = ctx
+        .data(|d| d.get_temp::<egui::Id>(egui::Id::new("preset-name-field")))
+        .unwrap();
+    // Stop immediately on the traversal frame, before this TextEdit can draw
+    // with focus and emit an IME rectangle.
+    for _ in 0..35 {
+        frame(
+            ctx,
+            app,
+            time,
+            vec![egui::Event::Key {
+                key: Key::Tab,
+                physical_key: Some(Key::Tab),
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            }],
+        );
+        if ctx.memory(|m| m.focused()) == Some(name_id) {
+            break;
+        }
+        frame(
+            ctx,
+            app,
+            time,
+            vec![egui::Event::Key {
+                key: Key::Tab,
+                physical_key: Some(Key::Tab),
+                pressed: false,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            }],
+        );
+    }
+    assert_eq!(ctx.memory(|m| m.focused()), Some(name_id));
+    let prior_mode = app.view.tracks[0].mode;
+    frame(
+        ctx,
+        app,
+        time,
+        vec![
+            egui::Event::Key {
+                key: Key::Num1,
+                physical_key: Some(Key::Num1),
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            },
+            egui::Event::Text("1".into()),
+        ],
+    );
+    assert!(
+        app.view.tracks[0].mode == prior_mode,
+        "First-frame preset text entry cannot trigger a track"
+    );
+    assert!(app.editor.preset_name.ends_with('1'));
+    frame(
+        ctx,
+        app,
+        time,
+        vec![
+            egui::Event::Key {
+                key: Key::Num1,
+                physical_key: Some(Key::Num1),
+                pressed: false,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            },
+            egui::Event::Key {
+                key: Key::Tab,
+                physical_key: Some(Key::Tab),
+                pressed: false,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            },
+        ],
+    );
+    ctx.memory_mut(|m| m.stop_text_input());
+    app.editor.library_open = false;
+    app.editor.preset_name.clear();
+    app.focus_panel(ctx, Focus::Editor);
     frame(ctx, app, time, vec![]);
     let source_id = ctx
         .data(|d| d.get_temp::<egui::Id>(egui::Id::new(("selector", "phrase-link-source"))))
@@ -565,10 +854,10 @@ fn phrase_keyboard_regression(ctx: &egui::Context, app: &mut MyApp, time: &mut f
         "Tab must reach source selection in the phrase manager"
     );
     let before = app.editor.phrase_source.clone();
-    press(ctx, app, time, Key::ArrowDown, Modifiers::NONE);
+    press(ctx, app, time, Key::ArrowRight, Modifiers::NONE);
     assert_ne!(
         app.editor.phrase_source, before,
-        "A source enum accepts arrows without leaving the editor"
+        "A source enum accepts horizontal arrows without leaving the editor"
     );
     assert!(app.editor.expanded);
     app.editor.phrase_manager_open = false;
@@ -826,6 +1115,7 @@ pub fn run() {
     tap_start_regression(&ctx, &mut app, &mut time);
     mouse_fader_keyboard_regression(&ctx, &mut app, &mut time);
     editor_performance_regression(&ctx, &mut app, &mut time);
+    compact_parameter_navigation_regression(&ctx, &mut app, &mut time);
     fader_panel_transition_regression(&ctx, &mut app, &mut time);
     phrase_keyboard_regression(&ctx, &mut app, &mut time);
     app.app_state = AppState::Init;

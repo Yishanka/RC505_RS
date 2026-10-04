@@ -258,7 +258,6 @@ fn fixed_panel(
     ));
     frame.show(ui, |ui| {
         let request = app.focus == focus && app.focus_request;
-        nav::begin(ui, focus, request);
         if request {
             app.focus_request = false;
         }
@@ -277,8 +276,13 @@ fn fixed_panel(
             .max_height(height)
             .min_scrolled_height(height)
             .auto_shrink([false, false])
-            .show(ui, |ui| draw(ui, app));
-        nav::end(ui);
+            .show(ui, |ui| {
+                nav::begin(ui, focus, request);
+                draw(ui, app);
+                // Scroll the quick panel itself when keyboard focus moves to
+                // an off-screen parameter, not the outer performance surface.
+                nav::end(ui);
+            });
     });
 }
 fn transport(ui: &mut egui::Ui, app: &mut MyApp) {
@@ -325,7 +329,7 @@ fn transport(ui: &mut egui::Ui, app: &mut MyApp) {
     });
     theme::control_row(ui, |ui| {
         ui.label("BPM");
-        nav::register(
+        nav::text(
             ui.add_enabled(
                 app.tempo_edit_allowed(),
                 egui::DragValue::new(&mut app.config.beat_config.input_bpm.value)
@@ -558,7 +562,7 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
                         (StopMode::Fade, lang.text("Fade out")),
                     ],
                 );
-                nav::register(
+                nav::text(
                     ui.add_enabled(
                         options.stop_mode == StopMode::Fade,
                         egui::DragValue::new(&mut options.fade_ms)
@@ -581,7 +585,7 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
                     ],
                 );
                 ui.label(lang.text("Length"));
-                nav::register(ui.add(egui::DragValue::new(&mut options.measures).clamp_range(0..=128).suffix(" bars"))).on_hover_text(lang.text("0 = finish manually; 1–128 = fixed length in 4/4. Maximum audio length is five minutes."));
+                nav::text(ui.add(egui::DragValue::new(&mut options.measures).clamp_range(0..=128).suffix(" bars"))).on_hover_text(lang.text("0 = finish manually; 1–128 = fixed length in 4/4. Maximum audio length is five minutes."));
             });
             theme::caption(
                 ui,

@@ -1,9 +1,12 @@
 pub mod audio_fx;
 pub mod audio_modulation;
+pub mod automation;
 pub mod biquad;
 pub mod delay;
 pub mod detector;
+pub mod distortion;
 pub mod dynamics;
+pub mod dynamics_profiles;
 pub mod envelope;
 pub mod filter;
 pub mod filter_sweep;

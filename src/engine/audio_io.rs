@@ -28,6 +28,7 @@ pub const DEFAULT_BUFFER: u32 = 128;
 pub struct Diagnostics {
     pub calibration_hold: AtomicBool,
     pub auditioning: AtomicBool,
+    pub audition_commands: AtomicU64,
     pub audition_frame: AtomicU64,
     pub underrun: AtomicU64,
     pub overflow: AtomicU64,
@@ -197,6 +198,9 @@ impl Callback {
                             .auditioning
                             .store(self.audition.is_some(), Ordering::Relaxed);
                     }
+                    self.diagnostics
+                        .audition_commands
+                        .fetch_add(1, Ordering::Release);
                 }
                 Control::AuditionUpdate(params) => {
                     if let Some(audition) = &mut self.audition {
@@ -371,11 +375,16 @@ impl Callback {
                 self.diagnostics.take_failed.store(true, Ordering::Relaxed);
             }
         }
-        let click = self.core.compensate_monitor_click(click);
+        let mut click = self.core.compensate_monitor_click(click);
         if let Some(audition) = &mut self.audition {
             let preview = audition.next(dry, &self.core);
-            result[0] += preview[0];
-            result[1] += preview[1];
+            if audition.is_exclusive() {
+                result = preview;
+                click = 0.0;
+            } else {
+                result[0] += preview[0];
+                result[1] += preview[1];
+            }
         }
         if self.audition.as_ref().is_some_and(|a| a.finished()) && self.worker.free_len() > 0 {
             let retired = Control::Audition(self.audition.take());
@@ -1003,6 +1012,124 @@ mod output_tests {
             sample_rate: cpal::SampleRate(8000),
             buffer_size: cpal::BufferSize::Fixed(128),
         })
+    }
+    #[test]
+    fn candidate_isolates_monitoring_without_changing_recording_or_live_parameters() {
+        use crate::{
+            config::{FxKind, InputFx, audio_fx::AudioFxKind},
+            engine::audition::{Audition, AuditionParameters},
+            presets::FxTarget,
+        };
+        let (mut audio, mut cb) = callback();
+        cb.enabled = true;
+        cb.core.options[0].quantize = crate::config::track_options::Quantize::Off;
+        cb.core.action(Action::Trigger(0), &mut cb.pages);
+        let mut staging = AppConfig::new(120, 0, 5);
+        staging
+            .input_fx
+            .set_slot_kind(0, 0, FxKind::Audio(AudioFxKind::Pan));
+        if let Some(InputFx::Audio(pan)) = &mut staging.input_fx.banks[0].slots[0].fx {
+            pan.pan = 1.0;
+        }
+        let params =
+            AuditionParameters::candidate(&staging, FxTarget::Input { bank: 0, slot: 0 }, 0)
+                .unwrap();
+        audio
+            .send(Control::Audition(Some(Box::new(
+                Audition::new(params, 8000).exclusive(),
+            ))))
+            .unwrap();
+        cb.commands();
+        for _ in 0..100 {
+            let output = cb.frame([0.2; 2]);
+            assert!(output[0].abs() < 1e-6);
+            assert!(
+                (output[1] - 0.2).abs() < 1e-6,
+                "Candidate was added to the original monitor instead of isolated"
+            );
+        }
+        assert_eq!(cb.core.tracks[0].audio.len, 100);
+        for frame in 0..100 {
+            assert_eq!(cb.core.tracks[0].audio.read(frame), [0.2; 2]);
+        }
+        audio.send(Control::Audition(None)).unwrap();
+        cb.commands();
+        assert_eq!(cb.frame([0.2; 2]), [0.2; 2]);
+        assert_eq!(cb.core.clock.frame, 101);
+    }
+    #[test]
+    fn audition_command_ack_survives_delayed_callback_and_full_stop_queue() {
+        use crate::{
+            config::{FxKind, InputFx, audio_fx::AudioFxKind},
+            engine::audition::{Audition, AuditionParameters, Requests},
+            presets::FxTarget,
+        };
+        let (mut audio, mut cb) = callback();
+        cb.enabled = true;
+        let mut requests = Requests::default();
+        let mut config = AppConfig::new(120, 0, 5);
+        config
+            .input_fx
+            .set_slot_kind(0, 0, FxKind::Audio(AudioFxKind::Pan));
+        if let Some(InputFx::Audio(p)) = &mut config.input_fx.banks[0].slots[0].fx {
+            p.pan = 1.0;
+        }
+        let params =
+            AuditionParameters::candidate(&config, FxTarget::Input { bank: 0, slot: 0 }, 0)
+                .unwrap();
+        let serial = requests.next(0);
+        audio
+            .send(Control::Audition(Some(Box::new(
+                Audition::new(params, 8000).exclusive(),
+            ))))
+            .unwrap();
+        requests.sent(serial, true);
+        assert_eq!(
+            requests.observe(
+                audio.diagnostics.audition_commands.load(Ordering::Acquire),
+                audio.diagnostics.auditioning.load(Ordering::Relaxed)
+            ),
+            None,
+            "Queued starts are not disproved by a stale false flag"
+        );
+        cb.commands();
+        assert_eq!(
+            requests.observe(
+                audio.diagnostics.audition_commands.load(Ordering::Acquire),
+                audio.diagnostics.auditioning.load(Ordering::Relaxed)
+            ),
+            Some(true)
+        );
+        while audio.send(Control::Spectrum(false)).is_ok() {}
+        assert!(audio.send(Control::Audition(None)).is_err());
+        assert_eq!(
+            requests.observe(
+                audio.diagnostics.audition_commands.load(Ordering::Acquire),
+                audio.diagnostics.auditioning.load(Ordering::Relaxed)
+            ),
+            Some(true),
+            "Failed Stop must retain the playing state"
+        );
+        assert!(cb.frame([0.2; 2])[0].abs() < 1e-6);
+        cb.commands();
+        let stop = requests.next(audio.diagnostics.audition_commands.load(Ordering::Acquire));
+        audio.send(Control::Audition(None)).unwrap();
+        requests.sent(stop, false);
+        assert_eq!(requests.observe(serial, true), None);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while audio.diagnostics.audition_commands.load(Ordering::Acquire) < stop {
+            cb.commands();
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            requests.observe(
+                audio.diagnostics.audition_commands.load(Ordering::Acquire),
+                audio.diagnostics.auditioning.load(Ordering::Relaxed)
+            ),
+            Some(false)
+        );
+        assert_eq!(cb.frame([0.2; 2]), [0.2; 2]);
     }
     #[test]
     fn failed_calibration_stays_muted_until_explicit_release() {

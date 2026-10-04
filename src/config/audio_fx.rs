@@ -91,6 +91,40 @@ pub enum DriveStyle {
     Hard,
     Fuzz,
 }
+/// These are independent software voicings, not measured BOSS circuit models.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DistortionType {
+    #[default]
+    Legacy,
+    Vocal,
+    Boost,
+    Overdrive,
+    Distortion,
+    Metal,
+    Fuzz,
+}
+impl DistortionType {
+    pub const ALL: [Self; 7] = [
+        Self::Legacy,
+        Self::Vocal,
+        Self::Boost,
+        Self::Overdrive,
+        Self::Distortion,
+        Self::Metal,
+        Self::Fuzz,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Legacy => "Legacy",
+            Self::Vocal => "Vocal",
+            Self::Boost => "Boost",
+            Self::Overdrive => "OD",
+            Self::Distortion => "DS",
+            Self::Metal => "Metal",
+            Self::Fuzz => "Fuzz",
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DynamicsMode {
     #[default]
@@ -123,8 +157,14 @@ pub struct AudioFxConfig {
     pub stability: f32,
     pub drive_db: f32,
     pub drive_style: DriveStyle,
+    pub distortion_type: DistortionType,
+    pub distortion_tone: f32,
+    pub distortion_direct: f32,
+    pub distortion_effect: f32,
     pub tone_hz: f32,
     pub dynamics_mode: DynamicsMode,
+    pub dynamics_profile: super::dynamics_profiles::DynamicsProfile,
+    pub dynamics_amount: f32,
     pub threshold_db: f32,
     pub ratio: f32,
     pub knee_db: f32,
@@ -235,8 +275,14 @@ impl Default for AudioFxConfig {
             stability: 0.25,
             drive_db: 18.0,
             drive_style: DriveStyle::Soft,
+            distortion_type: DistortionType::Legacy,
+            distortion_tone: 0.0,
+            distortion_direct: 0.0,
+            distortion_effect: 0.5,
             tone_hz: 6000.0,
             dynamics_mode: DynamicsMode::Compressor,
+            dynamics_profile: super::dynamics_profiles::DynamicsProfile::Custom,
+            dynamics_amount: 0.0,
             threshold_db: -18.0,
             ratio: 4.0,
             knee_db: 6.0,
@@ -300,6 +346,7 @@ impl AudioFxConfig {
             ..Self::default()
         };
         match kind {
+            AudioFxKind::Distortion => p.distortion_type = DistortionType::Vocal,
             AudioFxKind::Harmonist => {
                 p.scale = Scale::Major;
                 p.preserve_formants = true;
@@ -367,6 +414,10 @@ impl AudioFxConfig {
         bound!(retune_ms, 0.0, 200.0);
         bound!(stability, 0.0, 1.0);
         bound!(drive_db, 0.0, 42.0);
+        bound!(distortion_tone, -50.0, 50.0);
+        bound!(distortion_direct, 0.0, 1.0);
+        bound!(distortion_effect, 0.0, 1.0);
+        bound!(dynamics_amount, -20.0, 20.0);
         bound!(tone_hz, 200.0, 20000.0);
         bound!(threshold_db, -60.0, 0.0);
         bound!(ratio, 1.0, 20.0);
