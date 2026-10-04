@@ -190,6 +190,7 @@ pub struct InputFxState {
 }
 
 pub struct InputFxEngine {
+    external_only: bool,
     control_clock: super::pdc::ClockHistory,
     pdc_enabled: bool,
     track_latencies: [usize; 5],
@@ -205,6 +206,11 @@ pub struct InputFxEngine {
 }
 
 impl InputFxEngine {
+    /// A private recording analysis chain: process dry controls and downstream
+    /// effects normally, but never advance phrases, capture PCM, or emit OSC.
+    pub fn set_external_only(&mut self, enabled: bool) {
+        self.external_only = enabled;
+    }
     pub fn phrase_views(&self) -> [[crate::dsp::oscillator::PhraseView; 4]; 4] {
         std::array::from_fn(|bank| {
             std::array::from_fn(|slot| {
@@ -221,6 +227,7 @@ impl InputFxEngine {
     }
     pub fn new(sample_rate: f32) -> Self {
         Self {
+            external_only: false,
             control_clock: super::pdc::ClockHistory::new(sample_rate),
             pdc_enabled: false,
             track_latencies: [0; 5],
@@ -396,7 +403,7 @@ impl InputFxEngine {
         let tick = crate::dsp::oscillator::transport_tick(elapsed_secs, self.sample_rate, self.bpm);
         for (bank, state) in self.runtime.banks.iter().zip(&mut self.state.banks) {
             for (slot, state) in bank.slots.iter().zip(&mut state.slots) {
-                if let Some(osc) = &slot.osc {
+                if let Some(osc) = slot.osc.as_ref().filter(|_| !self.external_only) {
                     state
                         .poly_osc
                         .advance_phrase(&osc.poly, tick, self.clock_active);
@@ -478,12 +485,14 @@ impl InputFxEngine {
             if only_slot.is_some_and(|only| only != idx) {
                 continue;
             }
-            state_bank.slots[idx].poly_osc.capture(
-                &osc.poly,
-                (input_l + input_r) * 0.5,
-                self.sample_rate,
-                osc.threshold,
-            );
+            if !self.external_only {
+                state_bank.slots[idx].poly_osc.capture(
+                    &osc.poly,
+                    (input_l + input_r) * 0.5,
+                    self.sample_rate,
+                    osc.threshold,
+                );
+            }
             if !slot.enabled {
                 state_bank.slots[idx].poly_osc.reset();
                 continue;
@@ -495,6 +504,9 @@ impl InputFxEngine {
                 *dry_gain += (osc.dry_level - *dry_gain) / (self.sample_rate * 0.005).max(1.0);
             }
             osc_dry *= *dry_gain;
+            if self.external_only {
+                continue;
+            }
             let note = if !self.legacy_fallback && (!self.clock_active || osc.note_seq.is_empty()) {
                 None
             } else if osc.note_seq.is_empty() {
@@ -585,6 +597,9 @@ impl InputFxEngine {
             let Some(delay) = slot.my_delay.as_ref() else {
                 continue;
             };
+            if self.external_only {
+                continue;
+            }
 
             let note_on =
                 if !self.legacy_fallback && (!self.clock_active || delay.note_on_seq.is_empty()) {

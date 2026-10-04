@@ -915,6 +915,229 @@ fn phrase_keyboard_regression(ctx: &egui::Context, app: &mut MyApp, time: &mut f
     app.close_editor(ctx);
 }
 
+fn sample_persistence_regression() {
+    use crate::{
+        config::{
+            AppConfig, FxKind, InputFx,
+            osc_configs::{SampleAsset, Waveform},
+        },
+        engine::core::AudioSnapshot,
+        presets::{self, FxTarget},
+        project, session,
+    };
+    use std::sync::Arc;
+    let target = FxTarget::Input { bank: 0, slot: 0 };
+    let entry = project::ProjectEntry {
+        name: "Sample persistence".into(),
+        file: format!("sample-policy-{}.json", session::id()),
+    };
+    let mut config = AppConfig::new(120, 0, 5);
+    config.input_fx.set_slot_kind(0, 0, FxKind::Oscillator);
+    let source = Arc::new(SampleAsset::new(
+        "Temporary source".into(),
+        8000,
+        (0..32).map(|i| (i as f32 * 0.5).sin() * 0.2).collect(),
+    ));
+    let osc = |c: &AppConfig| match &c.input_fx.banks[0].slots[0].fx {
+        Some(InputFx::Oscillator(o)) => o.sample.as_ref().map(|s| s.content_hash),
+        _ => None,
+    };
+    if let Some(InputFx::Oscillator(o)) = &mut config.input_fx.banks[0].slots[0].fx {
+        o.waveform.value = Waveform::Sample;
+        o.sample = Some(source.clone());
+    }
+    let data = project::data_from_config(&config);
+    project::save_project_data(&entry, &data).unwrap();
+    let saved = project::load_project(&entry).unwrap().unwrap();
+    assert!(
+        saved.input_fx.banks[0].slots[0]
+            .osc
+            .as_ref()
+            .unwrap()
+            .sample
+            .is_none(),
+        "Ordinary save must discard temporary PCM"
+    );
+    assert_eq!(
+        osc(&config),
+        Some(source.content_hash),
+        "Saving config must not clear the current live sample"
+    );
+    let revision = session::save_snapshot(&entry, &AudioSnapshot::empty(8000), data).unwrap();
+    let bundle = session::project_assets(&entry)
+        .unwrap()
+        .join("snapshots")
+        .join(revision);
+    let (_, saved) = session::read_bundle(&bundle).unwrap();
+    assert!(
+        saved.input_fx.banks[0].slots[0]
+            .osc
+            .as_ref()
+            .unwrap()
+            .sample
+            .is_none(),
+        "Audio snapshot cannot silently save a temporary OSC sound"
+    );
+    assert!(
+        std::fs::read_dir(&bundle)
+            .unwrap()
+            .flatten()
+            .all(|f| f.path().extension().is_none_or(|e| e != "wav"))
+    );
+    // A saved replay must remain self-contained even when its sound was temporary.
+    let take = crate::replay::library::root().join(format!("sample-policy-{}", session::id()));
+    let writer = crate::replay::Writer::begin(
+        take.clone(),
+        entry.file.clone(),
+        0,
+        AudioSnapshot::empty(8000),
+        project::data_from_config(&config),
+    )
+    .unwrap();
+    writer.finish(0).unwrap();
+    let (_, initial) = session::read_bundle(&take.join("initial")).unwrap();
+    assert_eq!(
+        initial.input_fx.banks[0].slots[0]
+            .osc
+            .as_ref()
+            .unwrap()
+            .sample
+            .as_ref()
+            .unwrap()
+            .content_hash,
+        source.content_hash
+    );
+
+    let name = format!("saved-sample-{}", session::id());
+    presets::save(&mut config, target, &name).unwrap();
+    if let Some(InputFx::Oscillator(o)) = &mut config.input_fx.banks[0].slots[0].fx {
+        o.sample_start = 0.25;
+        o.envelope.attack_ms.value = 317;
+    }
+    project::save_project_data(&entry, &project::data_from_config(&config)).unwrap();
+    let path = crate::app_support::paths::projects_dir().join(&entry.file);
+    let disk: project::ProjectData =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let disk_osc = disk.input_fx.banks[0].slots[0].osc.as_ref().unwrap();
+    assert!(
+        disk_osc.sample.is_none() && disk_osc.sample_ref.is_some(),
+        "Project JSON should refer to one saved sound, not copy PCM"
+    );
+    let loaded = project::load_project(&entry).unwrap().unwrap();
+    let loaded_osc = loaded.input_fx.banks[0].slots[0].osc.as_ref().unwrap();
+    assert_eq!(loaded_osc.sample.as_ref().unwrap().frames, source.frames);
+    assert_eq!(loaded_osc.sample_start, 0.25);
+    assert_eq!(
+        loaded_osc.envelope.attack_ms, 317,
+        "Reference loading must not replace current sound controls"
+    );
+    let reference = loaded_osc.sample_ref.as_ref().unwrap().clone();
+    let mut invalid = reference.clone();
+    invalid.preset = "../outside".into();
+    assert!(presets::read_saved_sample(&invalid).is_err());
+    let preset_file = crate::app_support::paths::projects_dir()
+        .with_file_name("presets")
+        .join(format!("{name}.json"));
+    let shared_take =
+        crate::replay::library::root().join(format!("sample-library-reference-{}", session::id()));
+    crate::replay::Writer::begin(
+        shared_take.clone(),
+        entry.file.clone(),
+        0,
+        AudioSnapshot::empty(8000),
+        project::data_from_config(&config),
+    )
+    .unwrap()
+    .finish(0)
+    .unwrap();
+    let original = std::fs::read(&preset_file).unwrap();
+    let mut tampered = original.clone();
+    tampered.push(b' ');
+    std::fs::write(&preset_file, &tampered).unwrap();
+    let source_replay = crate::replay::streaming::Source::open(&shared_take).unwrap();
+    let (imported, imported_core) =
+        crate::replay::streaming::prepare_import(source_replay, 0, 8000).unwrap();
+    let imported_osc = imported.input_fx.banks[0].slots[0].osc.as_ref().unwrap();
+    assert!(
+        imported_osc.sample.is_some()
+            && imported_osc.sample_ref.is_none()
+            && imported_osc.sample_temporary,
+        "Portable replay sources stay playable and require an explicit local sound save"
+    );
+    assert!(project::persistable_data(&imported).is_ok());
+    drop(imported_core);
+    let missing = project::load_project(&entry).unwrap().unwrap();
+    let missing = missing.input_fx.banks[0].slots[0].osc.as_ref().unwrap();
+    assert!(
+        missing.sample.is_none() && missing.sample_error.is_some() && missing.sample_ref.is_some()
+    );
+    assert!(
+        project::save_project_data(&entry, &project::data_from_config(&config)).is_err(),
+        "Do not drop in-memory PCM into a broken reference"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        serde_json::to_vec_pretty(&disk).unwrap()
+    );
+    std::fs::write(&preset_file, original).unwrap();
+
+    // Use the actual import-completion path: a new source must forget the old saved link.
+    if let Some(InputFx::Oscillator(o)) = &mut config.input_fx.banks[0].slots[0].fx {
+        let (tx, rx) = std::sync::mpsc::channel();
+        o.sample_job = Some(rx);
+        tx.send(Ok(SampleAsset::new(
+            "Replacement".into(),
+            8000,
+            vec![0.1; 32],
+        )))
+        .unwrap();
+        o.poll_sample();
+        assert!(o.sample_temporary && o.sample_ref.is_none());
+    }
+    project::save_project_data(&entry, &project::data_from_config(&config)).unwrap();
+    assert!(
+        project::load_project(&entry)
+            .unwrap()
+            .unwrap()
+            .input_fx
+            .banks[0]
+            .slots[0]
+            .osc
+            .as_ref()
+            .unwrap()
+            .sample
+            .is_none()
+    );
+    assert_eq!(
+        presets::read_saved_sample(&reference).unwrap().frames,
+        source.frames,
+        "A new temporary capture must not overwrite the saved sound"
+    );
+
+    // Older embedded samples count as already saved and keep working without migration I/O.
+    let mut legacy = serde_json::to_value(project::data_from_config(&config)).unwrap();
+    let object = legacy["input_fx"]["banks"][0]["slots"][0]["osc"]
+        .as_object_mut()
+        .unwrap();
+    object.remove("sample_temporary");
+    object.remove("sample_ref");
+    let legacy: project::ProjectData = serde_json::from_value(legacy).unwrap();
+    project::save_project_data(&entry, &legacy).unwrap();
+    assert!(
+        project::load_project(&entry)
+            .unwrap()
+            .unwrap()
+            .input_fx
+            .banks[0]
+            .slots[0]
+            .osc
+            .as_ref()
+            .unwrap()
+            .sample
+            .is_some()
+    );
+}
+
 pub fn run() {
     assert!(
         std::env::args().any(|a| a == "--offline")
@@ -1118,6 +1341,7 @@ pub fn run() {
     compact_parameter_navigation_regression(&ctx, &mut app, &mut time);
     fader_panel_transition_regression(&ctx, &mut app, &mut time);
     phrase_keyboard_regression(&ctx, &mut app, &mut time);
+    sample_persistence_regression();
     app.app_state = AppState::Init;
     app.active_project_idx = None;
     let count = app.projects.len();

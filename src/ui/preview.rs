@@ -121,6 +121,18 @@ pub fn configure(app: &mut MyApp, mode: &str) {
                     .collect::<Vec<_>>(),
             )));
             osc.select_sample_region();
+            if mode.contains("saved") {
+                if let Some(sample) = &osc.sample {
+                    osc.sample_temporary = false;
+                    osc.sample_ref = Some(crate::config::osc_configs::SavedSampleRef {
+                        preset: "Glass keys".into(),
+                        sha256: "0".repeat(64),
+                        content_hash: sample.content_hash,
+                        sample_rate: sample.sample_rate,
+                        frames: sample.frames.len(),
+                    });
+                }
+            }
         }
         if mode.starts_with("lfo") {
             use crate::config::osc_configs::{CurvePoint, LfoShape, LfoTarget};

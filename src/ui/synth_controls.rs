@@ -204,9 +204,13 @@ fn sample_controls(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
             osc.capture = None;
             osc.capture_serial = osc.capture_serial.wrapping_add(1);
         }
-        if osc.sample.is_some() && button(ui, lang.choose("Clear sample", "移除采样")).clicked()
+        if (osc.sample.is_some() || osc.sample_ref.is_some())
+            && button(ui, lang.choose("Clear sample", "移除采样")).clicked()
         {
             osc.sample = None;
+            osc.sample_ref = None;
+            osc.sample_temporary = true;
+            osc.sample_message.clear();
         }
     });
     // A dropped WAV uses the same bounded worker import path as the native picker.

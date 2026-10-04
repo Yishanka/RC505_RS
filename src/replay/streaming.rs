@@ -363,6 +363,7 @@ pub fn prepare_import(
     let mut snapshot = machine.snapshot();
     let mut data = (*machine.data).clone();
     data.snapshot = None;
+    crate::presets::localize_replay_samples(&mut data);
     session::resample(&mut snapshot, sample_rate)?;
     let mut config = AppConfig::new(120, 0, 5);
     crate::project::apply_data_to_config(&mut config, data.clone());

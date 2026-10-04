@@ -16,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioFile {
     pub file: String,
@@ -31,15 +31,19 @@ pub struct Manifest {
     pub sample_rate: u32,
     pub frame: u64,
     pub config: ProjectData,
-    pub tracks: Vec<AudioFile>,
-    pub undo: Vec<AudioFile>,
+    /// Version 4 uses JSON null for empty audio. Legacy objects deserialize as
+    /// Some and keep their existing filename/checksum validation.
+    pub tracks: Vec<Option<AudioFile>>,
+    pub undo: Vec<Option<AudioFile>>,
     pub undo_valid: [bool; TRACKS],
     pub undone: [bool; TRACKS],
 }
 #[derive(Serialize, Deserialize)]
 pub struct HistoryFiles {
-    pub undo: Vec<AudioFile>,
-    pub redo: Vec<AudioFile>,
+    // A null entry is an actual history step back to an empty track, not an
+    // absent step. Keep stack lengths/order even when no WAV is needed.
+    pub undo: Vec<Option<AudioFile>>,
+    pub redo: Vec<Option<AudioFile>>,
 }
 
 pub fn id() -> String {
@@ -157,7 +161,10 @@ pub fn write_bundle(root: &Path, snapshot: &AudioSnapshot, config: ProjectData) 
     // Shared pages are immutable while this worker writes. Reuse assets with the
     // same page identity instead of writing the legacy undo and history twice.
     let mut written: Vec<(usize, Vec<usize>, AudioFile)> = Vec::new();
-    let mut write = |name: String, audio: &LoopAudio| -> Result<AudioFile> {
+    let mut write = |name: String, audio: &LoopAudio| -> Result<Option<AudioFile>> {
+        if audio.len == 0 {
+            return Ok(None);
+        }
         let pages = audio
             .pages
             .iter()
@@ -167,11 +174,11 @@ pub fn write_bundle(root: &Path, snapshot: &AudioSnapshot, config: ProjectData) 
             .iter()
             .find(|(len, old, _)| *len == audio.len && *old == pages)
         {
-            return Ok(file.clone());
+            return Ok(Some(file.clone()));
         }
         let file = write_audio(&root.join(name), snapshot.sample_rate, audio)?;
         written.push((audio.len, pages, file.clone()));
-        Ok(file)
+        Ok(Some(file))
     };
     for i in 0..TRACKS {
         manifest
@@ -215,7 +222,7 @@ pub fn write_bundle(root: &Path, snapshot: &AudioSnapshot, config: ProjectData) 
 pub fn read_bundle(root: &Path) -> Result<(AudioSnapshot, ProjectData)> {
     let manifest: Manifest = serde_json::from_slice(&fs::read(root.join("manifest.json"))?)?;
     ensure!(
-        manifest.version == 2 || manifest.version == FORMAT_VERSION,
+        (2..=FORMAT_VERSION).contains(&manifest.version),
         "Unsupported snapshot version {}",
         manifest.version
     );
@@ -230,7 +237,14 @@ pub fn read_bundle(root: &Path) -> Result<(AudioSnapshot, ProjectData)> {
     let mut snapshot = AudioSnapshot::empty(manifest.sample_rate);
     snapshot.at = manifest.frame;
     let mut cache = std::collections::HashMap::<String, (AudioFile, LoopAudio)>::new();
-    let mut read = |item: &AudioFile| -> Result<LoopAudio> {
+    let mut read = |item: &Option<AudioFile>| -> Result<LoopAudio> {
+        let Some(item) = item else {
+            ensure!(
+                manifest.version >= 4,
+                "Empty references require snapshot version 4"
+            );
+            return Ok(LoopAudio::new(manifest.sample_rate));
+        };
         if let Some((previous, audio)) = cache.get(&item.file) {
             ensure!(previous == item, "Conflicting metadata for shared asset");
             let mut copy = LoopAudio::new(manifest.sample_rate);
@@ -289,6 +303,7 @@ pub fn save_snapshot(
     snapshot: &AudioSnapshot,
     mut data: ProjectData,
 ) -> Result<String> {
+    data = project::persistable_data(&data)?;
     let revision = id();
     let root = project_assets(entry)?.join("snapshots");
     fs::create_dir_all(&root)?;
@@ -395,9 +410,195 @@ pub fn resample_frames(frames: &[[f32; 2]], source: u32, target: u32) -> Vec<[f3
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn fixture_root(name: &str) -> PathBuf {
+        Path::new("var").join(format!("{name}-{}", id()))
+    }
+    fn cleanup(root: &Path) {
+        let root = root.canonicalize().unwrap();
+        let workspace = Path::new("var").canonicalize().unwrap();
+        assert!(root.starts_with(&workspace) && root != workspace);
+        fs::remove_dir_all(root).unwrap();
+    }
+    fn wav_count(root: &Path) -> usize {
+        fs::read_dir(root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "wav"))
+            .count()
+    }
     #[test]
-    fn history_roundtrip_shared_assets_and_v2_migration() {
-        let root = std::path::Path::new("var").join(format!("history-snapshot-{}", id()));
+    fn empty_snapshot_and_replay_initial_use_null_references_without_wavs() {
+        let root = fixture_root("empty-audio-bundle");
+        let mut snapshot = AudioSnapshot::empty(8000);
+        snapshot.has_histories = true;
+        // Empty is a meaningful history step (undo to a blank track).
+        snapshot.histories[0]
+            .undo
+            .push(&snapshot.tracks[0], &mut OfflinePages);
+        snapshot.histories[0]
+            .redo
+            .push(&snapshot.tracks[0], &mut OfflinePages);
+        let config = project::data_from_config(&crate::config::AppConfig::new(123, 0, 5));
+        write_bundle(&root.join("snapshot"), &snapshot, config.clone()).unwrap();
+        assert_eq!(wav_count(&root.join("snapshot")), 0);
+        let data = fs::read(root.join("snapshot/manifest.json")).unwrap();
+        let manifest: Manifest = serde_json::from_slice(&data).unwrap();
+        assert_eq!(manifest.version, 4);
+        assert!(
+            manifest
+                .tracks
+                .iter()
+                .chain(&manifest.undo)
+                .all(Option::is_none)
+        );
+        assert!(manifest.histories[0].undo[0].is_none());
+        assert!(manifest.histories[0].redo[0].is_none());
+        let (loaded, config) = read_bundle(&root.join("snapshot")).unwrap();
+        assert_eq!(
+            (loaded.histories[0].undo.len, loaded.histories[0].redo.len),
+            (1, 1)
+        );
+        assert!(
+            loaded
+                .tracks
+                .iter()
+                .chain(&loaded.undo)
+                .all(|audio| audio.len == 0)
+        );
+        let replay = root.join("replay");
+        let mut writer =
+            crate::replay::Writer::begin(replay.clone(), "empty.json".into(), 900, loaded, config)
+                .unwrap();
+        // A real recording input belongs in input.wav; only empty initial-state
+        // assets are omitted, not replay source PCM or its sample clock.
+        writer.audio(900, &[[0.125, -0.25]]).unwrap();
+        writer.finish(901).unwrap();
+        assert_eq!(wav_count(&replay.join("initial")), 0);
+        assert_eq!(wav_count(&replay), 1);
+        assert_eq!(
+            hound::WavReader::open(replay.join("input.wav"))
+                .unwrap()
+                .duration(),
+            1
+        );
+        let (loaded, _) = read_bundle(&replay.join("initial")).unwrap();
+        assert_eq!(
+            (loaded.histories[0].undo.len, loaded.histories[0].redo.len),
+            (1, 1)
+        );
+        let mut old: serde_json::Value = serde_json::from_slice(&data).unwrap();
+        old["version"] = serde_json::json!(3);
+        fs::write(
+            root.join("snapshot/manifest.json"),
+            serde_json::to_vec(&old).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            read_bundle(&root.join("snapshot")).is_err(),
+            "Null is not a legacy-format file reference"
+        );
+        cleanup(&root);
+    }
+    #[test]
+    fn mixed_nonempty_and_empty_history_preserves_audio_sharing_and_silent_duration() {
+        let root = fixture_root("mixed-audio-bundle");
+        let mut snapshot = AudioSnapshot::empty(8000);
+        snapshot.has_histories = true;
+        snapshot.tracks[0] = LoopAudio::from_frames(8000, &[[0.125, -0.5], [1.25, -2.0]]).unwrap();
+        snapshot.tracks[0].share_into(&mut snapshot.undo[0], &mut OfflinePages);
+        snapshot.undo_valid[0] = true;
+        snapshot.histories[0]
+            .undo
+            .push(&snapshot.tracks[1], &mut OfflinePages);
+        snapshot.histories[0]
+            .undo
+            .push(&snapshot.tracks[0], &mut OfflinePages);
+        let redo = LoopAudio::from_frames(8000, &[[0.25, 0.75]; 3]).unwrap();
+        snapshot.histories[0].redo.push(&redo, &mut OfflinePages);
+        // A nonempty silent loop still needs its duration and samples preserved.
+        snapshot.tracks[4] = LoopAudio::from_frames(8000, &[[0.0; 2]; 17]).unwrap();
+        write_bundle(
+            &root,
+            &snapshot,
+            project::data_from_config(&crate::config::AppConfig::new(120, 0, 5)),
+        )
+        .unwrap();
+        assert_eq!(wav_count(&root), 3);
+        let manifest: Manifest =
+            serde_json::from_slice(&fs::read(root.join("manifest.json")).unwrap()).unwrap();
+        assert!(manifest.histories[0].undo[0].is_none());
+        assert_eq!(
+            manifest.tracks[0].as_ref().unwrap().file,
+            manifest.undo[0].as_ref().unwrap().file
+        );
+        assert_eq!(
+            manifest.tracks[0].as_ref().unwrap().file,
+            manifest.histories[0].undo[1].as_ref().unwrap().file
+        );
+        let (mut loaded, _) = read_bundle(&root).unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            &loaded.tracks[0].pages[0],
+            &loaded.histories[0].undo.slots[1].pages[0]
+        ));
+        assert_eq!(loaded.tracks[4].len, 17);
+        assert!((0..17).all(|frame| loaded.tracks[4].read(frame) == [0.0; 2]));
+        assert_eq!(
+            loaded.tracks[0].read(1).map(f32::to_bits),
+            [1.25f32, -2.0].map(f32::to_bits)
+        );
+        loaded.histories[0].undo(&mut loaded.tracks[0], &mut OfflinePages);
+        loaded.histories[0].undo(&mut loaded.tracks[0], &mut OfflinePages);
+        assert_eq!(loaded.tracks[0].len, 0);
+        loaded.histories[0].redo(&mut loaded.tracks[0], &mut OfflinePages);
+        assert_eq!(loaded.tracks[0].len, 2);
+        assert_eq!(loaded.tracks[0].read(1), [1.25, -2.0]);
+        let replay = root.join("replay");
+        let mut writer = crate::replay::Writer::begin(
+            replay.clone(),
+            "mixed.json".into(),
+            400,
+            snapshot,
+            project::data_from_config(&crate::config::AppConfig::new(120, 0, 5)),
+        )
+        .unwrap();
+        writer.audio(400, &[[0.0; 2]]).unwrap();
+        writer.finish(401).unwrap();
+        assert_eq!(wav_count(&replay.join("initial")), 3);
+        let (initial, _) = read_bundle(&replay.join("initial")).unwrap();
+        assert_eq!(
+            (initial.histories[0].undo.len, initial.histories[0].redo.len),
+            (2, 1)
+        );
+        assert!(initial.undo_valid[0]);
+        assert_eq!(initial.undo[0].read(1), [1.25, -2.0]);
+        assert_eq!(initial.histories[0].redo.slots[0].read(2), [0.25, 0.75]);
+        cleanup(&root);
+    }
+    #[test]
+    fn valid_empty_legacy_undo_remains_a_real_step_without_an_empty_asset() {
+        let root = fixture_root("empty-legacy-undo");
+        let mut snapshot = AudioSnapshot::empty(8000);
+        snapshot.tracks[0] = LoopAudio::from_frames(8000, &[[0.1, 0.2]]).unwrap();
+        snapshot.undo_valid[0] = true;
+        assert!(!snapshot.has_histories);
+        write_bundle(
+            &root,
+            &snapshot,
+            project::data_from_config(&crate::config::AppConfig::new(120, 0, 5)),
+        )
+        .unwrap();
+        assert_eq!(wav_count(&root), 1);
+        let (mut loaded, _) = read_bundle(&root).unwrap();
+        assert_eq!(loaded.histories[0].undo.len, 1);
+        loaded.histories[0].undo(&mut loaded.tracks[0], &mut OfflinePages);
+        assert_eq!(loaded.tracks[0].len, 0);
+        loaded.histories[0].redo(&mut loaded.tracks[0], &mut OfflinePages);
+        assert_eq!(loaded.tracks[0].read(0), [0.1, 0.2]);
+        cleanup(&root);
+    }
+    #[test]
+    fn history_roundtrip_shared_assets_and_v2_v3_migration() {
+        let root = fixture_root("history-snapshot");
         let mut snapshot = AudioSnapshot::empty(8000);
         snapshot.has_histories = true;
         for value in 1..=4 {
@@ -416,7 +617,8 @@ mod tests {
         let mut manifest: Manifest =
             serde_json::from_slice(&fs::read(root.join("manifest.json")).unwrap()).unwrap();
         assert_eq!(
-            manifest.tracks[0].file, manifest.undo[0].file,
+            manifest.tracks[0].as_ref().unwrap().file,
+            manifest.undo[0].as_ref().unwrap().file,
             "shared audio should be written once"
         );
         let (mut loaded, _) = read_bundle(&root).unwrap();
@@ -434,6 +636,32 @@ mod tests {
             loaded.histories[0].redo(&mut loaded.tracks[0], &mut OfflinePages);
             assert_eq!(loaded.tracks[0].read(0), [value as f32 * 0.1; 2]);
         }
+        // Reproduce actual v3/v2 bundles: even empty entries referred to a WAV.
+        let empty =
+            write_audio(&root.join("legacy-empty.wav"), 8000, &LoopAudio::new(8000)).unwrap();
+        for item in manifest.tracks.iter_mut().chain(&mut manifest.undo).chain(
+            manifest
+                .histories
+                .iter_mut()
+                .flat_map(|history| history.undo.iter_mut().chain(&mut history.redo)),
+        ) {
+            if item.is_none() {
+                *item = Some(empty.clone());
+            }
+        }
+        manifest.version = 3;
+        fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let (old_v3, _) = read_bundle(&root).unwrap();
+        assert_eq!(
+            (old_v3.histories[0].undo.len, old_v3.histories[0].redo.len),
+            (3, 1)
+        );
+        assert_eq!(old_v3.histories[0].undo.slots[0].len, 0);
+        assert_eq!(old_v3.histories[0].redo.slots[0].read(0), [0.4; 2]);
         manifest.version = 2;
         manifest.histories.clear();
         manifest.undone[0] = true;
@@ -449,16 +677,11 @@ mod tests {
             old.histories[0].redo.slots[0].read(0),
             snapshot.undo[0].read(0)
         );
-        let root = fs::canonicalize(root).unwrap();
-        assert_eq!(
-            root.parent(),
-            Some(fs::canonicalize("var").unwrap().as_path())
-        );
-        fs::remove_dir_all(root).unwrap();
+        cleanup(&root);
     }
     #[test]
     fn snapshot_preserves_float_bits_undo_and_detects_corruption() {
-        let root = std::env::temp_dir().join(format!("rc505-snapshot-test-{}", id()));
+        let root = fixture_root("rc505-snapshot-test");
         let mut snapshot = AudioSnapshot::empty(8000);
         for i in 0..2051 {
             snapshot.tracks[2].write(
@@ -488,7 +711,7 @@ mod tests {
         assert_ne!(loaded.tracks[2].read(1024), loaded.undo[2].read(1024));
         fs::write(root.join("track-3.wav"), b"corruption").unwrap();
         assert!(read_bundle(&root).is_err());
-        fs::remove_dir_all(root).unwrap();
+        cleanup(&root);
     }
     #[test]
     fn rate_conversion_preserves_duration_and_rejects_path_traversal() {

@@ -17,8 +17,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-// v6 pins sample generations for held/releasing voices and records parameter lanes.
-pub const RENDERER_VERSION: u32 = 6;
+// v7 excludes internally generated audio from physical input compensation.
+pub const RENDERER_VERSION: u32 = 7;
 mod assets;
 mod delta;
 pub mod library;

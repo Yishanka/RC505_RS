@@ -571,10 +571,9 @@ impl MyApp {
                     self.close_player();
                     // The import stays in working memory. Saving is explicit;
                     // Discard on project exit returns to the untouched disk file.
-                    data.snapshot = project::load_project(&self.projects[index])
+                    data.snapshot = project::saved_snapshot(&self.projects[index])
                         .ok()
-                        .flatten()
-                        .and_then(|d| d.snapshot);
+                        .flatten();
                     let input = self.config.system_config.input_device.value.clone();
                     let output = self.config.system_config.output_device.value.clone();
                     project::apply_data_to_config(&mut self.config, data);
@@ -589,6 +588,12 @@ impl MyApp {
                         self.sync_config();
                         self.send(Control::Enable(true));
                         self.status = self.language.choose("Replay position imported. Save config + audio snapshot to keep it; Discard restores the saved project.","已导入当前回放位置。保存配置与音频快照可保留，放弃修改可回到导入前的已保存工程。").into();
+                        if project::temporary_sample_count(&self.config) > 0 {
+                            self.status.push_str(self.language.choose(
+                                " Save temporary OSC samples as sounds separately.",
+                                " 临时 OSC 采样需另存为音色。",
+                            ));
+                        }
                     }
                 }
                 JobResult::Update(release) => {
@@ -628,7 +633,9 @@ impl MyApp {
                         self.sync_config();
                         self.send(Control::Enable(true));
                         self.replay_list = crate::replay::library::list();
-                        self.status = if migrated_sample_source {
+                        self.status = if project::missing_saved_sample_count(&self.config) > 0 {
+                            self.language.choose("Project ready; a saved OSC sample is unavailable. Open OSC to inspect or replace its reference.","工程已打开；有已保存的 OSC 采样不可用，请在音色页查看或更换引用。").into()
+                        } else if migrated_sample_source {
                             self.language.choose("Project ready. Legacy MyDelay is now OSC Sample; capture or import a sample before using it.","工程已打开。旧 MyDelay 已转换为 OSC 采样音源，请先捕获输入或导入素材。").into()
                         } else {
                             self.language
@@ -818,6 +825,8 @@ impl MyApp {
             };
             egui::Window::new(title).id(egui::Id::new("save-session-dialog")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER,egui::Vec2::ZERO).show(ctx,|ui|{
                 ui.label(lang.text("Choose what to keep in this project."));
+                let temporary=project::temporary_sample_count(&self.config);
+                if temporary>0 {ui.label(lang.choose("Temporary OSC samples are not saved with the project. Use Save as sound to keep them.","临时 OSC 采样不会随工程保存；需要保留请先使用「保存为音色」。"));}
                 ui.add_enabled_ui(!self.busy(),|ui|{
                     if ui.button(lang.text("Save configuration and audio snapshot")).clicked(){self.exit_after_save=true;self.save_snapshot();}
                     if ui.button(lang.text("Save configuration only")).clicked(){self.exit_after_save=true;self.save_now();}

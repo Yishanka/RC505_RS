@@ -2,6 +2,22 @@
 #[cfg(test)]
 use super::OscillatorConfigs;
 use super::finite;
+/// An explicitly saved, self-contained sound preset owns this sample.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SavedSampleRef {
+    pub preset: String,
+    pub sha256: String,
+    pub content_hash: u64,
+    pub sample_rate: u32,
+    pub frames: usize,
+}
+impl SavedSampleRef {
+    pub fn matches(&self, sample: &SampleAsset) -> bool {
+        self.content_hash == sample.content_hash
+            && self.sample_rate == sample.sample_rate
+            && self.frames == sample.frames.len()
+    }
+}
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SampleAsset {
     pub name: String,

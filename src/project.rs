@@ -273,6 +273,13 @@ pub struct OscData {
     #[serde(default)]
     pub sample: Option<std::sync::Arc<crate::config::osc_configs::SampleAsset>>,
     #[serde(default)]
+    pub sample_ref: Option<crate::config::osc_configs::SavedSampleRef>,
+    // Old embedded samples were already saved; keep them until explicitly replaced.
+    #[serde(default)]
+    pub sample_temporary: bool,
+    #[serde(skip)]
+    pub sample_error: Option<String>,
+    #[serde(default)]
     pub sample_mode: crate::config::osc_configs::SampleMode,
     #[serde(default = "default_sample_root")]
     pub sample_root: usize,
@@ -492,7 +499,31 @@ pub fn load_project(entry: &ProjectEntry) -> anyhow::Result<Option<ProjectData>>
         );
     }
     let raw = fs::read_to_string(&path)?;
-    Ok(Some(serde_json::from_str::<ProjectData>(&raw)?))
+    let mut data = serde_json::from_str::<ProjectData>(&raw)?;
+    crate::presets::resolve_project_samples(&mut data);
+    Ok(Some(data))
+}
+
+/// Read the pointer without loading or resolving any OSC sound-library assets.
+pub fn saved_snapshot(entry: &ProjectEntry) -> anyhow::Result<Option<String>> {
+    #[derive(Deserialize)]
+    struct Pointer {
+        #[serde(default)]
+        snapshot: Option<String>,
+    }
+    let path = crate::session::safe_child(&projects_root(), &entry.file)?;
+    let reader = std::io::BufReader::new(fs::File::open(path)?);
+    Ok(serde_json::from_reader::<_, Pointer>(reader)?.snapshot)
+}
+
+pub fn temporary_sample_count(config: &AppConfig) -> usize {
+    config.input_fx.banks.iter().flat_map(|bank|&bank.slots).filter(|slot|
+        matches!(&slot.fx,Some(InputFx::Oscillator(osc)) if osc.sample_temporary&&osc.sample.is_some())).count()
+}
+
+pub fn missing_saved_sample_count(config: &AppConfig) -> usize {
+    config.input_fx.banks.iter().flat_map(|bank|&bank.slots).filter(|slot|
+        matches!(&slot.fx,Some(InputFx::Oscillator(osc)) if osc.sample.is_none()&&osc.sample_ref.is_some())).count()
 }
 
 pub fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
@@ -515,12 +546,41 @@ pub fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> 
 pub fn save_project(entry: &ProjectEntry, config: &AppConfig) -> anyhow::Result<()> {
     ensure_project_dir()?;
     let mut data = data_from_config(config);
-    data.snapshot = load_project(entry)?.and_then(|p| p.snapshot);
+    data.snapshot = saved_snapshot(entry)?;
     save_project_data(entry, &data)
+}
+
+/// Normal project saves do not implicitly turn a temporary capture into an asset.
+/// Runtime transfer and replay capture continue using the complete in-memory data.
+pub fn persistable_data(data: &ProjectData) -> anyhow::Result<ProjectData> {
+    let mut result = data.clone();
+    for bank in &mut result.input_fx.banks {
+        for slot in &mut bank.slots {
+            let Some(osc) = &mut slot.osc else {
+                continue;
+            };
+            osc.sample_error = None;
+            if osc.sample_temporary {
+                osc.sample = None;
+                osc.sample_ref = None;
+            } else if let Some(reference) = &osc.sample_ref {
+                if let Some(sample) = &osc.sample {
+                    anyhow::ensure!(
+                        reference.matches(sample),
+                        "Sample changed; save it as a sound before keeping it in the project"
+                    );
+                    crate::presets::read_saved_sample(reference)?;
+                }
+                osc.sample = None;
+            }
+        }
+    }
+    Ok(result)
 }
 
 pub fn save_project_data(entry: &ProjectEntry, data: &ProjectData) -> anyhow::Result<()> {
     use fs2::FileExt;
+    let data = persistable_data(data)?;
     ensure_project_dir()?;
     let path = crate::session::safe_child(&projects_root(), &entry.file)?;
     let lock = fs::OpenOptions::new()
@@ -534,7 +594,7 @@ pub fn save_project_data(entry: &ProjectEntry, data: &ProjectData) -> anyhow::Re
     if path.exists() {
         fs::copy(&path, path.with_extension("json.bak"))?;
     }
-    atomic_write(&path, &serde_json::to_vec_pretty(data)?)
+    atomic_write(&path, &serde_json::to_vec_pretty(&data)?)
 }
 
 pub fn remove_project_file(file: &str) {
@@ -675,6 +735,9 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                             glide_ms: osc.glide_ms,
                             glide_mode: osc.glide_mode,
                             sample: osc.sample.clone(),
+                            sample_ref: osc.sample_ref.clone(),
+                            sample_temporary: osc.sample_temporary,
+                            sample_error: None,
                             sample_mode: osc.sample_mode,
                             sample_root: osc.sample_root,
                             sample_fine_cents: osc.sample_fine_cents,
@@ -1044,6 +1107,9 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                                 .as_ref()
                                 .map(crate::config::osc_configs::SampleAsset::validated_shared)
                                 .filter(|sample| sample.frames.len() >= 4);
+                            osc.sample_ref = osc_data.sample_ref.clone();
+                            osc.sample_temporary = osc_data.sample_temporary;
+                            osc.sample_message = osc_data.sample_error.clone().unwrap_or_default();
                             osc.sample_mode = osc_data.sample_mode;
                             osc.sample_root = osc_data.sample_root.min(119);
                             osc.sample_fine_cents = if osc_data.sample_fine_cents.is_finite() {

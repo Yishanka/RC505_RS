@@ -8,6 +8,9 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
+mod sample_reference;
+pub use sample_reference::{localize_replay_samples, read_saved_sample, resolve_project_samples};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FxTarget {
     Input { bank: usize, slot: usize },
@@ -90,6 +93,11 @@ pub fn encode(config: &AppConfig, target: FxTarget) -> Result<String> {
         slot.clip_link = None;
         slot.detached_clip = None;
         if let Some(osc) = &mut slot.osc {
+            // Saving a sound is the explicit retention action. Keep it portable:
+            // the preset owns its PCM; projects only refer to this immutable file.
+            osc.sample_ref = None;
+            osc.sample_temporary = false;
+            osc.sample_error = None;
             osc.phrase_serial = 0;
             osc.pending_clip = None;
             osc.clip = None;
@@ -149,8 +157,25 @@ pub fn decode(config: &mut AppConfig, target: FxTarget, text: &str) -> Result<()
     Ok(())
 }
 
-pub fn save(config: &AppConfig, target: FxTarget, name: &str) -> Result<()> {
+pub fn save(config: &mut AppConfig, target: FxTarget, name: &str) -> Result<()> {
     let path = file(name)?;
+    if let FxTarget::Input { bank, slot } = target {
+        if let Some(crate::config::InputFx::Oscillator(osc)) =
+            &config.input_fx.banks[bank].slots[slot].fx
+        {
+            if let Some(sample) = &osc.sample {
+                anyhow::ensure!(
+                    (4..=crate::config::osc_configs::SampleAsset::MAX_FRAMES)
+                        .contains(&sample.frames.len())
+                        && sample
+                            .frames
+                            .iter()
+                            .all(|x| x.is_finite() && (-1.0..=1.0).contains(x)),
+                    "Capture or import a valid sample before saving this sound"
+                );
+            }
+        }
+    }
     let text = encode(config, target)?;
     fs::create_dir_all(root())?;
     // Create-new avoids silently replacing a user's preset with the same name.
@@ -161,11 +186,16 @@ pub fn save(config: &AppConfig, target: FxTarget, name: &str) -> Result<()> {
         .open(path)
         .context("Preset already exists or cannot be created; choose a new name")?;
     output.write_all(text.as_bytes())?;
+    output.sync_all()?;
+    sample_reference::mark_saved(config, target, name, &text);
     Ok(())
 }
 
 pub fn load(config: &mut AppConfig, target: FxTarget, name: &str) -> Result<()> {
-    decode(config, target, &fs::read_to_string(file(name)?)?)
+    let text = fs::read_to_string(file(name)?)?;
+    decode(config, target, &text)?;
+    sample_reference::mark_saved(config, target, name, &text);
+    Ok(())
 }
 
 /// A browsed sound is separate from the live project until explicitly applied.
@@ -178,6 +208,7 @@ pub struct SoundCandidate {
     source_id: Option<String>,
     pub source: CandidateSource,
     pub kind: &'static str,
+    stored: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CandidateSource {
@@ -189,12 +220,14 @@ pub enum CandidateSource {
 }
 impl SoundCandidate {
     pub fn load(config: &AppConfig, target: FxTarget, name: &str) -> Result<Self> {
-        Self::from_text(
+        let mut candidate = Self::from_text(
             config,
             target,
             name.to_owned(),
             fs::read_to_string(file(name)?)?,
-        )
+        )?;
+        candidate.stored = true;
+        Ok(candidate)
     }
     pub fn from_text(
         config: &AppConfig,
@@ -215,6 +248,7 @@ impl SoundCandidate {
             source_id,
             source: CandidateSource::Empty,
             kind: "Empty",
+            stored: false,
         };
         let staging = candidate.staging(config)?;
         candidate.kind = match target {
@@ -272,7 +306,15 @@ impl SoundCandidate {
             self.matches_target(config, Some(self.target)),
             "The candidate source moved; select the sound again"
         );
-        decode(config, self.target, &self.text)
+        decode(config, self.target, &self.text)?;
+        if self.stored {
+            // The preview owns the browsed bytes. If someone replaced the file,
+            // keep that selected sound embedded rather than link to new bytes.
+            if fs::read_to_string(file(&self.name)?).is_ok_and(|text| text == self.text) {
+                sample_reference::mark_saved(config, self.target, &self.name, &self.text);
+            }
+        }
+        Ok(())
     }
 }
 

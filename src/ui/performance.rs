@@ -603,7 +603,7 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
                         (RecordReference::Internal,lang.choose("Internal source","内部音源")),
                     ]);
                 });
-            }).response.on_hover_text(lang.choose("Live input follows the heard beat. Choose Internal source for OSC phrases. Record mixed sources in separate passes.","现场输入跟随听到的节拍；录 OSC 乐句选内部音源。两者混合时建议分轮录入。"));
+            }).response.on_hover_text(lang.choose("OSC phrases keep their own timing automatically. This choice controls compensation of external input.","OSC 乐句自动保持原拍点；此选项控制外部输入的补偿。"));
             theme::control_row(ui, |ui| {
                 let view = app.view.tracks[index];
                 ui.add_enabled_ui(view.undo, |ui| {

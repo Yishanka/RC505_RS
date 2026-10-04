@@ -41,6 +41,8 @@ pub enum Action {
 /// envelope and retired on the worker, never freed by the callback.
 pub struct Parameters {
     pub input_patch: InputFxRuntime,
+    pub external_input: InputFxRuntime,
+    pub external_patch: InputFxRuntime,
     pub track_patch: TrackFxRuntime,
     pub pdc: super::pdc::LatencyPlan,
     pub master: crate::dsp::master::MasterFxRuntime,
@@ -67,6 +69,8 @@ impl Parameters {
         );
         Self {
             input_patch: input.clone(),
+            external_input: input.clone(),
+            external_patch: input.clone(),
             track_patch: track.clone(),
             pdc,
             master: crate::dsp::master::MasterFxRuntime::from_config(&config.master_fx),
@@ -100,6 +104,8 @@ impl Parameters {
 
 pub struct CoreTrack {
     capture_delay: usize,
+    generator_capture_delay: usize,
+    last_generated_source_frame: Option<u64>,
     last_record_source_frame: Option<u64>,
     pub history: super::history::AudioHistory,
     pub audio: LoopAudio,
@@ -120,6 +126,8 @@ impl CoreTrack {
     fn new(sr: u32) -> Self {
         Self {
             capture_delay: 0,
+            generator_capture_delay: 0,
+            last_generated_source_frame: None,
             history: super::history::AudioHistory::new(sr),
             last_record_source_frame: None,
             audio: LoopAudio::new(sr),
@@ -136,6 +144,83 @@ impl CoreTrack {
             pending: None,
             fade: None,
         }
+    }
+    /// Generated samples belong to n-Li, external samples to n-(H+Li+M).
+    /// The earlier writer grows the recording so clocked OSC is playable at the
+    /// musical loop boundary even while delayed microphone samples are pending.
+    fn write_separate_sources(
+        &mut self,
+        now: u64,
+        external: Frame,
+        generated: Frame,
+        pool: &mut impl PageAllocator,
+    ) -> bool {
+        let input_delay = self
+            .capture_delay
+            .saturating_sub(self.generator_capture_delay);
+        let generated_frame = now.saturating_sub(input_delay as u64);
+        let generated_ready = now >= self.start.saturating_add(input_delay as u64)
+            && self
+                .last_generated_source_frame
+                .is_none_or(|last| generated_frame > last)
+            && self.finish.is_none_or(|finish| generated_frame < finish);
+        if generated_ready {
+            let (target, value) = if self.mode == Mode::Recording {
+                let target = generated_frame.saturating_sub(self.start) as usize;
+                if self.audio.len != target {
+                    return false;
+                }
+                (target, generated)
+            } else if self.audio.len > 0 {
+                let target =
+                    (self.cursor + self.audio.len - input_delay % self.audio.len) % self.audio.len;
+                let old = self.audio.read(target);
+                (target, [old[0] + generated[0], old[1] + generated[1]])
+            } else {
+                return false;
+            };
+            // Do not clamp an incomplete X/G sum: opposite-sign components can
+            // cancel later, including when overdubbing close to the bus ceiling.
+            if !self.audio.write(target, value, pool) {
+                return false;
+            }
+            self.last_generated_source_frame = Some(generated_frame);
+        }
+        let external_frame = now.saturating_sub(self.capture_delay as u64);
+        let external_ready = now >= self.start.saturating_add(self.capture_delay as u64)
+            && self
+                .last_record_source_frame
+                .is_none_or(|last| external_frame > last)
+            && self.finish.is_none_or(|finish| external_frame < finish);
+        if external_ready {
+            let target = if self.mode == Mode::Recording {
+                external_frame.saturating_sub(self.start) as usize
+            } else {
+                (self.cursor + self.audio.len - self.capture_delay % self.audio.len)
+                    % self.audio.len
+            };
+            if target >= self.audio.len {
+                return false;
+            }
+            let old = self.audio.read(target);
+            let mut value = [old[0] + external[0], old[1] + external[1]];
+            // In a loop shorter than H+M, later generated cycles can already be
+            // present at this index. Clamp only once its last external partner
+            // arrives, rather than clipping a not-yet-cancelled partial sum.
+            let complete = self.mode == Mode::Recording
+                || self.generator_capture_delay < self.audio.len
+                || self.finish.is_some_and(|finish| {
+                    external_frame.saturating_add(self.audio.len as u64) >= finish
+                });
+            if complete {
+                value = value.map(crate::dsp::headroom);
+            }
+            if !self.audio.write(target, value, pool) {
+                return false;
+            }
+            self.last_record_source_frame = Some(external_frame);
+        }
+        true
     }
 }
 
@@ -228,6 +313,7 @@ pub struct PdcApplied {
 }
 struct DeferredGraph {
     input: InputFxRuntime,
+    external_input: InputFxRuntime,
     track: TrackFxRuntime,
     routing: InputRouting,
     plan: super::pdc::LatencyPlan,
@@ -238,6 +324,7 @@ impl DeferredGraph {
     fn new() -> Self {
         Self {
             input: InputFxRuntime::empty(),
+            external_input: InputFxRuntime::empty(),
             track: TrackFxRuntime::empty(TRACKS),
             routing: InputRouting::Serial,
             plan: super::pdc::LatencyPlan::default(),
@@ -247,6 +334,8 @@ impl DeferredGraph {
     }
 }
 pub struct RenderCore {
+    separate_recording_sources: bool,
+    external_input: Box<InputFxEngine>,
     deferred_graph: Box<DeferredGraph>,
     graph_applied_at: Option<u64>,
     pdc_applied_event: Option<PdcApplied>,
@@ -281,9 +370,14 @@ impl RenderCore {
     pub fn new(sr: u32) -> Self {
         let mut input = InputFxEngine::new(sr as f32);
         input.prepare(sr as f32);
+        let mut external_input = Box::new(InputFxEngine::new(sr as f32));
+        external_input.set_external_only(true);
+        external_input.prepare(sr as f32);
         let mut track_fx = TrackFxEngine::new(sr as f32, TRACKS);
         track_fx.prepare();
         Self {
+            separate_recording_sources: true,
+            external_input,
             pdc: Box::new(super::pdc::Compensation::new(sr as f32)),
             allow_pdc: true,
             deferred_graph: Box::new(DeferredGraph::new()),
@@ -328,8 +422,13 @@ impl RenderCore {
                 || plan.output_frames != self.pdc.plan.output_frames)
         {
             self.input.patch_compatible(&mut p.input_patch);
+            self.external_input.patch_compatible(&mut p.external_patch);
             self.track_fx.patch_compatible(&mut p.track_patch);
             std::mem::swap(&mut self.deferred_graph.input, &mut p.input);
+            std::mem::swap(
+                &mut self.deferred_graph.external_input,
+                &mut p.external_input,
+            );
             std::mem::swap(&mut self.deferred_graph.track, &mut p.track);
             self.deferred_graph.routing = p.routing;
             self.deferred_graph.plan = plan;
@@ -339,12 +438,18 @@ impl RenderCore {
             self.deferred_graph.waiting = false;
             self.pdc.plan = plan;
             self.input.set_pdc(plan.enabled, plan.track_frames);
+            self.external_input.set_pdc(plan.enabled, plan.track_frames);
             self.track_fx.set_pdc(plan.enabled);
             p.input = self
                 .input
                 .swap_runtime(std::mem::replace(&mut p.input, InputFxRuntime::empty()));
+            p.external_input = self.external_input.swap_runtime(std::mem::replace(
+                &mut p.external_input,
+                InputFxRuntime::empty(),
+            ));
             self.track_fx.exchange_runtime(&mut p.track);
             self.input.set_routing(p.routing);
+            self.external_input.set_routing(p.routing);
         }
         self.master.configure(p.master);
         self.input_thru = p.input_thru;
@@ -354,9 +459,16 @@ impl RenderCore {
         self.metronome_volume = p.metronome_volume;
         self.options = p.options;
         self.levels = p.levels;
+        if self.separate_recording_sources {
+            // Existing passes already own fixed offsets. New passes must see a
+            // hardware estimate edited while transport/another track is active.
+            self.latency = p.latency_frames.min(self.sample_rate as usize / 2);
+        }
         if self.idle() {
             self.bpm = p.bpm;
-            self.latency = p.latency_frames;
+            if !self.separate_recording_sources {
+                self.latency = p.latency_frames;
+            }
         }
         self.input
             .set_clock(self.clock.origin.is_some(), self.bpm as usize);
@@ -381,14 +493,20 @@ impl RenderCore {
     pub fn legacy_renderer(&mut self, enabled: bool) {
         self.legacy = enabled;
         self.input.set_legacy_fallback(enabled);
+        self.external_input.set_legacy_fallback(enabled);
+        if enabled {
+            self.separate_recording_sources = false;
+        }
     }
     pub fn set_renderer_version(&mut self, version: u32) {
         self.legacy_renderer(version == 2);
         self.allow_pdc = version >= 5;
+        self.separate_recording_sources = version >= 7;
         if !self.allow_pdc {
             self.pdc.plan = super::pdc::LatencyPlan::default();
             self.pdc.reset();
             self.input.set_pdc(false, [0; 5]);
+            self.external_input.set_pdc(false, [0; 5]);
             self.track_fx.set_pdc(false);
         }
     }
@@ -419,6 +537,13 @@ impl RenderCore {
         self.input
             .set_pdc(self.pdc.plan.enabled, self.pdc.plan.track_frames);
         self.track_fx.set_pdc(self.pdc.plan.enabled);
+        self.external_input
+            .set_pdc(self.pdc.plan.enabled, self.pdc.plan.track_frames);
+        self.deferred_graph.external_input = self.external_input.swap_runtime(std::mem::replace(
+            &mut self.deferred_graph.external_input,
+            InputFxRuntime::empty(),
+        ));
+        self.external_input.set_routing(self.deferred_graph.routing);
         self.deferred_graph.input = self.input.swap_runtime(std::mem::replace(
             &mut self.deferred_graph.input,
             InputFxRuntime::empty(),
@@ -685,6 +810,14 @@ impl RenderCore {
                 }
             }
         };
+        let generator_capture_delay = if self.separate_recording_sources
+            && self.options[i].record_reference
+                == crate::config::track_options::RecordReference::External
+        {
+            capture_delay.saturating_sub(self.pdc.plan.input_frames)
+        } else {
+            0
+        };
         let t = &mut self.tracks[i];
         match action {
             Action::Trigger(_) => match t.mode {
@@ -698,7 +831,9 @@ impl RenderCore {
                     t.undone = false;
                     t.mode = Mode::Recording;
                     t.last_record_source_frame = None;
+                    t.last_generated_source_frame = None;
                     t.capture_delay = capture_delay;
+                    t.generator_capture_delay = generator_capture_delay;
                     t.start = self.clock.frame;
                     t.finish_stopped = false;
                     t.finish = if self.options[i].measures > 0 {
@@ -747,7 +882,9 @@ impl RenderCore {
                     t.undone = false;
                     t.mode = Mode::Overdub;
                     t.last_record_source_frame = None;
+                    t.last_generated_source_frame = None;
                     t.capture_delay = capture_delay;
+                    t.generator_capture_delay = generator_capture_delay;
                     t.start = self.clock.frame;
                 }
                 Mode::Overdub => {
@@ -787,6 +924,14 @@ impl RenderCore {
             if t.finish
                 .is_some_and(|at| self.clock.frame >= at + recording_delay as u64)
             {
+                if self.separate_recording_sources
+                    && t.generator_capture_delay > 0
+                    && (t.last_record_source_frame != Some(t.finish.unwrap() - 1)
+                        || t.last_generated_source_frame != Some(t.finish.unwrap() - 1))
+                {
+                    self.exhausted = true;
+                    t.finish_stopped = true;
+                }
                 if t.mode == Mode::Recording {
                     let target = t.finish.unwrap().saturating_sub(t.start) as usize;
                     // Capture's reference/latency is fixed for the pass. A mismatch
@@ -851,7 +996,7 @@ impl RenderCore {
             // The recorded prefix can loop at the musical end boundary while the
             // final H+Li capture samples drain. Waiting to start playback until the
             // tail is stored would otherwise create an extra plugin-sized gap.
-            let finishing = self.pdc.plan.enabled
+            let finishing = (self.pdc.plan.enabled || self.separate_recording_sources)
                 && t.mode == Mode::Recording
                 && !t.finish_stopped
                 && !self.options[i].reverse
@@ -927,22 +1072,43 @@ impl RenderCore {
         let (left, right) = self
             .input
             .process_frame(elapsed, input[0], input[1], &carriers);
+        // Keep this chain warm even at H=0: enabling compensation later must not
+        // mistake an existing external effect tail for generated audio.
+        let external = if self.separate_recording_sources {
+            self.external_input
+                .set_clock(self.clock.origin.is_some(), self.bpm as usize);
+            let value = self
+                .external_input
+                .process_frame(elapsed, input[0], input[1], &carriers);
+            value
+        } else {
+            (left, right)
+        };
         for i in 0..TRACKS {
             let t = &mut self.tracks[i];
             let mut ok = true;
             let recording_delay = t.capture_delay;
+            let recorded = [left, right];
+            let split = self.separate_recording_sources && t.generator_capture_delay > 0;
             let source_frame = self.clock.frame.saturating_sub(recording_delay as u64);
             let ready = self.clock.frame >= t.start.saturating_add(recording_delay as u64)
                 && t.last_record_source_frame
                     .is_none_or(|last| source_frame > last)
                 && t.finish.is_none_or(|finish| source_frame < finish);
-            if t.mode == Mode::Recording && ready {
+            if split && matches!(t.mode, Mode::Recording | Mode::Overdub) {
+                ok = t.write_separate_sources(
+                    self.clock.frame,
+                    [external.0, external.1],
+                    [left - external.0, right - external.1],
+                    pool,
+                );
+            } else if t.mode == Mode::Recording && ready {
                 let target = source_frame.saturating_sub(t.start) as usize;
                 if t.audio.len != target {
                     ok = false;
                 }
                 if ok {
-                    ok = t.audio.write(target, [left, right], pool);
+                    ok = t.audio.write(target, recorded, pool);
                     t.last_record_source_frame = Some(source_frame);
                 }
             } else if t.mode == Mode::Overdub && ready && t.audio.len > 0 {
@@ -952,14 +1118,14 @@ impl RenderCore {
                     write,
                     [
                         if self.legacy {
-                            (old[0] + left).clamp(-1.0, 1.0)
+                            (old[0] + recorded[0]).clamp(-1.0, 1.0)
                         } else {
-                            crate::dsp::headroom(old[0] + left)
+                            crate::dsp::headroom(old[0] + recorded[0])
                         },
                         if self.legacy {
-                            (old[1] + right).clamp(-1.0, 1.0)
+                            (old[1] + recorded[1]).clamp(-1.0, 1.0)
                         } else {
-                            crate::dsp::headroom(old[1] + right)
+                            crate::dsp::headroom(old[1] + recorded[1])
                         },
                     ],
                     pool,
@@ -1777,3 +1943,7 @@ mod tests {
         assert!(!core.exhausted);
     }
 }
+
+#[cfg(test)]
+#[path = "source_recording_tests.rs"]
+mod source_recording_tests;

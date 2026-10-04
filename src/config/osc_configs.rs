@@ -53,6 +53,8 @@ pub struct OscillatorConfigs {
     pub glide_ms: f32,
     pub glide_mode: GlideMode,
     pub sample: Option<std::sync::Arc<SampleAsset>>,
+    pub sample_ref: Option<SavedSampleRef>,
+    pub sample_temporary: bool,
     pub sample_mode: SampleMode,
     pub sample_root: usize,
     pub sample_fine_cents: f32,
@@ -104,6 +106,8 @@ impl OscillatorConfigs {
             glide_ms: 0.0,
             glide_mode: GlideMode::Overlap,
             sample: None,
+            sample_ref: None,
+            sample_temporary: true,
             sample_mode: SampleMode::Wavetable,
             sample_root: 48,
             sample_fine_cents: 0.0,
@@ -287,6 +291,8 @@ impl OscillatorConfigs {
         }
     }
     fn adopt_sample(&mut self, sample: SampleAsset) {
+        self.sample_ref = None;
+        self.sample_temporary = true;
         self.sample_message = sample.name.clone();
         if let Some(hz) = sample.root_hz {
             self.sample_root = (57.0 + 12.0 * (hz / 440.0).log2())
@@ -356,4 +362,4 @@ impl crate::config::AppConfig {
 }
 
 mod sample;
-pub use sample::{SampleAsset, SampleCapture};
+pub use sample::{SampleAsset, SampleCapture, SavedSampleRef};

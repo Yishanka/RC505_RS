@@ -192,7 +192,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
                 #[cfg(not(debug_assertions))]
                 let _ = name_field;
                 if super::navigation::button(ui,lang.text("Save as new")).clicked() {
-                    app.editor.message = match presets::save(&app.config, target, &app.editor.preset_name) {
+                    app.editor.message = match presets::save(&mut app.config, target, &app.editor.preset_name) {
                         Ok(()) => { app.editor.presets = presets::list(); lang.text("Preset saved").into() }, Err(e) => e.to_string()
                     };
                 }
@@ -272,6 +272,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
                 if full && app.editor.page==EditorPage::Automation {super::automation::draw(ui,&mut app.config,target,&mut app.editor.automation);return;}
             }
             if full && synth && page==EditorPage::Sequence {super::phrases::draw(ui,app,target);}
+            if full && page==EditorPage::Sound {sample_save_controls(ui,app,target);}
             match target {
                 FxTarget::Input { bank, slot } => {
                     if let Some(fx) = app.config.input_fx.banks[bank].slots[slot].fx.as_mut() {
@@ -298,6 +299,70 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
     }
     if let Some(note) = app.editor.piano.audition_note.take() {
         app.audition_note(target, note);
+    }
+}
+
+fn sample_save_controls(ui: &mut egui::Ui, app: &mut MyApp, target: FxTarget) {
+    let FxTarget::Input { bank, slot } = target else {
+        return;
+    };
+    let Some(InputFx::Oscillator(osc)) = &app.config.input_fx.banks[bank].slots[slot].fx else {
+        return;
+    };
+    if osc.waveform.value != crate::config::osc_configs::Waveform::Sample
+        && osc.sample.is_none()
+        && osc.sample_ref.is_none()
+    {
+        return;
+    }
+    let lang = app.language;
+    let available = osc.sample.is_some() && osc.sample_job.is_none() && osc.capture.is_none();
+    let status = if osc.sample.is_none() {
+        lang.choose("No sample loaded", "尚未载入采样").to_owned()
+    } else if osc.sample_temporary {
+        lang.choose(
+            "Temporary sample · discarded on exit unless saved as a sound",
+            "临时采样 · 保存为音色后才能在下次载入",
+        )
+        .to_owned()
+    } else if let Some(saved) = &osc.sample_ref {
+        format!(
+            "{} · {}",
+            lang.choose("Saved sound", "已保存音色"),
+            saved.preset
+        )
+    } else {
+        lang.choose("Saved sample", "已保存采样").to_owned()
+    };
+    ui.add(egui::Label::new(status).truncate(true));
+    if !app.editor.library_open {
+        theme::control_row(ui, |ui| {
+            super::navigation::text(
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.editor.preset_name)
+                        .hint_text(lang.choose("Sound name", "音色名称"))
+                        .desired_width(180.0),
+                ),
+            );
+            if super::navigation::register(ui.add_enabled(
+                available,
+                egui::Button::new(lang.choose("Save as sound", "保存为音色")),
+            ))
+            .clicked()
+            {
+                app.editor.message =
+                    match presets::save(&mut app.config, target, &app.editor.preset_name) {
+                        Ok(()) => {
+                            app.editor.presets = presets::list();
+                            lang.text("Preset saved").into()
+                        }
+                        Err(e) => e.to_string(),
+                    };
+            }
+        });
+        if !app.editor.message.is_empty() {
+            ui.label(&app.editor.message);
+        }
     }
 }
 

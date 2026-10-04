@@ -263,7 +263,7 @@ impl MyApp {
         self.saving = true;
         std::thread::spawn(move || {
             let result = (|| -> anyhow::Result<()> {
-                data.snapshot = project::load_project(&entry)?.and_then(|p| p.snapshot);
+                data.snapshot = project::saved_snapshot(&entry)?;
                 project::save_project_data(&entry, &data)
             })();
             let _ = tx.send(match result {
