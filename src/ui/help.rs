@@ -19,7 +19,7 @@ pub fn draw(ctx: &egui::Context, app: &mut MyApp) {
                     ("Click a track title, use Left/Right, or Ctrl+1–5 to select a track. Track controls edit reverse, one shot, stop behavior, quantization and length.","点击轨道标题、左右方向键或 Ctrl+1–5 选择轨道；左面板可调整倒放、单次播放、停止方式、量化与长度。"),
                     ("Metronome starts performance; volume is beside it. Audition uses a private clock. Both are monitor-only, excluded from tracks and exported replay audio.","节拍器启动正式演奏，旁边调节音量。独立试听使用私有时钟；二者只进入监听，不录入轨道或回放导出音频。"),
                     ("Select an FX slot for quick editing. Expand opens the full preset editor, pinned to that bank and slot.","选择效果槽快速调整；展开后可完整编辑预设。编辑目标固定为该效果组与槽位。"),
-                    ("F6 focuses the top bar; F7 the left panel; F8 the right panel. Tab or Up/Down chooses a control; Left/Right adjusts it; Enter activates it.","F6 进入顶部栏，F7 进入左面板，F8 进入右面板。Tab 或上下键选择控件，左右键调整，Enter 操作。"),
+                    ("F6: top bar; F7: left panel; F8: FX. Tab selects a control; Left/Right fine-tunes, Up/Down takes larger steps, Enter types a value.","F6 顶部栏，F7 左面板，F8 效果器。Tab 换参数；左右微调，上下快调，Enter 输入数值。"),
                     ("Esc leaves an editor or panel first. From performance, Esc returns to the project browser after a save prompt. Alt+F4 closes the application.","Esc 先离开编辑器或面板；在演奏界面再按 Esc，会提示保存并返回工程选择页。Alt+F4 关闭软件。"),
                     ("Hold Delete for 0.75 seconds or press it twice within 350 ms to clear selected-track audio (recoverable with track Undo). A single short press does nothing. Changing tracks or focus cancels the gesture.","长按 Delete 0.75 秒，或在 350 毫秒内双击，清空所选轨音频，可用轨道撤销恢复。单次短按不删除；切换轨道或焦点会取消手势。"),
                     ("Theme selects Mint, Rose or Ember across the application. Audio can disable the background FFT spectrum. The icon stays unchanged.","顶部主题切换薄荷绿、雾粉、橙红，全软件统一，图标不变。音频页可关闭后台 FFT 频谱。"),
@@ -52,14 +52,16 @@ pub fn draw(ctx: &egui::Context, app: &mut MyApp) {
                     }
                     for (key,en,zh) in [
                         ("Ctrl+Tab / Ctrl+Shift+Tab","Next / previous expanded editor page","完整编辑器下一页 / 上一页"),
-                        ("Tab / Shift+Tab / ↑ ↓","Navigate focused controls","选择当前面板控件"),
+                        ("Tab / Shift+Tab","Next / previous control","下一个 / 上一个控件"),
+                        ("← → / ↑ ↓","Fine / coarse parameter adjustment","参数微调 / 快调"),
+                        ("Enter","Activate or type a number","操作按钮或输入数值"),
                         ("Esc","Editor / panel → performance → projects","编辑器 / 面板 → 演奏 → 工程选择"),
                         ("Alt+F4","Close application (save prompt)","关闭软件（提示保存）"),
                     ] {ui.monospace(key);ui.label(lang.choose(en,zh));ui.end_row();}
                 });
                 ui.add_space(12.0);
                 ui.label(lang.choose("Fader taps move 0.5 dB. Holding 180 ms starts a ramp to the track's speed over 450 ms. Opposite keys cancel. Audio smoothing is 5 ms. Speed is saved per track (1–60 dB/s). Hardware keyboard rollover still applies.","推子短按变化 0.5 dB；按住 180 ms 后开始连续变化，在 450 ms 内加速到设定速度。反向键抵消，声音端平滑 5 ms。速度逐轨保存（1–60 dB/s），多键冲突仍取决于键盘硬件。"));
-                ui.label(lang.choose("Performance shortcuts are suspended during text entry, full editing, help, playback and loss of focus. Delete in the piano roll removes a note immediately; it never clears track audio.","文本输入、完整编辑器、帮助、回放播放器及窗口失焦时暂停演奏键。钢琴卷帘中的 Delete 立即删除音符，不会清空轨道音频。"));
+                ui.label(lang.choose("Recording, FX and faders remain active in the FX editor. Arrows, Delete and editing shortcuts stay local. Text entry, menus, help and the replay player pause performance keys.","编辑 FX 时仍可录放、切效果和推推子；方向键、删除和编辑组合键留给当前编辑区。输入文字、打开菜单、帮助或回放播放器时暂停演奏键。"));
             }
             3=>{
                 ui.heading(lang.text("Saving & replay"));

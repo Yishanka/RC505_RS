@@ -80,6 +80,18 @@ pub enum FxKind {
     Vocoder,
 }
 impl FxKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "Empty",
+            Self::Oscillator => "OSC",
+            Self::Filter => "Filter",
+            Self::Reverb => "Reverb",
+            Self::MyDelay => "MyDelay",
+            Self::Vocoder => "Vocoder",
+            Self::Roll => "Roll",
+            Self::Audio(kind) => kind.name(),
+        }
+    }
     pub fn ui_tag(self) -> usize {
         match self {
             Self::None => 0,
@@ -107,11 +119,13 @@ impl FxKind {
                 .filter(|k| *k != super::audio_fx::AudioFxKind::Reverb)
                 .map(Self::Audio),
         );
+        kinds[1..].sort_by_key(|kind| kind.name().to_ascii_lowercase());
         kinds
     }
 }
 
 pub struct FxSlot {
+    pub clip_link: Option<String>,
     pub source_id: String,
     pub clip: Option<crate::config::sequence_edit::NoteClip>,
     pub fx: Option<InputFx>,
@@ -121,6 +135,7 @@ pub struct FxSlot {
 impl FxSlot {
     pub fn new() -> Self {
         Self {
+            clip_link: None,
             source_id: new_source_id(),
             clip: None,
             fx: None,

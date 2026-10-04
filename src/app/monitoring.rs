@@ -4,6 +4,31 @@ use crate::{
     presets::FxTarget,
 };
 impl MyApp {
+    pub fn audition_note(
+        &mut self,
+        target: FxTarget,
+        note: crate::config::sequence_edit::NoteEvent,
+    ) {
+        if !self.audio.online
+            || self.busy()
+            || self.taking()
+            || self.take_pending
+            || self.calibration_held()
+            || self.player_open
+        {
+            return;
+        }
+        if let Some(params) =
+            AuditionParameters::single_note(&self.config, target, note.pitch, note.velocity)
+        {
+            let voice = Box::new(Audition::new(params, self.audio.config.sample_rate.0));
+            if self.send(Control::Audition(Some(voice))) {
+                self.audition_target = Some((target, 0));
+                self.previewing = true;
+                self.note_audition = true;
+            }
+        }
+    }
     pub fn tracks_stopped(&self) -> bool {
         self.view.tracks.iter().all(|t| {
             matches!(
@@ -147,6 +172,7 @@ impl MyApp {
             if let Some(params) = AuditionParameters::new(&self.config, target, track) {
                 let voice = Box::new(Audition::new(params, self.audio.config.sample_rate.0));
                 if self.send(Control::Audition(Some(voice))) {
+                    self.note_audition = false;
                     self.audition_target = Some((target, track));
                     self.previewing = true;
                 }
@@ -156,10 +182,11 @@ impl MyApp {
     pub fn stop_audition(&mut self) {
         self.send(Control::Audition(None));
         self.previewing = false;
+        self.note_audition = false;
         self.audition_target = None;
     }
     pub fn editor_beats(&self) -> Option<f64> {
-        if self.previewing {
+        if self.previewing && !self.note_audition {
             Some(
                 self.audio
                     .diagnostics
@@ -170,7 +197,15 @@ impl MyApp {
                     / 60.0,
             )
         } else {
-            self.beats()
+            self.beats().map(|beats| {
+                let origin = if let Some(FxTarget::Input { bank, slot }) = self.editor.target {
+                    self.view.phrases[bank][slot].origin_tick as f64
+                        / crate::config::sequence_edit::PPQ as f64
+                } else {
+                    0.0
+                };
+                (beats - origin).max(0.0)
+            })
         }
     }
     pub fn take_block_reason(&self) -> Option<&'static str> {

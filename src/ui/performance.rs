@@ -16,6 +16,10 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp) {
 pub fn workspace(ui: &mut egui::Ui, app: &mut MyApp) {
     let lang = crate::app_support::language::Language::current(ui.ctx());
     if app.editor.expanded {
+        if !app.player_open {
+            editor_tracks(ui, app);
+            ui.add_space(6.0);
+        }
         egui::ScrollArea::vertical()
             .id_source("expanded")
             .show(ui, |ui| {
@@ -73,6 +77,169 @@ pub fn workspace(ui: &mut egui::Ui, app: &mut MyApp) {
                     track(column, app, index);
                 }
             });
+        });
+}
+fn editor_tracks(ui: &mut egui::Ui, app: &mut MyApp) {
+    use crate::app::shortcuts::Command;
+    let lang = app.language;
+    let compact = ui.ctx().screen_rect().height() < 800.0;
+    let (_, pulse) = super::beat::pulse(
+        app.view.elapsed,
+        app.view.sample_rate,
+        app.config.beat_config.current_bpm(),
+    );
+    ui.columns(5, |columns| {
+        for (index, column) in columns.iter_mut().enumerate() {
+            let view = app.view.tracks[index];
+            let (state, color, icon, next) = match view.mode {
+                Mode::Empty => (
+                    lang.choose("Empty", "空轨"),
+                    theme::MUTED,
+                    theme::Icon::Record,
+                    lang.choose("Record", "录音"),
+                ),
+                Mode::Recording => (
+                    lang.choose("REC", "录音"),
+                    Color32::from_rgb(255, 109, 118),
+                    theme::Icon::Play,
+                    lang.choose("Finish recording", "完成录音"),
+                ),
+                Mode::Overdub => (
+                    lang.choose("DUB", "叠录"),
+                    Color32::from_rgb(255, 196, 106),
+                    theme::Icon::Play,
+                    lang.choose("Finish overdub", "完成叠录"),
+                ),
+                Mode::Playing => (
+                    lang.choose("Play", "播放"),
+                    theme::accent(column),
+                    theme::Icon::Record,
+                    lang.choose("Overdub", "叠录"),
+                ),
+                Mode::Stopped => (
+                    lang.choose("Stop", "暂停"),
+                    theme::MUTED,
+                    theme::Icon::Play,
+                    lang.choose("Play", "播放"),
+                ),
+            };
+            let active = matches!(view.mode, Mode::Recording | Mode::Overdub);
+            let border = if active {
+                color.gamma_multiply(0.45 + pulse * 0.55)
+            } else if view.mode == Mode::Playing {
+                color.gamma_multiply(0.55)
+            } else {
+                Color32::from_gray(48)
+            };
+            theme::card()
+                .inner_margin(5.0)
+                .stroke(Stroke::new(1.0, border))
+                .show(column, |ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
+                    ui.spacing_mut().button_padding.x = 4.0;
+                    let title = format!(
+                        "{} · {} · {:.0} dB",
+                        index + 1,
+                        if view.pending {
+                            lang.choose("Queued", "等待")
+                        } else {
+                            state
+                        },
+                        crate::app::faders::decibels(app.config.track_levels[index])
+                    );
+                    if !compact {
+                        let title_response = ui.selectable_label(
+                            app.track_sel == Some(index),
+                            egui::RichText::new(&title).size(14.0).color(color),
+                        );
+                        if title_response.clicked() {
+                            app.track_sel = Some(index);
+                        }
+                        track_reference_menu(title_response, app, index);
+                    }
+                    ui.horizontal(|ui| {
+                        if compact {
+                            let title_response = ui
+                                .add_sized(
+                                    [18.0, 34.0],
+                                    egui::SelectableLabel::new(
+                                        app.track_sel == Some(index),
+                                        egui::RichText::new((index + 1).to_string()).color(color),
+                                    ),
+                                )
+                                .on_hover_text(&title);
+                            if title_response.clicked() {
+                                app.track_sel = Some(index);
+                            }
+                            track_reference_menu(title_response, app, index);
+                        }
+                        let keys = app.shortcuts.label(Command::Track(index));
+                        let primary = keys.split(" / ").next().unwrap_or("");
+                        let key = if primary.chars().count() <= if compact { 3 } else { 7 } {
+                            primary
+                        } else {
+                            ""
+                        };
+                        if theme::action_fixed(ui, icon, "", key)
+                            .on_hover_text(format!("{next} · {keys}"))
+                            .clicked()
+                        {
+                            app.trigger_track(index);
+                        }
+                        let keys = app.shortcuts.label(Command::Stop(index));
+                        let primary = keys.split(" / ").next().unwrap_or("");
+                        let key = if primary.chars().count() <= if compact { 3 } else { 7 } {
+                            primary
+                        } else {
+                            ""
+                        };
+                        if theme::action_fixed(ui, theme::Icon::Stop, "", key)
+                            .on_hover_text(format!("{} · {keys}", lang.choose("Stop", "暂停")))
+                            .clicked()
+                        {
+                            app.pause_track(index);
+                        }
+                    });
+                });
+        }
+    });
+}
+fn track_reference_menu(response: egui::Response, app: &mut MyApp, index: usize) {
+    use crate::config::track_options::RecordReference;
+    let lang = app.language;
+    response
+        .on_hover_text(lang.choose("Right-click: recording alignment", "右键：录音对齐"))
+        .context_menu(|ui| {
+            ui.strong(format!("{} {}", lang.choose("Track", "轨道"), index + 1));
+            ui.label(lang.choose("Recording alignment", "录音对齐"));
+            let view = app.view.tracks[index];
+            let can_edit = !matches!(view.mode, Mode::Recording | Mode::Overdub) && !view.pending;
+            ui.add_enabled_ui(can_edit, |ui| {
+                for (reference, label) in [
+                    (
+                        RecordReference::External,
+                        lang.choose("Live input", "现场输入"),
+                    ),
+                    (
+                        RecordReference::Internal,
+                        lang.choose("Internal source", "内部音源"),
+                    ),
+                ] {
+                    if ui
+                        .selectable_value(
+                            &mut app.config.track_options[index].record_reference,
+                            reference,
+                            label,
+                        )
+                        .clicked()
+                    {
+                        ui.close_menu();
+                    }
+                }
+            });
+            if !can_edit {
+                ui.label(lang.choose("Finish recording to change.", "结束录音后可修改。"));
+            }
         });
 }
 fn fixed_panel(
@@ -323,7 +490,13 @@ fn transport(ui: &mut egui::Ui, app: &mut MyApp) {
                     lang.choose("Project browser", "返回工程选择")
                 },
             );
-            let message = if app.status.is_empty() {
+            let message = if app.view.input_latency_pending {
+                lang.choose(
+                    "Effect change queued until recording finishes",
+                    "效果切换等待录音结束",
+                )
+                .to_owned()
+            } else if app.status.is_empty() {
                 app.audio_status()
             } else {
                 format!(
@@ -414,6 +587,19 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
                 ui,
                 lang.text("0 bars = manual finish · Reverse / One shot disable overdub"),
             );
+            let capture_busy =
+                matches!(app.view.tracks[index].mode, Mode::Recording | Mode::Overdub)
+                    || app.view.tracks[index].pending;
+            ui.add_enabled_ui(!capture_busy,|ui| {
+                theme::control_row(ui,|ui| {
+                    use crate::config::track_options::RecordReference;
+                    ui.label(lang.choose("Record alignment","录音对齐"));
+                    parameters::selector(ui,"record-reference",&mut options.record_reference,&[
+                        (RecordReference::External,lang.choose("Live input","现场输入")),
+                        (RecordReference::Internal,lang.choose("Internal source","内部音源")),
+                    ]);
+                });
+            }).response.on_hover_text(lang.choose("Live input follows the heard beat. Choose Internal source for OSC phrases. Record mixed sources in separate passes.","现场输入跟随听到的节拍；录 OSC 乐句选内部音源。两者混合时建议分轮录入。"));
             theme::control_row(ui, |ui| {
                 let view = app.view.tracks[index];
                 ui.add_enabled_ui(view.undo, |ui| {
@@ -504,14 +690,41 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
             ui.add_enabled_ui(app.stopped(), |ui| {
                 parameters::number(ui, &mut app.config.beat_config.input_latency, 0, 500, false)
             });
+            let can_change_pdc = app.stopped() && !app.taking() && !app.busy();
+            nav::register(ui.add_enabled(
+                can_change_pdc,
+                egui::Checkbox::new(
+                    &mut app.config.pdc_enabled,
+                    lang.choose("Align effect latency", "效果延迟对齐"),
+                ),
+            ))
+            .on_hover_text(lang.choose(
+                "Aligns tracks and monitoring. Stop playback to change.",
+                "对齐轨道与监听，停止后可切换。",
+            ));
+            let frame_ms = 1000.0 / app.view.sample_rate.max(1) as f64;
+            theme::caption(
+                ui,
+                format!(
+                    "{} {:.2} ms · {} {:.2} ms",
+                    lang.choose("Input FX", "输入效果"),
+                    app.view.input_fx_latency_frames as f64 * frame_ms,
+                    lang.choose("Output alignment", "输出对齐"),
+                    app.view.pdc_frames as f64 * frame_ms
+                ),
+            );
             let d = &app.audio.diagnostics;
             theme::caption(
                 ui,
                 format!(
-                    "Input gaps {} · overflow {} · errors {} · peak callback {:.2} ms",
+                    "{} {} · {} {} · {} {} · {} {:.2} ms",
+                    lang.choose("Input gaps", "输入缺帧"),
                     d.underrun.load(Ordering::Relaxed),
+                    lang.choose("overflow", "溢出"),
                     d.overflow.load(Ordering::Relaxed),
+                    lang.choose("errors", "错误"),
                     d.stream_errors.load(Ordering::Relaxed),
+                    lang.choose("peak callback", "回调峰值"),
                     d.maximum_callback_ns.load(Ordering::Relaxed) as f64 / 1e6
                 ),
             );
@@ -598,17 +811,22 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
             theme::caption(
                 ui,
                 format!(
-                    "Input {:.1} dB · output {:.1} dB · clipped frames {}",
+                    "{} {:.1} dB · {} {:.1} dB · {} {}",
+                    lang.choose("Input", "输入"),
                     db(app.view.input_peak),
+                    lang.choose("output", "输出"),
                     db(app.view.output_peak),
+                    lang.choose("clipped frames", "削波帧数"),
                     app.view.clipped
                 ),
             );
             theme::caption(
                 ui,
                 format!(
-                    "Audio clock {} frames · queued input {}",
+                    "{} {} · {} {}",
+                    lang.choose("Audio frames", "音频帧"),
                     app.view.frame,
+                    lang.choose("queued input", "输入队列"),
                     d.queue_frames.load(Ordering::Relaxed)
                 ),
             );

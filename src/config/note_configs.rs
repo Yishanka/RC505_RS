@@ -54,6 +54,8 @@ impl std::fmt::Display for NoteOct {
 }
 
 pub struct NoteConfigs {
+    pub launch_serial: u64,
+    pub pending: Option<super::sequence_edit::PendingClip>,
     pub(crate) note_seq: Vec<Option<NoteOct>>,
     pub(crate) events: Vec<super::sequence_edit::NoteEvent>,
     pub(crate) loop_ticks: usize,
@@ -70,6 +72,8 @@ pub struct NoteConfigs {
 impl NoteConfigs {
     pub fn new() -> Self {
         Self {
+            launch_serial: 0,
+            pending: None,
             note_seq: vec![],
             events: vec![],
             loop_ticks: 0,

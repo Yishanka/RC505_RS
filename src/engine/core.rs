@@ -40,6 +40,9 @@ pub enum Action {
 /// Allocated on the control thread. Old runtimes are moved back into the same
 /// envelope and retired on the worker, never freed by the callback.
 pub struct Parameters {
+    pub input_patch: InputFxRuntime,
+    pub track_patch: TrackFxRuntime,
+    pub pdc: super::pdc::LatencyPlan,
     pub master: crate::dsp::master::MasterFxRuntime,
     pub input_thru: bool,
     pub metronome_volume: f32,
@@ -53,12 +56,24 @@ pub struct Parameters {
 }
 impl Parameters {
     pub fn from_config(config: &AppConfig, sample_rate: u32) -> Self {
+        let input = InputFxRuntime::from_config(&config.input_fx);
+        let track = TrackFxRuntime::from_config(&config.track_fx);
+        let pdc = super::pdc::LatencyPlan::new(
+            &input,
+            &track,
+            sample_rate as f32,
+            config.input_routing,
+            config.pdc_enabled,
+        );
         Self {
+            input_patch: input.clone(),
+            track_patch: track.clone(),
+            pdc,
             master: crate::dsp::master::MasterFxRuntime::from_config(&config.master_fx),
             input_thru: config.input_thru,
             metronome_volume: config.metronome_volume,
-            input: InputFxRuntime::from_config(&config.input_fx),
-            track: TrackFxRuntime::from_config(&config.track_fx),
+            input,
+            track,
             options: std::array::from_fn(|i| {
                 config.track_options.get(i).copied().unwrap_or_default()
             }),
@@ -84,6 +99,8 @@ impl Parameters {
 }
 
 pub struct CoreTrack {
+    capture_delay: usize,
+    last_record_source_frame: Option<u64>,
     pub history: super::history::AudioHistory,
     pub audio: LoopAudio,
     pub undo: LoopAudio,
@@ -102,7 +119,9 @@ pub struct CoreTrack {
 impl CoreTrack {
     fn new(sr: u32) -> Self {
         Self {
+            capture_delay: 0,
             history: super::history::AudioHistory::new(sr),
+            last_record_source_frame: None,
             audio: LoopAudio::new(sr),
             undo: LoopAudio::new(sr),
             undo_valid: false,
@@ -160,6 +179,11 @@ pub struct TrackView {
 }
 #[derive(Clone, Copy)]
 pub struct EngineView {
+    pub input_latency_pending: bool,
+    pub graph_applied_at: Option<u64>,
+    pub phrases: [[crate::dsp::oscillator::PhraseView; 4]; 4],
+    pub pdc_frames: usize,
+    pub input_fx_latency_frames: usize,
     pub bpm: u32,
     pub metronome: bool,
     pub output_spectrum: [f32; super::spectrum::BARS],
@@ -176,6 +200,11 @@ pub struct EngineView {
 impl Default for EngineView {
     fn default() -> Self {
         Self {
+            phrases: [[crate::dsp::oscillator::PhraseView::default(); 4]; 4],
+            pdc_frames: 0,
+            input_fx_latency_frames: 0,
+            input_latency_pending: false,
+            graph_applied_at: None,
             bpm: 120,
             metronome: false,
             output_spectrum: [0.0; super::spectrum::BARS],
@@ -192,7 +221,37 @@ impl Default for EngineView {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PdcApplied {
+    pub requested_at: u64,
+    pub applied_at: u64,
+}
+struct DeferredGraph {
+    input: InputFxRuntime,
+    track: TrackFxRuntime,
+    routing: InputRouting,
+    plan: super::pdc::LatencyPlan,
+    requested_at: u64,
+    waiting: bool,
+}
+impl DeferredGraph {
+    fn new() -> Self {
+        Self {
+            input: InputFxRuntime::empty(),
+            track: TrackFxRuntime::empty(TRACKS),
+            routing: InputRouting::Serial,
+            plan: super::pdc::LatencyPlan::default(),
+            requested_at: 0,
+            waiting: false,
+        }
+    }
+}
 pub struct RenderCore {
+    deferred_graph: Box<DeferredGraph>,
+    graph_applied_at: Option<u64>,
+    pdc_applied_event: Option<PdcApplied>,
+    pdc: Box<super::pdc::Compensation>,
+    allow_pdc: bool,
     master: crate::dsp::master::MasterFxState,
     pub input_thru: bool,
     input_monitor_gain: f32,
@@ -225,6 +284,11 @@ impl RenderCore {
         let mut track_fx = TrackFxEngine::new(sr as f32, TRACKS);
         track_fx.prepare();
         Self {
+            pdc: Box::new(super::pdc::Compensation::new(sr as f32)),
+            allow_pdc: true,
+            deferred_graph: Box::new(DeferredGraph::new()),
+            graph_applied_at: None,
+            pdc_applied_event: None,
             master: crate::dsp::master::MasterFxState::new(sr as f32),
             transport: false,
             input_thru: true,
@@ -250,25 +314,50 @@ impl RenderCore {
         }
     }
     pub fn configure(&mut self, p: &mut Parameters) {
+        let plan = if self.allow_pdc {
+            p.pdc
+        } else {
+            super::pdc::LatencyPlan::default()
+        };
+        let capture_active = self
+            .tracks
+            .iter()
+            .any(|t| matches!(t.mode, Mode::Recording | Mode::Overdub));
+        if capture_active
+            && (plan.input_frames != self.pdc.plan.input_frames
+                || plan.output_frames != self.pdc.plan.output_frames)
+        {
+            self.input.patch_compatible(&mut p.input_patch);
+            self.track_fx.patch_compatible(&mut p.track_patch);
+            std::mem::swap(&mut self.deferred_graph.input, &mut p.input);
+            std::mem::swap(&mut self.deferred_graph.track, &mut p.track);
+            self.deferred_graph.routing = p.routing;
+            self.deferred_graph.plan = plan;
+            self.deferred_graph.requested_at = self.clock.frame;
+            self.deferred_graph.waiting = true;
+        } else {
+            self.deferred_graph.waiting = false;
+            self.pdc.plan = plan;
+            self.input.set_pdc(plan.enabled, plan.track_frames);
+            self.track_fx.set_pdc(plan.enabled);
+            p.input = self
+                .input
+                .swap_runtime(std::mem::replace(&mut p.input, InputFxRuntime::empty()));
+            self.track_fx.exchange_runtime(&mut p.track);
+            self.input.set_routing(p.routing);
+        }
         self.master.configure(p.master);
         self.input_thru = p.input_thru;
         if self.clock.frame == 0 {
             self.input_monitor_gain = if p.input_thru { 1.0 } else { 0.0 };
         }
         self.metronome_volume = p.metronome_volume;
-        p.input = self
-            .input
-            .swap_runtime(std::mem::replace(&mut p.input, InputFxRuntime::empty()));
-        // The empty runtime allocates no sequences; track empty would allocate,
-        // so swap with the engine through the reference method instead.
-        self.track_fx.exchange_runtime(&mut p.track);
         self.options = p.options;
         self.levels = p.levels;
         if self.idle() {
             self.bpm = p.bpm;
             self.latency = p.latency_frames;
         }
-        self.input.set_routing(p.routing);
         self.input
             .set_clock(self.clock.origin.is_some(), self.bpm as usize);
         self.track_fx
@@ -292,6 +381,57 @@ impl RenderCore {
     pub fn legacy_renderer(&mut self, enabled: bool) {
         self.legacy = enabled;
         self.input.set_legacy_fallback(enabled);
+    }
+    pub fn set_renderer_version(&mut self, version: u32) {
+        self.legacy_renderer(version == 2);
+        self.allow_pdc = version >= 5;
+        if !self.allow_pdc {
+            self.pdc.plan = super::pdc::LatencyPlan::default();
+            self.pdc.reset();
+            self.input.set_pdc(false, [0; 5]);
+            self.track_fx.set_pdc(false);
+        }
+    }
+    pub fn pdc_frames(&self) -> usize {
+        self.pdc.plan.output_frames
+    }
+    pub fn input_fx_latency_frames(&self) -> usize {
+        self.pdc.plan.input_frames
+    }
+    pub fn compensate_monitor_click(&mut self, value: f32) -> f32 {
+        self.pdc
+            .click
+            .process([value, value], self.pdc.plan.output_frames)[0]
+    }
+    pub fn take_pdc_applied_event(&mut self) -> Option<PdcApplied> {
+        self.pdc_applied_event.take()
+    }
+    fn apply_deferred_graph_if_safe(&mut self) {
+        if !self.deferred_graph.waiting
+            || self
+                .tracks
+                .iter()
+                .any(|t| matches!(t.mode, Mode::Recording | Mode::Overdub) || t.finish.is_some())
+        {
+            return;
+        }
+        self.pdc.plan = self.deferred_graph.plan;
+        self.input
+            .set_pdc(self.pdc.plan.enabled, self.pdc.plan.track_frames);
+        self.track_fx.set_pdc(self.pdc.plan.enabled);
+        self.deferred_graph.input = self.input.swap_runtime(std::mem::replace(
+            &mut self.deferred_graph.input,
+            InputFxRuntime::empty(),
+        ));
+        self.track_fx
+            .exchange_runtime(&mut self.deferred_graph.track);
+        self.input.set_routing(self.deferred_graph.routing);
+        self.deferred_graph.waiting = false;
+        self.graph_applied_at = Some(self.clock.frame);
+        self.pdc_applied_event = Some(PdcApplied {
+            requested_at: self.deferred_graph.requested_at,
+            applied_at: self.clock.frame,
+        });
     }
     pub fn legacy_idle(&self) -> bool {
         !self.preview
@@ -328,6 +468,7 @@ impl RenderCore {
     }
     /// Swaps a prepared snapshot; the caller retires the previous pages off-thread.
     pub fn restore(&mut self, snapshot: &mut AudioSnapshot) {
+        self.pdc.reset();
         for i in 0..TRACKS {
             let t = &mut self.tracks[i];
             std::mem::swap(&mut t.history, &mut snapshot.histories[i]);
@@ -390,6 +531,7 @@ impl RenderCore {
                 }
             }
             Action::Panic => {
+                self.pdc.reset();
                 self.preview = false;
                 self.transport = false;
                 self.metronome = false;
@@ -450,6 +592,7 @@ impl RenderCore {
                 }
             }
             Action::Clear(i) if i < TRACKS => {
+                self.pdc.reset_track(i);
                 let t = &mut self.tracks[i];
                 if t.audio.len > 0 && !self.legacy {
                     t.history.checkpoint(&t.audio, pool);
@@ -530,6 +673,18 @@ impl RenderCore {
         }
     }
     fn execute(&mut self, i: usize, action: Action, pool: &mut impl PageAllocator) {
+        let capture_delay = if !self.allow_pdc {
+            self.latency
+        } else {
+            match self.options[i].record_reference {
+                crate::config::track_options::RecordReference::External => {
+                    self.latency + self.pdc.plan.input_frames + self.pdc.plan.output_frames
+                }
+                crate::config::track_options::RecordReference::Internal => {
+                    self.pdc.plan.input_frames
+                }
+            }
+        };
         let t = &mut self.tracks[i];
         match action {
             Action::Trigger(_) => match t.mode {
@@ -542,6 +697,8 @@ impl RenderCore {
                     t.undo_valid = false;
                     t.undone = false;
                     t.mode = Mode::Recording;
+                    t.last_record_source_frame = None;
+                    t.capture_delay = capture_delay;
                     t.start = self.clock.frame;
                     t.finish_stopped = false;
                     t.finish = if self.options[i].measures > 0 {
@@ -589,6 +746,8 @@ impl RenderCore {
                     t.undo_valid = true;
                     t.undone = false;
                     t.mode = Mode::Overdub;
+                    t.last_record_source_frame = None;
+                    t.capture_delay = capture_delay;
                     t.start = self.clock.frame;
                 }
                 Mode::Overdub => {
@@ -624,11 +783,19 @@ impl RenderCore {
                 self.execute(i, action, pool);
             }
             let t = &mut self.tracks[i];
+            let recording_delay = t.capture_delay;
             if t.finish
-                .is_some_and(|at| self.clock.frame >= at + self.latency as u64)
+                .is_some_and(|at| self.clock.frame >= at + recording_delay as u64)
             {
                 if t.mode == Mode::Recording {
-                    t.cursor = self.latency % t.audio.len.max(1);
+                    let target = t.finish.unwrap().saturating_sub(t.start) as usize;
+                    // Capture's reference/latency is fixed for the pass. A mismatch
+                    // is an explicit failed take, never fabricated silent padding.
+                    if t.audio.len != target {
+                        self.exhausted = true;
+                        t.finish_stopped = true;
+                    }
+                    t.cursor = recording_delay % t.audio.len.max(1);
                     t.play_origin = self.clock.frame.saturating_sub(t.cursor as u64);
                 }
                 t.mode = if t.audio.len == 0 {
@@ -641,6 +808,7 @@ impl RenderCore {
                 t.finish = None;
             }
         }
+        self.apply_deferred_graph_if_safe();
         if self.idle() {
             self.clock.origin = None;
         }
@@ -680,33 +848,41 @@ impl RenderCore {
         let mut mixed = [0.0; 2];
         for i in 0..TRACKS {
             let t = &mut self.tracks[i];
-            let audible = matches!(t.mode, Mode::Playing | Mode::Overdub);
-            if t.audio.len == 0
-                || t.mode == Mode::Recording
-                || (!audible && self.clock.origin.is_none())
-            {
-                continue;
-            }
-            let position = if audible {
-                t.cursor
+            // The recorded prefix can loop at the musical end boundary while the
+            // final H+Li capture samples drain. Waiting to start playback until the
+            // tail is stored would otherwise create an extra plugin-sized gap.
+            let finishing = self.pdc.plan.enabled
+                && t.mode == Mode::Recording
+                && !t.finish_stopped
+                && !self.options[i].reverse
+                && t.finish.is_some_and(|at| self.clock.frame >= at);
+            let audible = matches!(t.mode, Mode::Playing | Mode::Overdub) || finishing;
+            let available = t.audio.len > 0 && (t.mode != Mode::Recording || finishing);
+            let loop_len = if finishing {
+                t.finish.unwrap().saturating_sub(t.start) as usize
             } else {
-                self.clock.frame.saturating_sub(t.play_origin) as usize % t.audio.len
+                t.audio.len
             };
-            let read = if self.options[i].reverse {
-                t.audio.len - 1 - position
+            let source_running = audible || self.clock.origin.is_some();
+            let position = if finishing {
+                self.clock.frame.saturating_sub(t.finish.unwrap()) as usize % loop_len.max(1)
+            } else if audible && available {
+                t.cursor
+            } else if available {
+                self.clock.frame.saturating_sub(t.play_origin) as usize % t.audio.len
+            } else {
+                0
+            };
+            let read = if available && self.options[i].reverse {
+                loop_len - 1 - position
             } else {
                 position
             };
-            let dry = t.audio.read(read);
-            let wet = self.track_fx.process_frame(
-                i,
-                position as f64 / self.sample_rate as f64,
-                dry[0],
-                dry[1],
-            );
-            if audible || self.clock.origin.is_some() {
-                carriers[i] = Some(wet);
-            }
+            let dry = if available && source_running {
+                t.audio.read(read)
+            } else {
+                [0.0; 2]
+            };
             t.gain +=
                 (self.levels[i] - t.gain) * (1.0 / (0.005 * self.sample_rate as f32)).min(1.0);
             let fade = t
@@ -717,11 +893,34 @@ impl RenderCore {
                 t.mode = Mode::Stopped;
                 t.fade = None;
             }
-            if audible {
-                mixed[0] += wet.0 * t.gain * fade;
-                mixed[1] += wet.1 * t.gain * fade;
-                self.track_peaks[i] =
-                    self.track_peaks[i].max(wet.0.abs().max(wet.1.abs()) * t.gain * fade);
+            // Fader/stop controls belong to the same source frame as the audio.
+            // Delay them by the rack latency before adding the remaining PDC tap.
+            let gain = if audible { t.gain * fade } else { 0.0 };
+            let gain = self.pdc.gains[i].process([gain, 0.0], self.pdc.plan.track_frames[i])[0];
+            let wet = if available && (source_running || gain.abs() > 1e-8) {
+                self.track_fx.process_frame(
+                    i,
+                    position as f64 / self.sample_rate as f64,
+                    dry[0],
+                    dry[1],
+                )
+            } else {
+                (0.0, 0.0)
+            };
+            if available && source_running {
+                carriers[i] = Some(wet);
+            }
+            let aligned = self.pdc.tracks[i].process(
+                [wet.0 * gain, wet.1 * gain],
+                self.pdc
+                    .plan
+                    .output_frames
+                    .saturating_sub(self.pdc.plan.track_frames[i]),
+            );
+            mixed[0] += aligned[0];
+            mixed[1] += aligned[1];
+            if audible || gain.abs() > 1e-8 {
+                self.track_peaks[i] = self.track_peaks[i].max(wet.0.abs().max(wet.1.abs()) * gain);
             }
         }
         let elapsed = self.clock.elapsed() as f64 / self.sample_rate as f64;
@@ -731,10 +930,23 @@ impl RenderCore {
         for i in 0..TRACKS {
             let t = &mut self.tracks[i];
             let mut ok = true;
-            if t.mode == Mode::Recording && self.clock.frame >= t.start + self.latency as u64 {
-                ok = t.audio.write(t.audio.len, [left, right], pool);
-            } else if t.mode == Mode::Overdub && self.clock.frame >= t.start + self.latency as u64 {
-                let write = (t.cursor + t.audio.len - self.latency % t.audio.len) % t.audio.len;
+            let recording_delay = t.capture_delay;
+            let source_frame = self.clock.frame.saturating_sub(recording_delay as u64);
+            let ready = self.clock.frame >= t.start.saturating_add(recording_delay as u64)
+                && t.last_record_source_frame
+                    .is_none_or(|last| source_frame > last)
+                && t.finish.is_none_or(|finish| source_frame < finish);
+            if t.mode == Mode::Recording && ready {
+                let target = source_frame.saturating_sub(t.start) as usize;
+                if t.audio.len != target {
+                    ok = false;
+                }
+                if ok {
+                    ok = t.audio.write(target, [left, right], pool);
+                    t.last_record_source_frame = Some(source_frame);
+                }
+            } else if t.mode == Mode::Overdub && ready && t.audio.len > 0 {
+                let write = (t.cursor + t.audio.len - recording_delay % t.audio.len) % t.audio.len;
                 let old = t.audio.read(write);
                 ok = t.audio.write(
                     write,
@@ -752,6 +964,7 @@ impl RenderCore {
                     ],
                     pool,
                 );
+                t.last_record_source_frame = Some(source_frame);
             }
             if !ok {
                 self.exhausted = true;
@@ -777,8 +990,19 @@ impl RenderCore {
         let target = if self.input_thru { 1.0 } else { 0.0 };
         let step = 1.0 / (0.005 * self.sample_rate as f32).max(1.0);
         self.input_monitor_gain += (target - self.input_monitor_gain).clamp(-step, step);
-        mixed[0] += left * self.input_monitor_gain;
-        mixed[1] += right * self.input_monitor_gain;
+        let input_gain = self
+            .pdc
+            .input_gain
+            .process([self.input_monitor_gain, 0.0], self.pdc.plan.input_frames)[0];
+        let monitored = self.pdc.input.process(
+            [left * input_gain, right * input_gain],
+            self.pdc
+                .plan
+                .output_frames
+                .saturating_sub(self.pdc.plan.input_frames),
+        );
+        mixed[0] += monitored[0];
+        mixed[1] += monitored[1];
         mixed = self.master.process(mixed);
         mixed = mixed.map(crate::dsp::headroom);
         self.input_peak = self.input_peak.max(input[0].abs().max(input[1].abs()));
@@ -823,6 +1047,11 @@ impl RenderCore {
             }
         });
         let view = EngineView {
+            input_latency_pending: self.deferred_graph.waiting,
+            graph_applied_at: self.graph_applied_at,
+            phrases: self.input.phrase_views(),
+            pdc_frames: self.pdc.plan.output_frames,
+            input_fx_latency_frames: self.pdc.plan.input_frames,
             bpm: self.bpm,
             metronome: self.metronome,
             output_spectrum: [0.0; super::spectrum::BARS],
@@ -847,6 +1076,265 @@ impl RenderCore {
 mod tests {
     use super::*;
     #[test]
+    fn pdc_aligns_serial_pitch_bypass_parallel_tracks_input_and_click() {
+        use crate::config::{TrackFx, TrackFxKind, audio_fx::AudioFxKind};
+        let sr = 8000;
+        let window = crate::dsp::pitch_shift::latency_frames(sr as f32);
+        let mut c = AppConfig::new(120, 0, 5);
+        c.pdc_enabled = true;
+        for slot in 0..2 {
+            c.track_fx
+                .set_slot_kind(0, slot, TrackFxKind::Audio(AudioFxKind::Transpose));
+            if let Some(TrackFx::Audio(p)) = c.track_fx.slot_fx_mut(0, slot) {
+                p.semitones = 0.0;
+            }
+            c.track_fx.tracks[0].enabled[0][slot] = true;
+        }
+        let mut engine = RenderCore::new(sr);
+        engine.configure(&mut Parameters::from_config(&c, sr));
+        for track in 0..2 {
+            for n in 0..4000 {
+                let value = if n == 0 { 0.1 } else { 0.0 };
+                engine.tracks[track]
+                    .audio
+                    .write(n, [value, -value], &mut OfflinePages);
+            }
+            engine.tracks[track].mode = Mode::Playing;
+        }
+        engine.clock.start();
+        assert_eq!(engine.pdc_frames(), window * 2);
+        assert_eq!(engine.input_fx_latency_frames(), 0);
+        for n in 0..window * 3 {
+            let input = if n == 0 { [0.1, -0.1] } else { [0.0; 2] };
+            let y = engine.process(input, &mut OfflinePages);
+            let click = engine.compensate_monitor_click(if n == 0 { 0.2 } else { 0.0 });
+            let expected = if n == window * 2 {
+                [0.3, -0.3]
+            } else {
+                [0.0; 2]
+            };
+            assert!(
+                (y[0] - expected[0]).abs() < 0.0001 && (y[1] - expected[1]).abs() < 0.0001,
+                "frame{n}: {y:?}"
+            );
+            assert_eq!(click, if n == window * 2 { 0.2 } else { 0.0 });
+        }
+    }
+    #[test]
+    fn pdc_recording_removes_input_window_but_keeps_physical_calibration_independent() {
+        use crate::config::{FxKind, InputFx, audio_fx::AudioFxKind};
+        let sr = 8000;
+        let hardware = 64;
+        let window = crate::dsp::pitch_shift::latency_frames(sr as f32);
+        let mut c = AppConfig::new(120, 8, 5);
+        c.pdc_enabled = true;
+        c.input_thru = false;
+        c.track_options[0].quantize = Quantize::Off;
+        c.input_fx
+            .set_slot_kind(0, 0, FxKind::Audio(AudioFxKind::Transpose));
+        c.input_fx.banks[0].slots[0].is_enabled = true;
+        if let Some(InputFx::Audio(p)) = &mut c.input_fx.banks[0].slots[0].fx {
+            p.semitones = 0.0;
+        }
+        let mut engine = RenderCore::new(sr);
+        engine.configure(&mut Parameters::from_config(&c, sr));
+        assert_eq!(engine.latency, hardware);
+        assert_eq!(engine.input_fx_latency_frames(), window);
+        engine.action(Action::Trigger(0), &mut OfflinePages);
+        let signal = |n: usize| (n as f32 * 0.071).sin() * 0.2;
+        let offset = hardware + window * 2;
+        for n in 0..4000 + offset + 1 {
+            if n == 1500 {
+                c.input_fx.banks[0].slots[0].is_enabled = false;
+                engine.configure(&mut Parameters::from_config(&c, sr));
+            }
+            if n == 4000 {
+                engine.action(Action::Trigger(0), &mut OfflinePages);
+            }
+            let arrival = hardware + window;
+            let x = if n >= arrival {
+                signal(n - arrival)
+            } else {
+                0.0
+            };
+            engine.process([x, -x], &mut OfflinePages);
+        }
+        assert_eq!(engine.tracks[0].audio.len, 4000);
+        assert_eq!(engine.tracks[0].mode, Mode::Playing);
+        for n in 0..4000 {
+            let y = engine.tracks[0].audio.read(n);
+            assert!(
+                (y[0] - signal(n)).abs() < 0.0005,
+                "Record frame{n}: {} vs{}",
+                y[0],
+                signal(n)
+            );
+        }
+    }
+    #[test]
+    fn pdc_old_renderer_and_legacy_json_stay_opt_out() {
+        use crate::config::{FxKind, audio_fx::AudioFxKind};
+        let mut c = AppConfig::new(120, 0, 5);
+        c.input_fx
+            .set_slot_kind(0, 0, FxKind::Audio(AudioFxKind::Transpose));
+        let mut core = RenderCore::new(8000);
+        core.set_renderer_version(4);
+        core.configure(&mut Parameters::from_config(&c, 8000));
+        assert_eq!(core.pdc_frames(), 0);
+        let mut json = serde_json::to_value(crate::project::data_from_config(&c)).unwrap();
+        json.as_object_mut().unwrap().remove("pdc_enabled");
+        let data = serde_json::from_value(json).unwrap();
+        crate::project::apply_data_to_config(&mut c, data);
+        assert!(!c.pdc_enabled);
+    }
+    #[test]
+    fn pdc_finishing_recording_starts_the_loop_on_its_audible_boundary() {
+        use crate::config::{FxKind, audio_fx::AudioFxKind};
+        let sr = 8000;
+        let window = crate::dsp::pitch_shift::latency_frames(sr as f32);
+        let length = 2000;
+        let mut c = AppConfig::new(120, 8, 5);
+        c.input_thru = false;
+        c.track_options[0].quantize = Quantize::Off;
+        c.track_options[0].record_reference =
+            crate::config::track_options::RecordReference::Internal;
+        c.input_fx
+            .set_slot_kind(0, 0, FxKind::Audio(AudioFxKind::Transpose));
+        c.input_fx.banks[0].slots[0].is_enabled = true;
+        let mut core = RenderCore::new(sr);
+        core.configure(&mut Parameters::from_config(&c, sr));
+        core.action(Action::Trigger(0), &mut OfflinePages);
+        for n in 0..length * 2 + window {
+            if n == length {
+                core.action(Action::Trigger(0), &mut OfflinePages);
+            }
+            let sample = if n == 0 || n == length - 1 { 0.2 } else { 0.0 };
+            let y = core.process([sample; 2], &mut OfflinePages);
+            if n >= length + window {
+                let expected = if n == length + window || n == length * 2 + window - 1 {
+                    0.2
+                } else {
+                    0.0
+                };
+                assert!(
+                    (y[0] - expected).abs() < 0.0001,
+                    "frame{n}:{} vs{expected}",
+                    y[0]
+                );
+            }
+        }
+        assert_eq!(core.tracks[0].audio.len, length);
+    }
+    #[test]
+    fn pdc_external_performer_on_audible_beat_records_at_zero_not_at_m() {
+        use crate::config::{FxKind, audio_fx::AudioFxKind};
+        let sr = 8000;
+        let h = 64;
+        let window = crate::dsp::pitch_shift::latency_frames(sr as f32);
+        let start = 4000;
+        let finish = 8000;
+        let mut c = AppConfig::new(120, 8, 5);
+        c.input_thru = false;
+        c.input_fx
+            .set_slot_kind(0, 0, FxKind::Audio(AudioFxKind::Transpose));
+        c.input_fx.banks[0].slots[0].is_enabled = true;
+        let mut core = RenderCore::new(sr);
+        core.configure(&mut Parameters::from_config(&c, sr));
+        core.action(Action::Metronome(true), &mut OfflinePages);
+        let mut metronome = crate::engine::metronome::Metronome::new(sr);
+        let mut click_peak = 0.0f32;
+        for n in 0..finish + h + window * 2 + 1 {
+            if n == 2000 {
+                core.action(Action::Trigger(0), &mut OfflinePages);
+            }
+            if n == 6000 {
+                core.action(Action::Trigger(0), &mut OfflinePages);
+            }
+            let click = metronome.next(core.metronome, core.clock.elapsed(), sr, 120, 1.0);
+            let x = if n == start + window + h { 0.2 } else { 0.0 };
+            core.process([x; 2], &mut OfflinePages);
+            let click = core.compensate_monitor_click(click);
+            if n >= start + window && n < start + window + 280 {
+                click_peak = click_peak.max(click.abs());
+            }
+        }
+        assert!(click_peak > 0.1);
+        assert_eq!(core.tracks[0].audio.len, finish - start);
+        assert!((core.tracks[0].audio.read(0)[0] - 0.2).abs() < 0.0001);
+        assert!(
+            core.tracks[0].audio.read(window)[0].abs() < 0.0001,
+            "A listener's downbeat must not be stored M frames late"
+        );
+    }
+    #[test]
+    fn pdc_capture_defers_structural_latency_but_keeps_controls_live_without_holes() {
+        use crate::config::{
+            FxKind, InputFx, audio_fx::AudioFxKind, track_options::RecordReference,
+        };
+        let sr = 8000;
+        let window = crate::dsp::pitch_shift::latency_frames(sr as f32);
+        let mut c = AppConfig::new(120, 0, 5);
+        c.input_thru = false;
+        c.track_options[0].quantize = Quantize::Off;
+        c.track_options[0].record_reference = RecordReference::Internal;
+        c.input_fx
+            .set_slot_kind(0, 0, FxKind::Audio(AudioFxKind::Transpose));
+        c.input_fx.banks[0].slots[0].is_enabled = true;
+        let mut core = RenderCore::new(sr);
+        core.configure(&mut Parameters::from_config(&c, sr));
+        core.action(Action::Trigger(0), &mut OfflinePages);
+        for n in 0..4000 + window + 1 {
+            if n == 1500 || n == 1800 || n == 2000 {
+                c.input_fx.select_bank(1);
+                if n == 1800 {
+                    if let Some(InputFx::Audio(p)) = &mut c.input_fx.banks[0].slots[0].fx {
+                        p.level_db = -6.0206;
+                    }
+                    c.track_levels[1] = 0.25;
+                }
+                if n == 2000 {
+                    c.input_fx.banks[0].slots[0].is_enabled = false;
+                }
+                let mut parameters = Parameters::from_config(&c, sr);
+                assert_eq!(
+                    crate::test_alloc::count(|| core.configure(&mut parameters)),
+                    0
+                );
+                assert!(core.view().input_latency_pending);
+                assert_eq!(core.input_fx_latency_frames(), window);
+                if n == 1800 {
+                    assert_eq!(core.levels[1], 0.25);
+                }
+            }
+            if n == 4000 {
+                core.action(Action::Trigger(0), &mut OfflinePages);
+            }
+            core.process([0.2; 2], &mut OfflinePages);
+        }
+        assert!(!core.view().input_latency_pending);
+        assert_eq!(core.input_fx_latency_frames(), 0);
+        assert_eq!(
+            core.take_pdc_applied_event(),
+            Some(PdcApplied {
+                requested_at: 2000,
+                applied_at: (4000 + window) as u64
+            })
+        );
+        assert_eq!(core.tracks[0].audio.len, 4000);
+        for n in 0..4000 {
+            let x = core.tracks[0].audio.read(n)[0];
+            assert!(x >= 0.099 && x <= 0.201, "silent hole at{n}: {x}");
+        }
+        assert!(
+            core.tracks[0].audio.read(1450)[0] < 0.13,
+            "compatible trim change was frozen"
+        );
+        assert!(
+            core.tracks[0].audio.read(1800)[0] > 0.19,
+            "compatible bypass change was frozen"
+        );
+    }
+    #[test]
     #[ignore = "manual process-memory measurement at prepared sample rates"]
     fn benchmark_prepared_core_memory() {
         for sr in [48000, 192000] {
@@ -859,6 +1347,114 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(800));
             std::hint::black_box(&core);
         }
+    }
+    #[test]
+    #[ignore = "manual release callback stress; no soundcard deadline guarantee"]
+    fn benchmark_pdc_formants_unity_feedback_bass_callbacks() {
+        use crate::config::{
+            FxKind, InputFx, TrackFx, TrackFxKind, audio_fx::AudioFxKind as K,
+            track_options::RecordReference,
+        };
+        let sr = 48000;
+        let mut c = AppConfig::new(120, 0, 5);
+        c.pdc_enabled = true;
+        c.input_thru = true;
+        for (slot, kind) in [K::Delay, K::Transpose, K::PanningDelay, K::Equalizer]
+            .into_iter()
+            .enumerate()
+        {
+            c.input_fx.set_slot_kind(0, slot, FxKind::Audio(kind));
+            c.input_fx.banks[0].slots[slot].is_enabled = true;
+            if let Some(InputFx::Audio(p)) = &mut c.input_fx.banks[0].slots[slot].fx {
+                p.time_ms = if slot == 2 { 1.01 } else { 1.0 };
+                p.feedback = 1.0;
+                p.feedback_repeats = 0;
+                p.semitones = 3.0;
+                p.high_cut_hz = 0.0;
+                p.low_cut_hz = 0.0;
+                p.effect_level = 0.4;
+            }
+        }
+        for (slot, kind) in [K::Transpose, K::PanningDelay, K::Electric, K::Reverb]
+            .into_iter()
+            .enumerate()
+        {
+            c.track_fx.set_slot_kind(0, slot, TrackFxKind::Audio(kind));
+            if let Some(TrackFx::Audio(p)) = c.track_fx.slot_fx_mut(0, slot) {
+                p.semitones = 3.0;
+                p.preserve_formants = matches!(kind, K::Transpose | K::Electric);
+                p.time_ms = 1.0;
+                p.feedback_repeats = 0;
+                p.feedback = 1.0;
+                p.high_cut_hz = 0.0;
+                p.low_cut_hz = 0.0;
+                p.mix = 0.7;
+            }
+            for track in 0..5 {
+                c.track_fx.tracks[track].enabled[0][slot] = true;
+                c.track_levels[track] = 0.1;
+                c.track_options[track].quantize = Quantize::Off;
+                c.track_options[track].record_reference = RecordReference::Internal;
+            }
+        }
+        let mut core = RenderCore::new(sr);
+        core.configure(&mut Parameters::from_config(&c, sr));
+        for track in 0..5 {
+            for n in 0..4800 {
+                let x = (std::f32::consts::TAU * (60.0 + track as f32 * 20.0) * n as f32
+                    / sr as f32)
+                    .sin()
+                    * 0.2;
+                core.tracks[track]
+                    .audio
+                    .write(n, [x, x * 0.8], &mut OfflinePages);
+            }
+            core.tracks[track].mode = Mode::Playing;
+        }
+        core.clock.start();
+        core.action(Action::Trigger(4), &mut OfflinePages);
+        let input =
+            |n: usize| [(std::f32::consts::TAU * 50.0 * n as f32 / sr as f32).sin() * 0.9; 2];
+        for n in 0..24000 {
+            core.process(input(n), &mut OfflinePages);
+        }
+        c.input_fx.select_bank(1);
+        c.track_levels[2] = 0.07;
+        let mut pending = Parameters::from_config(&c, sr);
+        let block_frames = std::env::var("RC505_BENCH_BLOCK")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|n| matches!(n, 128 | 256 | 512))
+            .unwrap_or(128);
+        let blocks = 144000usize.div_ceil(block_frames);
+        let mut timings = Vec::with_capacity(blocks);
+        let mut checksum = 0.0f64;
+        let allocations = crate::test_alloc::count(|| {
+            for block in 0..blocks {
+                let before = std::time::Instant::now();
+                if block == 64000 / block_frames {
+                    core.configure(&mut pending);
+                }
+                for offset in 0..block_frames {
+                    let n = 24000 + block * block_frames + offset;
+                    let output = core.process(input(n), &mut OfflinePages);
+                    assert!(output.iter().all(|v| v.is_finite() && v.abs() <= 1.0));
+                    checksum += output[0] as f64;
+                }
+                timings.push(before.elapsed().as_secs_f64() * 1000.0);
+            }
+        });
+        assert_eq!(allocations, 0);
+        assert!(core.view().input_latency_pending);
+        let total = timings.iter().sum::<f64>();
+        timings.sort_by(f64::total_cmp);
+        println!(
+            "PDC + 5-track FX + 1ms/100% feedback bass + formants + overdub + pending graph: {:.4}s audio CPU {total:.2}ms; {block_frames}f p95 {:.3} p99 {:.3} max {:.3}ms; allocations {allocations}; checksum {checksum}",
+            blocks as f64 * block_frames as f64 / sr as f64,
+            timings[timings.len() * 95 / 100],
+            timings[timings.len() * 99 / 100],
+            timings[timings.len() - 1]
+        );
     }
     use crate::engine::loop_audio::{OfflinePages, PAGE_FRAMES, Page};
     fn core() -> RenderCore {

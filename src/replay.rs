@@ -3,7 +3,7 @@
 use crate::{
     config::AppConfig,
     engine::{
-        core::{Action, AudioSnapshot, Parameters, RenderCore},
+        core::{Action, AudioSnapshot, Parameters, PdcApplied, RenderCore},
         loop_audio::OfflinePages,
     },
     project::ProjectData,
@@ -17,7 +17,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const RENDERER_VERSION: u32 = 4;
+pub const RENDERER_VERSION: u32 = 5;
 mod assets;
 mod delta;
 pub mod library;
@@ -31,6 +31,9 @@ const MAX_EVENT_BYTES: usize = 64_000_000;
 #[derive(Clone, Serialize, Deserialize)]
 pub enum EventKind {
     Action(Action),
+    /// Verification at the boundary following the sample that applied a graph.
+    /// Payload timestamps are relative to the take, like Event::frame.
+    PdcApplied(PdcApplied),
     Config(ProjectData),
     ConfigDelta(delta::ConfigDelta),
 }
@@ -138,6 +141,21 @@ impl Writer {
                 self.config_state.encode(data, refs)?
             }
             EventKind::Action(action) => (EventKind::Action(action), Vec::new()),
+            EventKind::PdcApplied(applied) => {
+                ensure!(
+                    applied.requested_at >= self.origin
+                        && applied.requested_at <= applied.applied_at
+                        && applied.applied_at.checked_add(1) == Some(frame),
+                    "Invalid PDC application timestamp"
+                );
+                (
+                    EventKind::PdcApplied(PdcApplied {
+                        requested_at: applied.requested_at - self.origin,
+                        applied_at: applied.applied_at - self.origin,
+                    }),
+                    Vec::new(),
+                )
+            }
             EventKind::ConfigDelta(_) => {
                 anyhow::bail!("Only the replay writer may create configuration deltas")
             }
@@ -277,7 +295,7 @@ fn render_impl(
     let mut config = AppConfig::new(120, 0, 5);
     crate::project::apply_data_to_config(&mut config, data.clone());
     let mut core = RenderCore::new(metadata.sample_rate);
-    core.legacy_renderer(metadata.renderer == 2);
+    core.set_renderer_version(metadata.renderer);
     core.configure(&mut Parameters::from_config(&config, metadata.sample_rate));
     core.restore(&mut initial);
     let mut visuals = ReplayVisuals {
@@ -293,6 +311,7 @@ fn render_impl(
         configs: Vec::new(),
     };
     let mut last_action = None;
+    let mut last_pdc_applied = None;
     let mut input = hound::WavReader::open(root.join("input.wav"))?;
     ensure!(
         input.spec() == session::wav_spec(metadata.sample_rate)
@@ -318,6 +337,7 @@ fn render_impl(
         while next.as_ref().is_some_and(|event| event.frame == frame) {
             let event = next.take().unwrap();
             match &event.kind {
+                EventKind::PdcApplied(_) => verify_pdc_applied(&event, &mut last_pdc_applied)?,
                 EventKind::Action(action) => {
                     ensure!(
                         event.sample_assets.is_empty(),
@@ -351,6 +371,7 @@ fn render_impl(
         ];
         ensure!(dry.iter().all(|s| s.is_finite()), "Invalid replay sample");
         let wet = core.process(dry, &mut OfflinePages);
+        last_pdc_applied = core.take_pdc_applied_event();
         if capture_visuals && frame % (metadata.sample_rate as u64 / 30).max(1) == 0 {
             visuals.views.push(VisualFrame {
                 frame,
@@ -372,6 +393,7 @@ fn render_impl(
             "Replay command lies beyond its audio"
         );
         match &event.kind {
+            EventKind::PdcApplied(_) => verify_pdc_applied(&event, &mut last_pdc_applied)?,
             EventKind::Action(action) => {
                 ensure!(
                     event.sample_assets.is_empty(),
@@ -442,7 +464,26 @@ fn next_event(
         event.sequence == sequence,
         "Replay command sequence is incomplete"
     );
+    if let EventKind::PdcApplied(applied) = &event.kind {
+        ensure!(
+            event.sample_assets.is_empty()
+                && applied.requested_at <= applied.applied_at
+                && applied.applied_at.checked_add(1) == Some(event.frame),
+            "Invalid replay PDC application marker"
+        );
+    }
     Ok(Some(event))
+}
+fn verify_pdc_applied(event: &Event, actual: &mut Option<PdcApplied>) -> Result<()> {
+    let EventKind::PdcApplied(expected) = event.kind else {
+        return Ok(());
+    };
+    ensure!(
+        actual.take() == Some(expected),
+        "Replay PDC application does not match the recorded audio boundary at sample {}",
+        event.frame
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -501,7 +542,7 @@ mod tests {
             fx.semitones = 7.0;
         }
         let mut core = RenderCore::new(8000);
-        core.legacy_renderer(renderer == 2);
+        core.set_renderer_version(renderer);
         core.configure(&mut Parameters::from_config(&config, 8000));
         let mut initial = AudioSnapshot::empty(8000);
         core.snapshot(&mut initial, &mut OfflinePages);

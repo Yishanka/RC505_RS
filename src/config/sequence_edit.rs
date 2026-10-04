@@ -63,6 +63,25 @@ pub struct NoteClip {
     pub length: usize,
     pub events: Vec<NoteEvent>,
 }
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PendingClip {
+    pub serial: u64,
+    pub clip: NoteClip,
+}
+pub fn phrase_serial() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(1, |v| v.as_nanos() as u64);
+    NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+        Some(old.wrapping_add(1).max(now).max(1))
+    })
+    .unwrap_or(0)
+    .wrapping_add(1)
+    .max(now)
+    .max(1)
+}
 
 fn legacy_ppq() -> usize {
     12
@@ -111,6 +130,101 @@ impl NoteOct {
 }
 
 impl NoteConfigs {
+    pub fn launch_clip(&mut self, clip: &NoteClip, next_loop: bool) {
+        let mut normalized = NoteConfigs::new();
+        normalized.set_clip(clip);
+        let clip = normalized.clip();
+        let serial = phrase_serial();
+        if next_loop && self.loop_len() > 0 {
+            self.pending = Some(PendingClip { serial, clip });
+        } else {
+            self.set_clip(&clip);
+            self.launch_serial = serial;
+            self.pending = None;
+        }
+    }
+    pub fn commit_pending(&mut self, serial: u64) -> bool {
+        if self.pending.as_ref().is_none_or(|p| p.serial != serial) {
+            return false;
+        }
+        let pending = self.pending.take().unwrap();
+        self.set_clip(&pending.clip);
+        self.launch_serial = pending.serial;
+        true
+    }
+    pub fn move_ids(&mut self, ids: &[u64], ticks: i32, semitones: i32) {
+        let mut events = self.events();
+        let chosen: Vec<_> = events
+            .iter()
+            .filter(|n| ids.contains(&n.id))
+            .copied()
+            .collect();
+        if chosen.is_empty() {
+            return;
+        }
+        let low = chosen.iter().map(|n| n.start).min().unwrap() as i32;
+        let end = chosen.iter().map(|n| n.start + n.len).max().unwrap() as i32;
+        let pitch_min = chosen.iter().map(|n| n.pitch.pitch_index()).min().unwrap() as i32;
+        let pitch_max = chosen.iter().map(|n| n.pitch.pitch_index()).max().unwrap() as i32;
+        let ticks = ticks.clamp(-low, self.loop_len() as i32 - end);
+        let semitones = semitones.clamp(-pitch_min, 119 - pitch_max);
+        for note in &mut events {
+            if ids.contains(&note.id) {
+                note.start = (note.start as i32 + ticks) as usize;
+                note.pitch = NoteOct::from_pitch_index(
+                    (note.pitch.pitch_index() as i32 + semitones) as usize,
+                );
+            }
+        }
+        self.replace_events(self.loop_len(), &events);
+    }
+    pub fn remove_ids(&mut self, ids: &[u64]) {
+        let notes: Vec<_> = self
+            .event_slice()
+            .iter()
+            .copied()
+            .filter(|n| !ids.contains(&n.id))
+            .collect();
+        self.replace_events(self.loop_len(), &notes);
+    }
+    pub fn paste_events(&mut self, notes: &[NoteEvent], at: usize) -> Vec<u64> {
+        if notes.is_empty() || self.events.len() + notes.len() > 2048 {
+            return Vec::new();
+        }
+        let first = notes.iter().map(|n| n.start).min().unwrap();
+        let end = notes.iter().map(|n| n.start + n.len).max().unwrap();
+        let span = end - first;
+        if span > self.loop_len() {
+            return Vec::new();
+        }
+        if at > self.loop_len() - span {
+            return Vec::new();
+        }
+        let mut id = self
+            .events
+            .iter()
+            .map(|n| n.id)
+            .max()
+            .unwrap_or(0)
+            .wrapping_add(1)
+            .max(1);
+        let mut events = self.events();
+        let mut added = Vec::with_capacity(notes.len());
+        for note in notes {
+            while events.iter().any(|e| e.id == id) {
+                id = id.wrapping_add(1).max(1);
+            }
+            events.push(NoteEvent {
+                id,
+                start: at + note.start - first,
+                ..*note
+            });
+            added.push(id);
+            id = id.wrapping_add(1).max(1);
+        }
+        self.replace_events(self.loop_len(), &events);
+        added
+    }
     pub fn loop_len(&self) -> usize {
         self.loop_ticks
     }
@@ -279,6 +393,60 @@ impl NoteConfigs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn group_edits_preserve_intervals_ids_and_loop_bounds() {
+        let mut notes = NoteConfigs::new();
+        notes.replace_events(1920, &[note(0, 3, 48), note(3, 3, 52), note(12, 3, 60)]);
+        let ids: Vec<_> = notes.event_slice()[..2].iter().map(|n| n.id).collect();
+        let third = notes.event_slice()[2];
+        notes.move_ids(&ids, -999, -1000);
+        assert_eq!(notes.event_slice()[0].start, 0);
+        assert_eq!(
+            notes.event_slice()[1].pitch.pitch_index() - notes.event_slice()[0].pitch.pitch_index(),
+            4
+        );
+        assert!(notes.event_slice().contains(&third));
+        notes.move_ids(&ids, 100000, 100000);
+        let selected: Vec<_> = notes
+            .event_slice()
+            .iter()
+            .filter(|n| ids.contains(&n.id))
+            .copied()
+            .collect();
+        assert_eq!(selected.iter().map(|n| n.start + n.len).max(), Some(1920));
+        assert_eq!(
+            selected.iter().map(|n| n.pitch.pitch_index()).max(),
+            Some(119)
+        );
+        let copy = notes.paste_events(&selected, 0);
+        assert_eq!(copy.len(), 2);
+        assert!(copy.iter().all(|id| !ids.contains(id)));
+        notes.remove_ids(&copy);
+        assert_eq!(notes.events().len(), 3);
+        assert!(notes.paste_events(&selected, 1920).is_empty());
+        assert_eq!(notes.loop_len(), 1920);
+    }
+    #[test]
+    fn queued_phrase_changes_only_on_matching_confirmation_and_roundtrips() {
+        let mut notes = NoteConfigs::new();
+        notes.replace_events(3840, &[note(0, 3, 48)]);
+        let old = notes.clip();
+        let mut next = NoteConfigs::new();
+        next.replace_events(7680, &[note(0, 6, 55)]);
+        next.clip_name = "Second".into();
+        notes.launch_clip(&next.clip(), true);
+        let serial = notes.pending.as_ref().unwrap().serial;
+        assert_eq!(notes.clip(), old);
+        assert!(!notes.commit_pending(serial.wrapping_add(1)));
+        let restored: PendingClip =
+            serde_json::from_str(&serde_json::to_string(notes.pending.as_ref().unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(restored.clip.length, 7680);
+        assert!(notes.commit_pending(serial));
+        assert_eq!(notes.launch_serial, serial);
+        assert_eq!(notes.clip_name, "Second");
+        assert!(notes.pending.is_none());
+    }
     #[test]
     fn bounded_editing_cannot_extend_the_loop() {
         let mut c = NoteConfigs::new();

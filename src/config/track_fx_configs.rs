@@ -23,6 +23,16 @@ pub enum TrackFxKind {
     Filter,
 }
 impl TrackFxKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "Empty",
+            Self::Delay => "Delay",
+            Self::Roll => "Roll",
+            Self::Filter => "Filter",
+            Self::Vocoder => "Vocoder",
+            Self::Audio(kind) => kind.name(),
+        }
+    }
     pub fn ui_tag(self) -> usize {
         match self {
             Self::None => 0,
@@ -47,6 +57,7 @@ impl TrackFxKind {
                 .filter(|k| *k != super::audio_fx::AudioFxKind::Delay)
                 .map(Self::Audio),
         );
+        kinds[1..].sort_by_key(|kind| kind.name().to_ascii_lowercase());
         kinds
     }
 }

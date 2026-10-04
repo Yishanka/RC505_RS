@@ -10,5 +10,6 @@ pub mod loop_audio;
 pub mod metronome;
 pub(crate) mod output_resampler;
 pub mod output_watch;
+pub mod pdc;
 pub mod spectrum;
 pub mod track_fx;

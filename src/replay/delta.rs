@@ -220,7 +220,7 @@ impl State {
             }
         }
         let (next, is_delta) = match &event.kind {
-            EventKind::Action(_) => {
+            EventKind::Action(_) | EventKind::PdcApplied(_) => {
                 ensure!(
                     event.sample_assets.is_empty(),
                     "Action events cannot reference samples"

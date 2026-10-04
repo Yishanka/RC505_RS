@@ -27,8 +27,58 @@ impl std::fmt::Display for FilterType {
     }
 }
 
+/// Independent FX cutoff sweep. The OSC filter uses its dedicated LFOs instead.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct FilterSweepConfig {
+    pub depth: f32,
+    pub rate_hz: f32,
+    pub sync: bool,
+    pub beats: f32,
+    pub stepped: bool,
+    pub step_hz: f32,
+    pub step_sync: bool,
+    pub step_beats: f32,
+}
+impl Default for FilterSweepConfig {
+    fn default() -> Self {
+        Self {
+            depth: 0.0,
+            rate_hz: 0.5,
+            sync: false,
+            beats: 4.0,
+            stepped: false,
+            step_hz: 4.0,
+            step_sync: false,
+            step_beats: 0.25,
+        }
+    }
+}
+impl FilterSweepConfig {
+    pub fn sanitized(self) -> Self {
+        let mut p = self;
+        let d = Self::default();
+        macro_rules! bound {
+            ($f:ident,$lo:expr,$hi:expr) => {
+                p.$f = if p.$f.is_finite() {
+                    p.$f.clamp($lo, $hi)
+                } else {
+                    d.$f
+                };
+            };
+        }
+        bound!(depth, 0.0, 1.0);
+        bound!(rate_hz, 0.01, 20.0);
+        bound!(beats, 0.0625, 64.0);
+        bound!(step_hz, 0.1, 100.0);
+        bound!(step_beats, 0.015625, 16.0);
+        p
+    }
+}
+
 pub struct FilterConfigs {
     pub sel_idx: Option<usize>,
+    pub sweep: FilterSweepConfig,
     pub filter_type: EnumConfig<FilterType>,
     pub cutoff_hz: NumericConfig,
     pub resonance_x10: NumericConfig,
@@ -40,6 +90,7 @@ impl FilterConfigs {
     pub fn new() -> Self {
         Self {
             sel_idx: None,
+            sweep: FilterSweepConfig::default(),
             filter_type: EnumConfig::new(
                 "Type",
                 FilterType::Lpf,

@@ -84,6 +84,7 @@ pub struct MyApp {
     pub replay_panel: Option<Box<ui::replay_panel::ReplayPanel>>,
     pub theme: crate::app_support::appearance::ThemeColor,
     pub audition_target: Option<(crate::presets::FxTarget, usize)>,
+    pub note_audition: bool,
     pub calibration_open: bool,
     pub loopback_connected: bool,
     pub visualizer_enabled: bool,
@@ -221,6 +222,7 @@ impl MyApp {
             replay_panel: None,
             theme,
             audition_target: None,
+            note_audition: false,
             calibration_open: guard,
             loopback_connected: false,
             visualizer_enabled,
@@ -380,7 +382,9 @@ impl MyApp {
             match self.audio.configure(&self.config) {
                 Ok(()) => {
                     self.last_config = bytes;
-                    if let Some((target, track)) = self.audition_target.filter(|_| self.previewing)
+                    if let Some((target, track)) = self
+                        .audition_target
+                        .filter(|_| self.previewing && !self.note_audition)
                     {
                         if let Some(params) = crate::engine::audition::AuditionParameters::new(
                             &self.config,
@@ -462,8 +466,12 @@ impl MyApp {
                 self.config.beat_config.accept_engine_bpm(view.bpm as usize);
             }
             self.view = view;
+            crate::phrases::commit_applied(&mut self.config, &self.view.phrases);
         }
         self.previewing = self.audio.diagnostics.auditioning.load(Ordering::Relaxed);
+        if !self.previewing {
+            self.note_audition = false;
+        }
         if self.taking() && !self.take_ending {
             self.take_pending = false;
         }

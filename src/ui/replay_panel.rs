@@ -283,7 +283,11 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp) {
         ));
         theme::caption(
             ui,
-            lang.choose("Live simulation · temporary panel", "实时演算 · 临时面板"),
+            if panel.view.input_latency_pending {
+                lang.choose("Effect change queued", "效果切换等待录音结束")
+            } else {
+                lang.choose("Live simulation · temporary panel", "实时演算 · 临时面板")
+            },
         );
         app.language_switch(ui);
     });
@@ -508,6 +512,16 @@ pub fn track_details(ui: &mut egui::Ui, app: &MyApp) {
         lang.choose("Fader", "音量推子"),
         crate::app::faders::decibels(app.config.track_levels[index])
     ));
+    ui.label(format!(
+        "{}: {}",
+        lang.choose("Recording alignment", "录音对齐"),
+        match app.config.track_options[index].record_reference {
+            crate::config::track_options::RecordReference::External =>
+                lang.choose("Live input", "现场输入"),
+            crate::config::track_options::RecordReference::Internal =>
+                lang.choose("Internal source", "内部音源"),
+        }
+    ));
     ui.label(lang.choose(
         "Track audio, FX and parameters follow the replay; the live project is preserved.",
         "轨道音频、效果开关与参数跟随回放；原工程保持原状。",
@@ -649,78 +663,78 @@ pub fn parameter_details(ui: &mut egui::Ui, app: &MyApp) {
                 None => {}
             }
         }
-        FxTarget::Track { bank, slot } => match app.config.track_fx.banks[bank].slots[slot]
-            .fx
-            .as_ref()
-        {
-            Some(TrackFx::Vocoder(v)) => {
-                row("Carrier", "载波", v.carrier.value.to_string());
-                row("Formant", "共振峰", format!("{} st", v.formant_semitones));
-                row(
-                    "Bands / mix",
-                    "频段 / 混合",
-                    format!("{} / {} %", v.bands.value, v.mix.value),
-                );
+        FxTarget::Track { bank, slot } => {
+            match app.config.track_fx.banks[bank].slots[slot].fx.as_ref() {
+                Some(TrackFx::Vocoder(v)) => {
+                    row("Carrier", "载波", v.carrier.value.to_string());
+                    row("Formant", "共振峰", format!("{} st", v.formant_semitones));
+                    row(
+                        "Bands / mix",
+                        "频段 / 混合",
+                        format!("{} / {} %", v.bands.value, v.mix.value),
+                    );
+                }
+                Some(TrackFx::Audio(v)) => {
+                    row("Effect", "效果", v.kind.name().into());
+                    row(
+                        "Mix / level",
+                        "混合 / 电平",
+                        format!("{:.0} % / {:.1} dB", v.mix * 100.0, v.level_db),
+                    );
+                }
+                Some(TrackFx::Delay(v)) => {
+                    row(
+                        "Delay time",
+                        "延迟时间",
+                        format!(
+                            "{:.2} ms",
+                            v.time_mode
+                                .value
+                                .milliseconds_f32(v.time_ms, app.config.beat_config.current_bpm())
+                        ),
+                    );
+                    row("Feedback", "反馈", format!("{} %", v.feedback_pct.value));
+                    row(
+                        "Direct / effect",
+                        "直达 / 效果",
+                        format!("{} / {} %", v.direct_pct.value, v.effect_pct.value),
+                    );
+                }
+                Some(TrackFx::Roll(v)) => {
+                    row("Step", "分割", v.step.value.to_string());
+                    row(
+                        "Time",
+                        "时间",
+                        format!(
+                            "{:.2} ms",
+                            v.time_mode.value.milliseconds(
+                                v.time_ms.value,
+                                app.config.beat_config.current_bpm()
+                            )
+                        ),
+                    );
+                    row(
+                        "Feedback / repeats",
+                        "反馈 / 次数",
+                        format!("{} % / {}", v.feedback.value, v.repeat.value),
+                    );
+                }
+                Some(TrackFx::Filter(v)) => {
+                    row(
+                        "Cutoff",
+                        "截止频率",
+                        format!("{} Hz", v.filter.cutoff_hz.value),
+                    );
+                    row(
+                        "Resonance",
+                        "共振",
+                        format!("{:.1}", v.filter.resonance_x10.value as f32 / 10.0),
+                    );
+                    row("Mix", "混合", format!("{} %", v.filter.mix.value));
+                }
+                None => {}
             }
-            Some(TrackFx::Audio(v)) => {
-                row("Effect", "效果", v.kind.name().into());
-                row(
-                    "Mix / level",
-                    "混合 / 电平",
-                    format!("{:.0} % / {:.1} dB", v.mix * 100.0, v.level_db),
-                );
-            }
-            Some(TrackFx::Delay(v)) => {
-                row(
-                    "Delay time",
-                    "延迟时间",
-                    format!(
-                        "{:.2} ms",
-                        v.time_mode
-                            .value
-                            .milliseconds(v.time_ms.value, app.config.beat_config.current_bpm())
-                    ),
-                );
-                row("Feedback", "反馈", format!("{} %", v.feedback_pct.value));
-                row(
-                    "Direct / effect",
-                    "直达 / 效果",
-                    format!("{} / {} %", v.direct_pct.value, v.effect_pct.value),
-                );
-            }
-            Some(TrackFx::Roll(v)) => {
-                row("Step", "分割", v.step.value.to_string());
-                row(
-                    "Time",
-                    "时间",
-                    format!(
-                        "{:.2} ms",
-                        v.time_mode
-                            .value
-                            .milliseconds(v.time_ms.value, app.config.beat_config.current_bpm())
-                    ),
-                );
-                row(
-                    "Feedback / repeats",
-                    "反馈 / 次数",
-                    format!("{} % / {}", v.feedback.value, v.repeat.value),
-                );
-            }
-            Some(TrackFx::Filter(v)) => {
-                row(
-                    "Cutoff",
-                    "截止频率",
-                    format!("{} Hz", v.filter.cutoff_hz.value),
-                );
-                row(
-                    "Resonance",
-                    "共振",
-                    format!("{:.1}", v.filter.resonance_x10.value as f32 / 10.0),
-                );
-                row("Mix", "混合", format!("{} %", v.filter.mix.value));
-            }
-            None => {}
-        },
+        }
     }
 }
 

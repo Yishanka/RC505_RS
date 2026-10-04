@@ -20,9 +20,12 @@ impl TimeMode {
         Self::EighthTriplet,
     ];
     pub fn milliseconds(self, time_ms: usize, bpm: usize) -> f32 {
+        self.milliseconds_f32(time_ms as f32, bpm)
+    }
+    pub fn milliseconds_f32(self, time_ms: f32, bpm: usize) -> f32 {
         let beat = 60000.0 / bpm.max(1) as f32;
         match self {
-            Self::Milliseconds => time_ms as f32,
+            Self::Milliseconds => time_ms,
             Self::Quarter => beat,
             Self::Eighth => beat * 0.5,
             Self::DottedEighth => beat * 0.75,

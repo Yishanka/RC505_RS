@@ -177,10 +177,15 @@ fn poly_blep(t: f32, dt: f32) -> f32 {
     0.0
 }
 
+mod modulation;
 mod note_schedule;
+mod phrase;
 mod sample_tables;
 mod voice;
-pub use voice::{PolyOscRuntime, PolyOscState, lfo_value, process_poly_sample};
+pub use modulation::lfo_value;
+pub use phrase::{PhraseView, source_key};
+pub use voice::sequence_tick as transport_tick;
+pub use voice::{PolyOscRuntime, PolyOscState, process_poly_sample};
 
 /// Read the same prepared source table for the editor; called only by the UI.
 pub fn source_wave_preview(config: &crate::config::OscillatorConfigs) -> [f32; 400] {

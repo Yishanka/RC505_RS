@@ -79,6 +79,7 @@ pub enum Control {
     Calibrate(Option<Box<super::latency::Calibration>>),
 }
 enum WorkerMessage {
+    PdcApplied(super::core::PdcApplied),
     Control {
         at: u64,
         command: Control,
@@ -360,10 +361,30 @@ impl Callback {
             self.core.metronome_volume,
         );
         let mut result = self.core.process(dry, &mut self.pages);
+        if let Some(applied) = self.core.take_pdc_applied_event() {
+            if self.taking
+                && self
+                    .worker
+                    .push(WorkerMessage::PdcApplied(applied))
+                    .is_err()
+            {
+                self.diagnostics.take_failed.store(true, Ordering::Relaxed);
+            }
+        }
+        let click = self.core.compensate_monitor_click(click);
         if let Some(audition) = &mut self.audition {
             let preview = audition.next(dry, &self.core);
             result[0] += preview[0];
             result[1] += preview[1];
+        }
+        if self.audition.as_ref().is_some_and(|a| a.finished()) && self.worker.free_len() > 0 {
+            let retired = Control::Audition(self.audition.take());
+            self.diagnostics.auditioning.store(false, Ordering::Relaxed);
+            let _ = self.worker.push(WorkerMessage::Control {
+                at: self.core.clock.frame,
+                command: retired,
+                accepted: true,
+            });
         }
         result[0] = (result[0] + click).clamp(-1.0, 1.0);
         result[1] = (result[1] + click).clamp(-1.0, 1.0);
@@ -867,6 +888,14 @@ fn worker_message(
     diagnostics: &Diagnostics,
 ) -> Result<()> {
     match message {
+        WorkerMessage::PdcApplied(applied) => {
+            if let Some(writer) = writer {
+                writer.event(
+                    applied.applied_at + 1,
+                    replay::EventKind::PdcApplied(applied),
+                )?;
+            }
+        }
         WorkerMessage::Audio { at, len, frames } => {
             if let Some(writer) = writer {
                 writer.audio(at, &frames[..len])?;

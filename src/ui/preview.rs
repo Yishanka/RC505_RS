@@ -112,7 +112,13 @@ pub fn configure(app: &mut MyApp, mode: &str) {
         }
         if mode.starts_with("lfo") {
             use crate::config::osc_configs::{CurvePoint, LfoShape, LfoTarget};
-            osc.lfo.enabled = true;
+            osc.lfo2.enabled = true;
+            osc.lfo2.target = LfoTarget::Pitch;
+            osc.lfo2.sync = false;
+            osc.lfo2.rate_hz = 5.0;
+            osc.lfo2.depth = 0.25;
+            osc.lfo2.mode = crate::config::osc_configs::LfoMode::Retrigger;
+            osc.lfo.enabled = !mode.starts_with("lfo2");
             osc.lfo.shape = LfoShape::Custom;
             osc.lfo.target = LfoTarget::Cutoff;
             osc.lfo.points = vec![
@@ -179,6 +185,20 @@ pub fn configure(app: &mut MyApp, mode: &str) {
             K::StepSlicer
         } else if mode.contains("transpose") {
             K::Transpose
+        } else if mode.contains("enhance") {
+            K::StereoEnhance
+        } else if mode.contains("phaser") {
+            K::Phaser
+        } else if mode.contains("flanger") {
+            K::Flanger
+        } else if mode.contains("chorus") {
+            K::Chorus
+        } else if mode.contains("autopan") {
+            K::AutoPan
+        } else if mode.contains("tremolo") {
+            K::Tremolo
+        } else if mode.contains("sustainer") {
+            K::Sustainer
         } else {
             K::Equalizer
         };
@@ -188,9 +208,54 @@ pub fn configure(app: &mut MyApp, mode: &str) {
             p.low_db = 4.0;
             p.mid_db = -6.0;
             p.high_db = 2.0;
+            p.high_mid_db = 3.0;
             p.semitones = 7.0;
             p.pitch_sequence = kind == K::Transpose;
+            if matches!(kind, K::Phaser | K::Flanger | K::AutoPan | K::Tremolo) {
+                p.mod_stepped = true;
+                p.mod_step_beats = 0.25;
+                p.mod_shape = 0.6;
+            }
+            if kind == K::StepSlicer {
+                p.slicer_duty = 0.6;
+                p.slicer_compress = true;
+            }
+            if kind == K::Chorus {
+                p.chorus_low_cut_hz = 100.0;
+                p.chorus_high_cut_hz = 10000.0;
+            }
+            if kind == K::StereoEnhance {
+                p.enhance_low_cut_hz = 200.0;
+                p.enhance_high_cut_hz = 10000.0;
+            }
+            if kind == K::PanningDelay && mode.contains("recording") {
+                p.time_ms = 7.53;
+                p.feedback_repeats = 0;
+                p.feedback = 1.0;
+            }
         }
+    }
+    if mode.starts_with("filter-sweep") {
+        app.config.input_fx.set_slot_kind(0, 0, FxKind::Filter);
+        app.config.input_fx.banks[0].slots[0].is_enabled = true;
+        if let Some(InputFx::Filter(filter)) = &mut app.config.input_fx.banks[0].slots[0].fx {
+            filter.sweep.depth = 0.6;
+            filter.sweep.sync = true;
+            filter.sweep.stepped = true;
+            filter.sweep.step_sync = true;
+        }
+    }
+    if mode.starts_with("sequence-links") {
+        let target = FxTarget::Input { bank: 0, slot: 0 };
+        if let Some(note) = crate::presets::note_mut(&mut app.config, target) {
+            note.clip_name = "Main phrase / 主乐句".into();
+            app.editor.piano.select_all(note);
+        }
+        app.config.input_fx.set_slot_kind(0, 1, FxKind::Oscillator);
+        let peer = FxTarget::Input { bank: 0, slot: 1 };
+        let _ = crate::phrases::link(&mut app.config, target, peer);
+        app.editor.phrase_manager_open = true;
+        app.editor.clip_name = "Main phrase".into();
     }
     app.editor.page = if mode.starts_with("sequence") || mode.starts_with("poly") {
         EditorPage::Sequence
@@ -264,10 +329,10 @@ pub fn sample_visuals(app: &mut MyApp, mode: &str) {
             .player_frame
             .store(24000, std::sync::atomic::Ordering::Relaxed);
     }
-    if mode.starts_with("performance-recording") {
+    if mode.contains("recording") {
         app.view.output_spectrum = std::array::from_fn(|i| ((i as f32 * 0.29).sin() * 0.7).abs());
     }
-    if !mode.starts_with("performance-recording") {
+    if !mode.contains("recording") {
         return;
     }
     app.view.running = true;

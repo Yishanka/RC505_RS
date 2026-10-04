@@ -1,4 +1,5 @@
-use super::note_schedule::{NoteBoundary, compiled_schedule};
+use super::modulation::{PreparedLfo, compose};
+use super::note_schedule::{NoteBoundary, ScheduledNote, compiled_schedule};
 use super::sample_tables::{SamplePyramid, WaveBank, periodic_sample, sample_bounds};
 use super::{OscillatorFxParams, osc_sample};
 use crate::config::note_configs::NoteOct;
@@ -8,18 +9,21 @@ use crate::dsp::filter::{FilterDspState, FilterParams, process_sample as process
 // Unified OSC: fixed-capacity voices with per-note envelopes/filter state. The
 // note schedule, sample and modulation curves are prepared off the callback.
 use crate::config::osc_configs::{
-    LfoConfig, LfoMode, LfoShape, LfoTarget, SampleAsset, SampleCapture, SampleMode,
+    GlideMode, LfoMode, LfoTarget, SampleAsset, SampleCapture, SampleMode,
 };
 use std::sync::Arc;
 #[derive(Clone)]
 pub struct PolyOscRuntime {
+    pub phrase: super::phrase::PhrasePlan,
     pub schedule: Arc<Vec<NoteBoundary>>,
     pub loop_ticks: usize,
     pub note_revision: u64,
     pub voices: usize,
     pub input_gate: bool,
-    pub lfo: LfoConfig,
-    pub lfo_table: Arc<[f32; 257]>,
+    pub lfos: [PreparedLfo; 2],
+    pub mono_legato: bool,
+    pub glide_ms: f32,
+    pub glide_mode: GlideMode,
     pub tone_revision: u64,
     pub sample: Option<Arc<SampleAsset>>,
     sample_pyramid: Option<Arc<SamplePyramid>>,
@@ -39,16 +43,7 @@ impl PolyOscRuntime {
         } else {
             0.0
         };
-        let mut lfo = c.lfo.clone();
-        lfo.sanitize();
-        let table = std::array::from_fn(|i| {
-            let wave = lfo_value(&lfo, i as f32 / 256.0);
-            match lfo.target {
-                LfoTarget::Volume => wave,
-                LfoTarget::Pitch => 2.0f32.powf((wave * 2.0 - 1.0) * lfo.depth),
-                LfoTarget::Cutoff => 2.0f32.powf((wave * 2.0 - 1.0) * lfo.depth * 4.0),
-            }
-        });
+        let lfos = [&c.lfo, &c.lfo2].map(PreparedLfo::from_config);
         let tone_revision = c.sample.as_ref().map_or(0, |s| s.content_hash)
             ^ ((c.waveform.value as u64) << 60)
             ^ ((c.sample_mode as u64) << 58)
@@ -56,14 +51,21 @@ impl PolyOscRuntime {
             ^ ((c.sample_end.to_bits() as u64) << 32)
             ^ ((c.vocal_formant.to_bits() as u64) << 16);
         Self {
+            phrase: super::phrase::PhrasePlan::from_config(&c.note),
             schedule,
             tone_revision,
             loop_ticks: c.note.loop_len(),
             note_revision,
             voices: c.voices.clamp(1, 16),
             input_gate: c.input_gate,
-            lfo,
-            lfo_table: Arc::new(table),
+            lfos,
+            mono_legato: c.mono_legato,
+            glide_ms: if c.glide_ms.is_finite() {
+                c.glide_ms.clamp(0.0, 2000.0)
+            } else {
+                0.0
+            },
+            glide_mode: c.glide_mode,
             sample: c.sample.clone(),
             sample_pyramid: c.sample.as_ref().map(SamplePyramid::prepare),
             capture: c.capture.clone(),
@@ -83,13 +85,17 @@ struct PolyVoice {
     id: u64,
     cycle: u64,
     frequency: f32,
+    target_frequency: f32,
+    glide_frequency: f64,
+    glide_ratio: f64,
+    glide_left: u32,
     velocity: f32,
     target_velocity: f32,
     gate: bool,
     active: bool,
     phase: f64,
     sample_pos: f64,
-    lfo_phase: f64,
+    lfo_phase: [f64; 2],
     amp: AhdsrState,
     filter_env: AhdsrState,
     filter: FilterDspState,
@@ -107,18 +113,58 @@ struct PolyVoice {
     sample_limit: f64,
 }
 impl PolyVoice {
+    fn set_pitch(&mut self, target: f32, time_ms: f32, sr: f32) {
+        if self.target_frequency == target && (self.glide_left > 0 || self.frequency == target) {
+            return;
+        }
+        self.target_frequency = target;
+        if time_ms > 0.0 && self.frequency > 0.0 && self.frequency != target {
+            self.glide_left = (time_ms as f64 * sr as f64 / 1000.0)
+                .round()
+                .clamp(1.0, u32::MAX as f64) as u32;
+            self.glide_frequency = self.frequency as f64;
+            self.glide_ratio =
+                (target as f64 / self.glide_frequency).powf(1.0 / self.glide_left as f64);
+        } else {
+            self.frequency = target;
+            self.glide_frequency = target as f64;
+            self.glide_left = 0;
+        }
+    }
+    fn advance_pitch(&mut self, enabled: bool) {
+        if self.glide_left == 0 {
+            return;
+        }
+        if !enabled {
+            self.frequency = self.target_frequency;
+            self.glide_frequency = self.target_frequency as f64;
+            self.glide_left = 0;
+            return;
+        }
+        self.glide_frequency *= self.glide_ratio;
+        self.glide_left -= 1;
+        self.frequency = if self.glide_left == 0 {
+            self.target_frequency
+        } else {
+            self.glide_frequency as f32
+        };
+    }
     fn new() -> Self {
         Self {
             id: 0,
             cycle: 0,
             frequency: 440.0,
+            target_frequency: 440.0,
+            glide_frequency: 440.0,
+            glide_ratio: 1.0,
+            glide_left: 0,
             velocity: 1.0,
             target_velocity: 1.0,
             gate: false,
             active: false,
             phase: 0.0,
             sample_pos: 0.0,
-            lfo_phase: 0.0,
+            lfo_phase: [0.0; 2],
             amp: AhdsrState::new(),
             filter_env: AhdsrState::new(),
             filter: FilterDspState::new(),
@@ -139,6 +185,8 @@ impl PolyVoice {
 }
 #[derive(Clone)]
 pub struct PolyOscState {
+    phrase: super::phrase::PhraseState,
+    phrase_restart_pending: bool,
     voices: Box<[PolyVoice; 16]>,
     tick: Option<u64>,
     age: u64,
@@ -149,7 +197,9 @@ pub struct PolyOscState {
     capture_started: bool,
     sample_identity: u64,
     fade: f32,
-    free_phase: f64,
+    free_phase: [f64; 2],
+    mono_voice: Option<usize>,
+    last_mono_frequency: Option<f32>,
     note_revision: u64,
     last_output: f32,
     transition_tail: f32,
@@ -157,8 +207,19 @@ pub struct PolyOscState {
     level: f32,
 }
 impl PolyOscState {
+    pub fn phrase_view(&self) -> super::phrase::PhraseView {
+        self.phrase.view()
+    }
+    pub fn advance_phrase(&mut self, r: &PolyOscRuntime, tick: u64, running: bool) {
+        self.phrase_restart_pending |= self
+            .phrase
+            .select(&r.phrase, tick, r.loop_ticks, running)
+            .restarted;
+    }
     pub fn new() -> Self {
         Self {
+            phrase: super::phrase::PhraseState::default(),
+            phrase_restart_pending: false,
             voices: Box::new(std::array::from_fn(|_| PolyVoice::new())),
             tick: None,
             age: 0,
@@ -169,7 +230,9 @@ impl PolyOscState {
             capture_started: false,
             sample_identity: 0,
             fade: 1.0,
-            free_phase: 0.0,
+            free_phase: [0.0; 2],
+            mono_voice: None,
+            last_mono_frequency: None,
             note_revision: 0,
             last_output: 0.0,
             transition_tail: 0.0,
@@ -187,6 +250,8 @@ impl PolyOscState {
         self.tick = None;
         self.last_time = -1.0;
         self.level = -1.0;
+        self.mono_voice = None;
+        self.last_mono_frequency = None;
     }
     pub fn capture(&mut self, r: &PolyOscRuntime, input: f32, sr: f32, threshold: f32) {
         use std::sync::atomic::Ordering;
@@ -239,11 +304,31 @@ pub fn process_poly_sample(
     {
         state.reset();
     }
-    if state.note_revision != r.note_revision {
+    let absolute_tick = sequence_tick(elapsed, sr, bpm);
+    let selection = state
+        .phrase
+        .select(&r.phrase, absolute_tick, r.loop_ticks, running);
+    let (schedule, loop_ticks, note_revision) = if selection.queued {
+        let queued = r.phrase.queued.as_ref().expect("selected prepared phrase");
+        (&queued.schedule, queued.length, queued.revision)
+    } else {
+        (&r.schedule, r.loop_ticks, r.note_revision)
+    };
+    let phrase_restarted = std::mem::take(&mut state.phrase_restart_pending);
+    if selection.restarted || phrase_restarted {
+        for voice in state.voices.iter_mut() {
+            voice.gate = false;
+            voice.cycle = u64::MAX;
+        }
+        state.tick = None;
+        state.mono_voice = None;
+        state.last_mono_frequency = None;
+    }
+    if state.note_revision != note_revision {
         // Reconcile note IDs instead of restarting every unrelated held voice
         // when one note is moved, resized or has its velocity edited.
         state.tick = None;
-        state.note_revision = r.note_revision;
+        state.note_revision = note_revision;
     }
     state.last_time = elapsed;
     state.last_running = running;
@@ -269,15 +354,13 @@ pub fn process_poly_sample(
         }
     }
     state.fade = (state.fade + 1.0 / (0.005 * sr)).min(1.0);
-    let absolute_tick = sequence_tick(elapsed, sr, bpm);
     let enabled = running
-        && r.loop_ticks > 0
-        && !r.schedule.is_empty()
+        && loop_ticks > 0
+        && !schedule.is_empty()
         && (!r.input_gate || p.input_level >= p.threshold);
-    let cycle = absolute_tick / r.loop_ticks.max(1) as u64;
-    let local_tick = (absolute_tick % r.loop_ticks.max(1) as u64) as usize;
-    let boundary = r
-        .schedule
+    let cycle = selection.elapsed_ticks / loop_ticks.max(1) as u64;
+    let local_tick = (selection.elapsed_ticks % loop_ticks.max(1) as u64) as usize;
+    let boundary = schedule
         .partition_point(|boundary| boundary.at <= local_tick)
         .saturating_sub(1);
     let schedule_key = (cycle << 32) | (boundary as u64);
@@ -288,67 +371,83 @@ pub fn process_poly_sample(
         state.tick = None;
     } else if state.tick != Some(schedule_key) {
         state.tick = Some(schedule_key);
-        let row = &r.schedule[boundary].notes;
+        let row = &schedule[boundary].notes;
         let chosen = &row[row.len().saturating_sub(r.voices)..];
-        for v in state.voices.iter_mut() {
-            v.gate = chosen.iter().any(|n| n.id == v.id && v.cycle == cycle);
-        }
-        for n in chosen {
-            if let Some(voice) = state
-                .voices
-                .iter_mut()
-                .find(|v| v.active && v.gate && v.id == n.id && v.cycle == cycle)
-            {
-                voice.frequency = n.frequency;
-                voice.target_velocity = n.velocity;
-                continue;
+        if r.voices == 1 && (r.mono_legato || r.glide_ms > 0.0) {
+            reconcile_mono(
+                state,
+                r,
+                chosen.last(),
+                schedule[boundary].connected,
+                cycle,
+                sr,
+            );
+        } else {
+            for v in state.voices.iter_mut() {
+                v.gate = chosen.iter().any(|n| n.id == v.id && v.cycle == cycle);
             }
-            let limit = r.voices;
-            let index = (0..limit)
-                .find(|i| !state.voices[*i].active)
-                .unwrap_or_else(|| {
-                    (0..limit)
-                        .min_by(|a, b| {
-                            let va = &state.voices[*a];
-                            let vb = &state.voices[*b];
-                            va.gate
-                                .cmp(&vb.gate)
-                                .then_with(|| va.last_output.abs().total_cmp(&vb.last_output.abs()))
-                                .then_with(|| va.age.cmp(&vb.age))
-                        })
-                        .unwrap_or(0)
-                });
-            let tail = state.voices[index].last_output;
-            state.age = state.age.wrapping_add(1);
-            let mut v = PolyVoice::new();
-            v.id = n.id;
-            v.cycle = cycle;
-            v.frequency = n.frequency;
-            v.velocity = n.velocity;
-            v.target_velocity = n.velocity;
-            v.gate = true;
-            v.active = true;
-            v.age = state.age;
-            v.steal_tail = tail;
-            v.steal_left = 64;
-            state.voices[index] = v;
+            for n in chosen {
+                if let Some(voice) = state
+                    .voices
+                    .iter_mut()
+                    .find(|v| v.active && v.gate && v.id == n.id && v.cycle == cycle)
+                {
+                    voice.frequency = n.frequency;
+                    voice.target_frequency = n.frequency;
+                    voice.glide_left = 0;
+                    voice.target_velocity = n.velocity;
+                    continue;
+                }
+                let limit = r.voices;
+                let index = (0..limit)
+                    .find(|i| !state.voices[*i].active)
+                    .unwrap_or_else(|| {
+                        (0..limit)
+                            .min_by(|a, b| {
+                                let va = &state.voices[*a];
+                                let vb = &state.voices[*b];
+                                va.gate
+                                    .cmp(&vb.gate)
+                                    .then_with(|| {
+                                        va.last_output.abs().total_cmp(&vb.last_output.abs())
+                                    })
+                                    .then_with(|| va.age.cmp(&vb.age))
+                            })
+                            .unwrap_or(0)
+                    });
+                let tail = state.voices[index].last_output;
+                state.age = state.age.wrapping_add(1);
+                let mut v = PolyVoice::new();
+                v.id = n.id;
+                v.cycle = cycle;
+                v.frequency = n.frequency;
+                v.target_frequency = n.frequency;
+                v.velocity = n.velocity;
+                v.target_velocity = n.velocity;
+                v.gate = true;
+                v.active = true;
+                v.age = state.age;
+                v.steal_tail = tail;
+                v.steal_left = 64;
+                state.voices[index] = v;
+            }
         }
     }
-    let rate = if r.lfo.sync {
-        bpm as f64 / (60.0 * r.lfo.beats as f64)
-    } else {
-        r.lfo.rate_hz as f64
-    };
-    if running {
-        state.free_phase = (state.free_phase + rate / sr as f64).fract();
+    let increments = r.lfos.each_ref().map(|lfo| lfo.increment(bpm, sr));
+    for (phase, increment) in state.free_phase.iter_mut().zip(increments) {
+        if running {
+            *phase = (*phase + increment).fract();
+        }
     }
-    let free_modulation = if r.lfo.enabled {
-        table_read(&r.lfo_table, state.free_phase as f32)
-    } else {
-        1.0
-    };
+    let free_modulation: [f32; 2] = std::array::from_fn(|i| {
+        if r.lfos[i].enabled {
+            r.lfos[i].value(state.free_phase[i])
+        } else {
+            1.0
+        }
+    });
     let mut output = 0.0;
-    for v in state.voices.iter_mut() {
+    for (voice_index, v) in state.voices.iter_mut().enumerate() {
         if !v.active {
             continue;
         }
@@ -359,20 +458,25 @@ pub fn process_poly_sample(
             v.last_output = 0.0;
             continue;
         }
-        v.lfo_phase = (v.lfo_phase + rate / sr as f64).fract();
-        let modulation = if !r.lfo.enabled {
-            1.0
-        } else if r.lfo.mode == LfoMode::Free {
-            free_modulation
-        } else {
-            table_read(&r.lfo_table, v.lfo_phase as f32)
-        };
-        let frequency = v.frequency
-            * if r.lfo.enabled && r.lfo.target == LfoTarget::Pitch {
-                modulation
-            } else {
+        for (phase, increment) in v.lfo_phase.iter_mut().zip(increments) {
+            *phase = (*phase + increment).fract();
+        }
+        let values = std::array::from_fn(|i| {
+            let lfo = &r.lfos[i];
+            if !lfo.enabled {
                 1.0
-            };
+            } else if lfo.mode == LfoMode::Free {
+                free_modulation[i]
+            } else {
+                lfo.value(v.lfo_phase[i])
+            }
+        });
+        let modulation = compose(&r.lfos, values);
+        v.advance_pitch(r.voices == 1 && r.glide_ms > 0.0);
+        if r.voices == 1 && state.mono_voice == Some(voice_index) {
+            state.last_mono_frequency = Some(v.frequency);
+        }
+        let frequency = v.frequency * modulation.pitch;
         if v.wave_rate != sr {
             v.wave_limit = 0.0;
             v.wave_rate = sr;
@@ -406,11 +510,7 @@ pub fn process_poly_sample(
             .next(v.gate, false, p.filter_envelope, 1.0 / sr);
         let min = p.cutoff_min_hz.max(10.0);
         let max = p.filter.cutoff_hz.max(min);
-        let volume = if r.lfo.enabled && r.lfo.target == LfoTarget::Volume {
-            (1.0 - r.lfo.depth) + r.lfo.depth * modulation
-        } else {
-            1.0
-        };
+        let volume = modulation.volume;
         let dry = raw * amp * v.velocity * volume * state.level;
         let mut sample = if p.filter.mix <= 0.0 {
             dry
@@ -419,12 +519,7 @@ pub fn process_poly_sample(
                 v.cutoff_base = min * (max / min).powf(cutoff_env);
                 v.cutoff_max = max;
             }
-            let cutoff = v.cutoff_base
-                * if r.lfo.enabled && r.lfo.target == LfoTarget::Cutoff {
-                    modulation
-                } else {
-                    1.0
-                };
+            let cutoff = v.cutoff_base * modulation.cutoff;
             process_filter_sample(
                 &mut v.filter,
                 FilterParams {
@@ -450,7 +545,82 @@ pub fn process_poly_sample(
     state.last_output = output;
     output
 }
-fn sequence_tick(elapsed: f64, sample_rate: f32, bpm: usize) -> u64 {
+fn reconcile_mono(
+    state: &mut PolyOscState,
+    r: &PolyOscRuntime,
+    note: Option<&ScheduledNote>,
+    connected: bool,
+    cycle: u64,
+    sr: f32,
+) {
+    let Some(n) = note else {
+        for v in state.voices.iter_mut() {
+            v.gate = false;
+        }
+        return;
+    };
+    let matching = state
+        .voices
+        .iter()
+        .position(|v| v.active && v.gate && v.id == n.id && v.cycle == cycle);
+    let index = matching
+        .or(state.mono_voice)
+        .or_else(|| {
+            state
+                .voices
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| v.active && v.gate)
+                .max_by_key(|(_, v)| v.age)
+                .map(|(i, _)| i)
+        })
+        .unwrap_or(0);
+    let old = state.voices[index];
+    let tied = old.active && old.gate && old.cycle == cycle && connected;
+    let from = if old.active {
+        old.frequency
+    } else {
+        state.last_mono_frequency.unwrap_or(n.frequency)
+    };
+    for v in state.voices.iter_mut() {
+        v.gate = false;
+    }
+    state.mono_voice = Some(index);
+    if matching == Some(index) || (r.mono_legato && tied) {
+        let v = &mut state.voices[index];
+        v.id = n.id;
+        v.cycle = cycle;
+        v.gate = true;
+        v.target_velocity = n.velocity;
+        v.set_pitch(
+            n.frequency,
+            if tied || matching.is_some() {
+                r.glide_ms
+            } else {
+                0.0
+            },
+            sr,
+        );
+    } else {
+        state.age = state.age.wrapping_add(1);
+        let mut voice = PolyVoice::new();
+        voice.id = n.id;
+        voice.cycle = cycle;
+        voice.active = true;
+        voice.gate = true;
+        voice.age = state.age;
+        voice.velocity = n.velocity;
+        voice.target_velocity = n.velocity;
+        let glide = r.glide_ms > 0.0 && (tied || r.glide_mode == GlideMode::AllNotes);
+        voice.frequency = if glide { from } else { n.frequency };
+        voice.target_frequency = voice.frequency;
+        voice.set_pitch(n.frequency, if glide { r.glide_ms } else { 0.0 }, sr);
+        voice.steal_tail = old.last_output;
+        voice.steal_left = 64;
+        state.voices[index] = voice;
+    }
+}
+pub fn sequence_tick(elapsed: f64, sample_rate: f32, bpm: usize) -> u64 {
     // elapsed is derived from an integer audio frame. Recover it before doing
     // rational PPQ conversion; floating beat-flooring can be late near long takes.
     let rate = sample_rate.max(1.0).round() as u64;
@@ -459,36 +629,7 @@ fn sequence_tick(elapsed: f64, sample_rate: f32, bpm: usize) -> u64 {
         / (rate as u128 * 60))
         .min(u64::MAX as u128) as u64
 }
-fn table_read(table: &[f32; 257], phase: f32) -> f32 {
-    let p = phase.clamp(0.0, 1.0) * 256.0;
-    let i = (p as usize).min(255);
-    let t = p - i as f32;
-    table[i] * (1.0 - t) + table[i + 1] * t
-}
-pub fn lfo_value(c: &LfoConfig, phase: f32) -> f32 {
-    match c.shape {
-        LfoShape::Sine => 0.5 - 0.5 * (phase * std::f32::consts::TAU).cos(),
-        LfoShape::Triangle => 1.0 - (phase * 2.0 - 1.0).abs(),
-        LfoShape::Saw => phase,
-        LfoShape::Square => {
-            if phase < 0.5 {
-                1.0
-            } else {
-                0.0
-            }
-        }
-        LfoShape::Custom => {
-            let a = c
-                .points
-                .windows(2)
-                .find(|p| phase <= p[1].x)
-                .unwrap_or_else(|| &c.points[c.points.len() - 2..]);
-            let t = ((phase - a[0].x) / (a[1].x - a[0].x).max(0.0001)).clamp(0.0, 1.0);
-            let shape = crate::dsp::envelope::bend_curve(t, a[0].curve);
-            a[0].y + (a[1].y - a[0].y) * shape
-        }
-    }
-}
+
 fn sample_voice(v: &mut PolyVoice, r: &PolyOscRuntime, frequency: f32, sr: f32) -> f32 {
     let Some(s) = &r.sample else {
         return 0.0;
@@ -1159,5 +1300,328 @@ mod poly_tests {
         assert!(
             (current.phase - (old.phase + old.frequency as f64 / 48000.0).fract()).abs() < 1e-12
         );
+    }
+    #[test]
+    fn independent_free_and_retrigger_phases_are_preserved_per_lfo_and_voice() {
+        let mut c = OscillatorConfigs::new();
+        c.note.replace_events(
+            3840,
+            &[
+                NoteEvent::new(0, 1920, NoteOct::from_pitch_index(48)),
+                NoteEvent::new(480, 1440, NoteOct::from_pitch_index(55)),
+            ],
+        );
+        c.lfo.enabled = true;
+        c.lfo.sync = false;
+        c.lfo.rate_hz = 1.0;
+        c.lfo.mode = LfoMode::Retrigger;
+        c.lfo2.enabled = true;
+        c.lfo2.sync = false;
+        c.lfo2.rate_hz = 3.0;
+        c.lfo2.mode = LfoMode::Retrigger;
+        let runtime = PolyOscRuntime::from_config(&c);
+        let mut state = PolyOscState::new();
+        for frame in 0..24000 {
+            process_poly_sample(
+                &mut state,
+                &runtime,
+                params(48000.0, Waveform::Sine),
+                frame as f64 / 48000.0,
+                120,
+                true,
+            );
+        }
+        let ids = c.note.events();
+        let first = state.voices.iter().find(|v| v.id == ids[0].id).unwrap();
+        let second = state.voices.iter().find(|v| v.id == ids[1].id).unwrap();
+        for (actual, expected) in [
+            (first.lfo_phase[0], 0.5),
+            (first.lfo_phase[1], 0.5),
+            (second.lfo_phase[0], 0.25),
+            (second.lfo_phase[1], 0.75),
+            (state.free_phase[0], 0.5),
+            (state.free_phase[1], 0.5),
+        ] {
+            assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");
+        }
+    }
+    #[test]
+    fn mono_legato_keeps_envelopes_and_lfo_phase_but_adjacent_notes_retrigger() {
+        let mut c = OscillatorConfigs::new();
+        c.voices = 1;
+        c.mono_legato = true;
+        c.lfo.mode = LfoMode::Retrigger;
+        c.lfo.sync = false;
+        c.lfo.rate_hz = 1.0;
+        c.note.replace_events(
+            3840,
+            &[
+                NoteEvent::new(0, 1440, NoteOct::from_pitch_index(48)),
+                NoteEvent::new(480, 480, NoteOct::from_pitch_index(55)),
+                NoteEvent::new(1440, 480, NoteOct::from_pitch_index(52)),
+            ],
+        );
+        let runtime = PolyOscRuntime::from_config(&c);
+        let mut state = PolyOscState::new();
+        let mut age = 0;
+        for frame in 0..36001 {
+            process_poly_sample(
+                &mut state,
+                &runtime,
+                params(48000.0, Waveform::Sine),
+                frame as f64 / 48000.0,
+                120,
+                true,
+            );
+            if frame == 100 {
+                age = state.voices.iter().find(|v| v.gate).unwrap().age;
+            }
+            if frame == 12000 || frame == 24000 {
+                let voice = state.voices.iter().find(|v| v.gate).unwrap();
+                assert_eq!(voice.age, age);
+                assert!(voice.lfo_phase[0] > 0.2);
+            }
+        }
+        let voice = state.voices.iter().find(|v| v.gate).unwrap();
+        assert!(voice.age > age);
+        assert!(voice.lfo_phase[0] < 0.001);
+    }
+    #[test]
+    fn glide_reaches_target_in_exact_time_and_does_not_allocate() {
+        for sr in [44100.0, 48000.0, 96000.0, 192000.0] {
+            let mut voice = PolyVoice::new();
+            voice.frequency = 220.0;
+            voice.target_frequency = 220.0;
+            voice.set_pitch(880.0, 100.0, sr);
+            let frames = (sr / 10.0) as usize;
+            let mut middle = 0.0;
+            let allocations = crate::test_alloc::count(|| {
+                for frame in 0..frames {
+                    voice.advance_pitch(true);
+                    if frame + 1 == frames / 2 {
+                        middle = voice.frequency;
+                    }
+                }
+            });
+            assert_eq!(allocations, 0);
+            assert!((middle - 440.0).abs() < 0.01);
+            assert_eq!(voice.frequency, 880.0);
+            assert_eq!(voice.glide_left, 0);
+        }
+        let mut c = OscillatorConfigs::new();
+        c.voices = 1;
+        c.mono_legato = true;
+        c.glide_ms = 100.0;
+        c.lfo.enabled = true;
+        c.lfo.target = LfoTarget::Cutoff;
+        c.lfo2.enabled = true;
+        c.lfo2.target = LfoTarget::Pitch;
+        c.note.replace_events(
+            3840,
+            &[
+                NoteEvent::new(0, 1920, NoteOct::from_pitch_index(48)),
+                NoteEvent::new(480, 960, NoteOct::from_pitch_index(60)),
+            ],
+        );
+        let runtime = PolyOscRuntime::from_config(&c);
+        let mut state = PolyOscState::new();
+        let mut p = params(48000.0, Waveform::Saw);
+        p.filter.mix = 1.0;
+        assert_eq!(
+            crate::test_alloc::count(|| for frame in 0..48000 {
+                assert!(
+                    process_poly_sample(&mut state, &runtime, p, frame as f64 / 48000.0, 120, true)
+                        .is_finite()
+                );
+            }),
+            0
+        );
+    }
+    #[test]
+    fn legacy_patch_defaults_and_disabled_second_lfo_keep_identical_audio() {
+        let mut config = crate::config::AppConfig::new(120, 0, 5);
+        config
+            .input_fx
+            .set_slot_kind(0, 0, crate::config::FxKind::Oscillator);
+        let Some(crate::config::InputFx::Oscillator(osc)) =
+            &mut config.input_fx.banks[0].slots[0].fx
+        else {
+            panic!()
+        };
+        osc.note.replace_events(
+            3840,
+            &[NoteEvent::new(0, 3840, NoteOct::from_pitch_index(48))],
+        );
+        osc.lfo.enabled = true;
+        osc.lfo.target = LfoTarget::Pitch;
+        let current = PolyOscRuntime::from_config(osc);
+        let mut data = serde_json::to_value(crate::project::data_from_config(&config)).unwrap();
+        let object = data["input_fx"]["banks"][0]["slots"][0]["osc"]
+            .as_object_mut()
+            .unwrap();
+        for field in ["lfo2", "mono_legato", "glide_ms", "glide_mode"] {
+            object.remove(field);
+        }
+        let mut migrated = crate::config::AppConfig::new(120, 0, 5);
+        crate::project::apply_data_to_config(&mut migrated, serde_json::from_value(data).unwrap());
+        let Some(crate::config::InputFx::Oscillator(osc)) =
+            &mut migrated.input_fx.banks[0].slots[0].fx
+        else {
+            panic!()
+        };
+        assert!(!osc.lfo2.enabled && !osc.mono_legato);
+        assert_eq!(osc.glide_ms, 0.0);
+        osc.lfo2.target = LfoTarget::Pitch;
+        osc.lfo2.depth = 1.0;
+        osc.lfo2.rate_hz = 17.0;
+        let old = PolyOscRuntime::from_config(osc);
+        let mut a = PolyOscState::new();
+        let mut b = PolyOscState::new();
+        for frame in 0..12000 {
+            let p = params(48000.0, Waveform::Sine);
+            let time = frame as f64 / 48000.0;
+            assert_eq!(
+                process_poly_sample(&mut a, &current, p, time, 120, true).to_bits(),
+                process_poly_sample(&mut b, &old, p, time, 120, true).to_bits()
+            );
+        }
+    }
+    #[test]
+    fn glide_overlap_and_all_notes_have_distinct_gap_behavior() {
+        for (mode, overlap, should_glide) in [
+            (GlideMode::Overlap, false, false),
+            (GlideMode::AllNotes, false, true),
+            (GlideMode::Overlap, true, true),
+        ] {
+            let mut c = OscillatorConfigs::new();
+            c.voices = 1;
+            c.glide_ms = 100.0;
+            c.glide_mode = mode;
+            c.note.replace_events(
+                3840,
+                &[
+                    NoteEvent::new(
+                        0,
+                        if overlap { 960 } else { 240 },
+                        NoteOct::from_pitch_index(48),
+                    ),
+                    NoteEvent::new(480, 960, NoteOct::from_pitch_index(57)),
+                ],
+            );
+            let runtime = PolyOscRuntime::from_config(&c);
+            let mut state = PolyOscState::new();
+            for frame in 0..12001 {
+                process_poly_sample(
+                    &mut state,
+                    &runtime,
+                    params(48000.0, Waveform::Sine),
+                    frame as f64 / 48000.0,
+                    120,
+                    true,
+                );
+            }
+            let voice = state.voices.iter().find(|v| v.gate).unwrap();
+            if should_glide {
+                assert!(voice.frequency > 261.0 && voice.frequency < 300.0);
+                assert!(voice.glide_left > 0);
+            } else {
+                assert_eq!(voice.frequency, 440.0);
+                assert_eq!(voice.glide_left, 0);
+            }
+            for frame in 12001..16800 {
+                process_poly_sample(
+                    &mut state,
+                    &runtime,
+                    params(48000.0, Waveform::Sine),
+                    frame as f64 / 48000.0,
+                    120,
+                    true,
+                );
+            }
+            assert_eq!(
+                state.voices.iter().find(|v| v.gate).unwrap().frequency,
+                440.0
+            );
+        }
+    }
+    #[test]
+    fn editing_lfo_two_keeps_lfo_one_phase_continuous() {
+        let mut c = OscillatorConfigs::new();
+        c.note.replace_events(
+            3840,
+            &[NoteEvent::new(0, 3840, NoteOct::from_pitch_index(48))],
+        );
+        c.lfo.enabled = true;
+        c.lfo.sync = false;
+        c.lfo.rate_hz = 1.0;
+        c.lfo2.enabled = true;
+        c.lfo2.sync = false;
+        c.lfo2.rate_hz = 3.0;
+        let runtime = PolyOscRuntime::from_config(&c);
+        let mut state = PolyOscState::new();
+        for frame in 0..1000 {
+            process_poly_sample(
+                &mut state,
+                &runtime,
+                params(48000.0, Waveform::Sine),
+                frame as f64 / 48000.0,
+                120,
+                true,
+            );
+        }
+        let before = state.free_phase;
+        c.lfo2.rate_hz = 11.0;
+        c.lfo2.depth = 0.9;
+        let changed = PolyOscRuntime::from_config(&c);
+        process_poly_sample(
+            &mut state,
+            &changed,
+            params(48000.0, Waveform::Sine),
+            1000.0 / 48000.0,
+            120,
+            true,
+        );
+        assert!((state.free_phase[0] - (before[0] + 1.0 / 48000.0)).abs() < 1e-12);
+        assert!((state.free_phase[1] - (before[1] + 11.0 / 48000.0)).abs() < 1e-12);
+    }
+    #[test]
+    fn sound_preset_roundtrip_preserves_both_lfos_and_mono_controls() {
+        let mut c = crate::config::AppConfig::new(120, 0, 5);
+        c.input_fx
+            .set_slot_kind(0, 0, crate::config::FxKind::Oscillator);
+        let Some(crate::config::InputFx::Oscillator(osc)) = &mut c.input_fx.banks[0].slots[0].fx
+        else {
+            panic!()
+        };
+        osc.voices = 1;
+        osc.mono_legato = true;
+        osc.glide_ms = 123.5;
+        osc.glide_mode = GlideMode::AllNotes;
+        osc.lfo.enabled = true;
+        osc.lfo.target = LfoTarget::Cutoff;
+        osc.lfo.beats = 0.25;
+        osc.lfo2.enabled = true;
+        osc.lfo2.target = LfoTarget::Pitch;
+        osc.lfo2.sync = false;
+        osc.lfo2.rate_hz = 7.25;
+        osc.lfo2.mode = LfoMode::Retrigger;
+        let lfos = [osc.lfo.clone(), osc.lfo2.clone()];
+        let preset =
+            crate::presets::encode(&c, crate::presets::FxTarget::Input { bank: 0, slot: 0 })
+                .unwrap();
+        crate::presets::decode(
+            &mut c,
+            crate::presets::FxTarget::Input { bank: 1, slot: 2 },
+            &preset,
+        )
+        .unwrap();
+        let Some(crate::config::InputFx::Oscillator(osc)) = &c.input_fx.banks[1].slots[2].fx else {
+            panic!()
+        };
+        assert_eq!(osc.lfo, lfos[0]);
+        assert_eq!(osc.lfo2, lfos[1]);
+        assert!(osc.mono_legato);
+        assert_eq!(osc.glide_ms, 123.5);
+        assert_eq!(osc.glide_mode, GlideMode::AllNotes);
     }
 }

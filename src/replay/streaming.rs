@@ -54,6 +54,10 @@ impl Source {
                         .is_none_or(|last: &Event| last.frame <= event.frame),
                 "Replay commands are outside the audio or out of order"
             );
+            ensure!(
+                metadata.renderer >= 5 || !matches!(event.kind, EventKind::PdcApplied(_)),
+                "PDC markers require renderer 5"
+            );
             if let Some(data) = config_state.apply(&event, &mut assets)? {
                 legacy_mydelay |= contains_mydelay(&data);
             }
@@ -92,6 +96,7 @@ pub struct Machine {
     next_event: usize,
     pub frame: u64,
     pub last_action: Option<(u64, Action)>,
+    last_pdc_applied: Option<PdcApplied>,
     config_state: super::delta::State,
     assets: super::assets::AssetReader,
 }
@@ -109,7 +114,7 @@ impl Machine {
         let mut config = AppConfig::new(120, 0, 5);
         crate::project::apply_data_to_config(&mut config, data.clone());
         let mut core = Box::new(RenderCore::new(sr));
-        core.legacy_renderer(source.metadata.renderer == 2);
+        core.set_renderer_version(source.metadata.renderer);
         core.configure(&mut Parameters::from_config(&config, sr));
         core.restore(&mut initial);
         let assets = source.assets.clone();
@@ -122,6 +127,7 @@ impl Machine {
             next_event: 0,
             frame: 0,
             last_action: None,
+            last_pdc_applied: None,
             config_state: super::delta::State::default(),
             assets,
         };
@@ -136,6 +142,7 @@ impl Machine {
             .filter(|e| e.frame == self.frame)
         {
             match &event.kind {
+                EventKind::PdcApplied(_) => verify_pdc_applied(event, &mut self.last_pdc_applied)?,
                 EventKind::Action(action) => {
                     self.core.action(*action, &mut OfflinePages);
                     self.last_action = Some((self.frame, *action));
@@ -171,6 +178,7 @@ impl Machine {
             "Invalid replay input sample"
         );
         let output = self.core.process(input, &mut OfflinePages);
+        self.last_pdc_applied = self.core.take_pdc_applied_event();
         self.frame += 1;
         self.apply_events()?;
         Ok(Some(output))
@@ -358,6 +366,10 @@ pub fn prepare_import(
     session::resample(&mut snapshot, sample_rate)?;
     let mut config = AppConfig::new(120, 0, 5);
     crate::project::apply_data_to_config(&mut config, data.clone());
+    // The audio boundary can precede the UI's configuration acknowledgement by
+    // one or more frames. Import the phrase actually accepted by this core.
+    crate::phrases::commit_applied(&mut config, &machine.core.view().phrases);
+    data = crate::project::data_from_config(&config);
     let mut core = Box::new(RenderCore::new(sample_rate));
     core.configure(&mut Parameters::from_config(&config, sample_rate));
     core.restore(&mut snapshot);
@@ -587,11 +599,381 @@ mod tests {
     fn fixture() -> (PathBuf, Vec<Frame>) {
         fixture_at(8000)
     }
+    #[test]
+    fn free_filter_sweep_and_mono_enhance_replay_through_transport_changes_and_seek() {
+        use crate::config::{FxKind, InputFx, audio_fx::AudioFxKind, track_options::InputRouting};
+        let root = PathBuf::from("var").join(format!("stream-replay-test-{}", session::id()));
+        let origin = 123456;
+        let mut config = AppConfig::new(120, 0, 5);
+        config.input_routing = InputRouting::Serial;
+        config.input_fx.set_slot_kind(0, 0, FxKind::Filter);
+        config
+            .input_fx
+            .set_slot_kind(0, 1, FxKind::Audio(AudioFxKind::StereoEnhance));
+        for slot in &mut config.input_fx.banks[0].slots[..2] {
+            slot.is_enabled = true;
+        }
+        if let Some(InputFx::Filter(filter)) = &mut config.input_fx.banks[0].slots[0].fx {
+            filter.sweep.depth = 0.8;
+            filter.sweep.rate_hz = 2.3;
+            filter.cutoff_hz.value = 4000;
+        }
+        let mut core = RenderCore::new(8000);
+        core.configure(&mut Parameters::from_config(&config, 8000));
+        core.clock.frame = origin;
+        let mut initial = AudioSnapshot::empty(8000);
+        core.snapshot(&mut initial, &mut OfflinePages);
+        let mut writer = Writer::begin(
+            root.clone(),
+            "enhance-sweep.json".into(),
+            origin,
+            initial,
+            crate::project::data_from_config(&config),
+        )
+        .unwrap();
+        let mut live = Vec::new();
+        for frame in 0..6000 {
+            let action = match frame {
+                1000 | 4000 | 4500 => Some(Action::All),
+                _ => None,
+            };
+            if let Some(action) = action {
+                core.action(action, &mut OfflinePages);
+                writer
+                    .event(origin + frame, EventKind::Action(action))
+                    .unwrap();
+            }
+            if matches!(frame, 2000 | 3500 | 4750) {
+                if let Some(InputFx::Filter(filter)) = &mut config.input_fx.banks[0].slots[0].fx {
+                    filter.sweep.rate_hz = 5.7;
+                    filter.sweep.stepped = frame >= 3500;
+                    filter.sweep.step_hz = 17.0;
+                }
+                if let Some(InputFx::Audio(enhance)) = &mut config.input_fx.banks[0].slots[1].fx {
+                    enhance.enhance_amount = 0.8;
+                    enhance.enhance_low_cut_hz = if frame == 3500 { 900.0 } else { 0.0 };
+                    enhance.enhance_high_cut_hz = 2800.0;
+                }
+                core.configure(&mut Parameters::from_config(&config, 8000));
+                writer
+                    .event(
+                        origin + frame,
+                        EventKind::Config(crate::project::data_from_config(&config)),
+                    )
+                    .unwrap();
+            }
+            let dry = [((frame as f32 * 0.87).sin() + (frame as f32 * 0.043).sin()) * 0.1; 2];
+            writer.audio(origin + frame, &[dry]).unwrap();
+            live.push(core.process(dry, &mut OfflinePages));
+        }
+        writer.finish(origin + 6000).unwrap();
+        assert!(
+            live.iter().any(|out| (out[0] - out[1]).abs() > 0.001),
+            "Mono input should acquire side energy"
+        );
+        let source = Source::open(&root).unwrap();
+        let mut replay = Machine::new(source.clone()).unwrap();
+        for (frame, expected) in live.iter().enumerate() {
+            assert_eq!(
+                replay.next().unwrap().unwrap().map(f32::to_bits),
+                expected.map(f32::to_bits),
+                "free sweep/enhance frame {frame}"
+            );
+        }
+        for target in [0, 999, 1000, 2000, 3499, 3500, 4001, 4500, 4750] {
+            let mut seek = Machine::new(source.clone()).unwrap();
+            seek.advance_to(target, || false).unwrap();
+            for expected in &live[target as usize..target as usize + 50] {
+                assert_eq!(
+                    seek.next().unwrap().unwrap().map(f32::to_bits),
+                    expected.map(f32::to_bits)
+                );
+            }
+        }
+        let output = root.join("explicit.wav");
+        super::super::render(&root, &output, &AtomicU64::new(0)).unwrap();
+        let exported: Vec<f32> = hound::WavReader::open(output)
+            .unwrap()
+            .into_samples()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            exported.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            live.iter()
+                .flatten()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
+        drop(replay);
+        drop(source);
+        drop(core);
+        cleanup(&root);
+    }
+    #[test]
+    fn deferred_pdc_markers_preserve_same_boundary_order_export_and_seek() {
+        use crate::config::{FxKind, audio_fx::AudioFxKind, track_options::Quantize};
+        let root = PathBuf::from("var").join(format!("stream-replay-test-{}", session::id()));
+        let origin = 987654;
+        let mut config = AppConfig::new(120, 0, 5);
+        config.track_options[0].quantize = Quantize::Off;
+        let mut core = RenderCore::new(8000);
+        core.configure(&mut Parameters::from_config(&config, 8000));
+        core.clock.frame = origin;
+        let mut initial = AudioSnapshot::empty(8000);
+        core.snapshot(&mut initial, &mut OfflinePages);
+        let mut writer = Writer::begin(
+            root.clone(),
+            "pdc.json".into(),
+            origin,
+            initial,
+            crate::project::data_from_config(&config),
+        )
+        .unwrap();
+        let mut live = Vec::new();
+        let mut applied_frames = Vec::new();
+        for frame in 0..5000 {
+            if matches!(frame, 0 | 400 | 500 | 900) {
+                core.action(Action::Trigger(0), &mut OfflinePages);
+                writer
+                    .event(origin + frame, EventKind::Action(Action::Trigger(0)))
+                    .unwrap();
+            }
+            if matches!(frame, 100 | 401 | 600) {
+                if frame == 100 {
+                    config
+                        .input_fx
+                        .set_slot_kind(0, 0, FxKind::Audio(AudioFxKind::Transpose));
+                    config.input_fx.banks[0].slots[0].is_enabled = true;
+                }
+                if frame == 401 {
+                    config.track_levels[0] = 0.7;
+                }
+                if frame == 600 {
+                    config.input_fx.set_slot_kind(0, 0, FxKind::None);
+                }
+                core.configure(&mut Parameters::from_config(&config, 8000));
+                writer
+                    .event(
+                        origin + frame,
+                        EventKind::Config(crate::project::data_from_config(&config)),
+                    )
+                    .unwrap();
+            }
+            let dry = [
+                (frame as f32 * 0.107).sin() * 0.2,
+                (frame as f32 * 0.079).cos() * 0.15,
+            ];
+            writer.audio(origin + frame, &[dry]).unwrap();
+            live.push(core.process(dry, &mut OfflinePages));
+            if let Some(applied) = core.take_pdc_applied_event() {
+                applied_frames.push(frame);
+                writer
+                    .event(origin + frame + 1, EventKind::PdcApplied(applied))
+                    .unwrap();
+            }
+        }
+        writer.finish(origin + 5000).unwrap();
+        assert_eq!(applied_frames.len(), 2);
+        assert_eq!(applied_frames[0], 400);
+        let source = Source::open(&root).unwrap();
+        let marker_index = source
+            .events
+            .iter()
+            .position(|e| matches!(e.kind, EventKind::PdcApplied(_)))
+            .unwrap();
+        assert_eq!(source.events[marker_index].frame, 401);
+        assert_eq!(
+            source.events[marker_index + 1].frame,
+            401,
+            "The marker must remain before the next accepted config at this boundary"
+        );
+        let mut machine = Machine::new(source.clone()).unwrap();
+        for expected in &live {
+            assert_eq!(
+                machine.next().unwrap().unwrap().map(f32::to_bits),
+                expected.map(f32::to_bits)
+            );
+        }
+        for target in [
+            99,
+            100,
+            399,
+            400,
+            401,
+            899,
+            900,
+            applied_frames[1],
+            applied_frames[1] + 1,
+        ] {
+            let mut seek = Machine::new(source.clone()).unwrap();
+            seek.advance_to(target, || false).unwrap();
+            for expected in &live[target as usize..target as usize + 40] {
+                assert_eq!(
+                    seek.next().unwrap().unwrap().map(f32::to_bits),
+                    expected.map(f32::to_bits)
+                );
+            }
+        }
+        let destination = root.join("explicit.wav");
+        super::super::render(&root, &destination, &AtomicU64::new(0)).unwrap();
+        let rendered: Vec<f32> = hound::WavReader::open(destination)
+            .unwrap()
+            .into_samples()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rendered.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            live.iter()
+                .flatten()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
+        let mut invalid = Source::open(&root).unwrap();
+        if let EventKind::PdcApplied(marker) =
+            &mut Arc::get_mut(&mut invalid).unwrap().events[marker_index].kind
+        {
+            marker.requested_at += 1;
+        }
+        let error = Machine::new(invalid)
+            .unwrap()
+            .advance_to(402, || false)
+            .unwrap_err();
+        assert!(error.to_string().contains("PDC application"));
+        drop(machine);
+        drop(source);
+        drop(core);
+        cleanup(&root);
+    }
+    #[test]
+    fn queued_phrase_and_ui_ack_replay_and_seek_match_live_sample_for_sample() {
+        use crate::{
+            config::{
+                FxKind,
+                note_configs::{NoteConfigs, NoteOct},
+                sequence_edit::NoteEvent,
+            },
+            presets::FxTarget,
+        };
+        let root = PathBuf::from("var").join(format!("stream-replay-test-{}", session::id()));
+        let mut config = AppConfig::new(120, 0, 5);
+        config.input_fx.set_slot_kind(0, 0, FxKind::Oscillator);
+        config.input_fx.banks[0].slots[0].is_enabled = true;
+        for track in &mut config.track_options {
+            track.quantize = crate::config::track_options::Quantize::Off;
+        }
+        crate::presets::note_mut(&mut config, FxTarget::Input { bank: 0, slot: 0 })
+            .unwrap()
+            .replace_events(
+                960,
+                &[NoteEvent::new(0, 480, NoteOct::from_pitch_index(48))],
+            );
+        let mut next = NoteConfigs::new();
+        next.replace_events(
+            1440,
+            &[NoteEvent::new(0, 720, NoteOct::from_pitch_index(55))],
+        );
+        let mut core = RenderCore::new(8000);
+        core.configure(&mut Parameters::from_config(&config, 8000));
+        let mut initial = AudioSnapshot::empty(8000);
+        core.snapshot(&mut initial, &mut OfflinePages);
+        let mut writer = Writer::begin(
+            root.clone(),
+            "phrase.json".into(),
+            0,
+            initial,
+            crate::project::data_from_config(&config),
+        )
+        .unwrap();
+        let mut live = Vec::new();
+        for frame in 0..8000 {
+            if frame == 0 || frame == 6000 {
+                core.action(Action::Trigger(0), &mut OfflinePages);
+                writer
+                    .event(frame, EventKind::Action(Action::Trigger(0)))
+                    .unwrap();
+            }
+            if frame == 1234 {
+                crate::presets::note_mut(&mut config, FxTarget::Input { bank: 0, slot: 0 })
+                    .unwrap()
+                    .launch_clip(&next.clip(), true);
+                core.configure(&mut Parameters::from_config(&config, 8000));
+                writer
+                    .event(
+                        frame,
+                        EventKind::Config(crate::project::data_from_config(&config)),
+                    )
+                    .unwrap();
+            }
+            writer.audio(frame, &[[0.0; 2]]).unwrap();
+            live.push(core.process([0.0; 2], &mut OfflinePages));
+            if frame == 4004 {
+                let view = core.view();
+                crate::phrases::commit_applied(&mut config, &view.phrases);
+                assert!(
+                    crate::presets::note_mut(&mut config, FxTarget::Input { bank: 0, slot: 0 })
+                        .unwrap()
+                        .pending
+                        .is_none()
+                );
+                core.configure(&mut Parameters::from_config(&config, 8000));
+                writer
+                    .event(
+                        frame + 1,
+                        EventKind::Config(crate::project::data_from_config(&config)),
+                    )
+                    .unwrap();
+            }
+        }
+        writer.finish(8000).unwrap();
+        let source = Source::open(&root).unwrap();
+        let mut machine = Machine::new(source.clone()).unwrap();
+        for (frame, expected) in live.iter().enumerate() {
+            assert_eq!(
+                machine.next().unwrap().unwrap().map(f32::to_bits),
+                expected.map(f32::to_bits),
+                "queued replay frame {frame}"
+            );
+        }
+        for target in [1234, 3999, 4000, 4001, 5900] {
+            let mut seek = Machine::new(source.clone()).unwrap();
+            seek.advance_to(target, || false).unwrap();
+            for expected in &live[target as usize..target as usize + 100] {
+                assert_eq!(
+                    seek.next().unwrap().unwrap().map(f32::to_bits),
+                    expected.map(f32::to_bits)
+                );
+            }
+        }
+        let (imported, _) = prepare_import(source.clone(), 2000, 8000).unwrap();
+        assert!(
+            imported.input_fx.banks[0].slots[0]
+                .osc
+                .as_ref()
+                .unwrap()
+                .pending_clip
+                .is_some(),
+            "Import before the switch must preserve the pending request"
+        );
+        let (imported, _) = prepare_import(source.clone(), 4001, 8000).unwrap();
+        let imported = imported.input_fx.banks[0].slots[0].osc.as_ref().unwrap();
+        assert!(
+            imported.pending_clip.is_none(),
+            "Import after the audio boundary must acknowledge the applied phrase even before the UI does"
+        );
+        assert_eq!(imported.clip.as_ref().unwrap().events, next.clip().events);
+        drop(machine);
+        drop(source);
+        drop(core);
+        cleanup(&root);
+    }
     fn fixture_at(sr: u32) -> (PathBuf, Vec<Frame>) {
         let root = PathBuf::from("var").join(format!("stream-replay-test-{}", session::id()));
         let mut config = AppConfig::new(123, 0, 5);
         for track in &mut config.track_options {
             track.quantize = crate::config::track_options::Quantize::Off;
+            // Synthetic input is generated against the engine clock, rather
+            // than a performer responding to the delayed monitor output.
+            track.record_reference = crate::config::track_options::RecordReference::Internal;
         }
         config
             .track_fx

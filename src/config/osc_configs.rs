@@ -40,6 +40,10 @@ pub struct OscillatorConfigs {
     pub voices: usize,
     pub input_gate: bool,
     pub lfo: LfoConfig,
+    pub lfo2: LfoConfig,
+    pub mono_legato: bool,
+    pub glide_ms: f32,
+    pub glide_mode: GlideMode,
     pub sample: Option<std::sync::Arc<SampleAsset>>,
     pub sample_mode: SampleMode,
     pub sample_root: usize,
@@ -82,6 +86,10 @@ impl OscillatorConfigs {
             voices: 8,
             input_gate: false,
             lfo: LfoConfig::default(),
+            lfo2: LfoConfig::default(),
+            mono_legato: false,
+            glide_ms: 0.0,
+            glide_mode: GlideMode::Overlap,
             sample: None,
             sample_mode: SampleMode::Wavetable,
             sample_root: 48,
@@ -122,6 +130,13 @@ impl crate::config::config_type::ConfigSet for OscillatorConfigs {
     }
 
     fn confirm(&mut self) {}
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+pub enum GlideMode {
+    #[default]
+    Overlap,
+    AllNotes,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize, Default)]
@@ -229,6 +244,7 @@ fn finite(v: f32, fallback: f32) -> f32 {
 }
 impl OscillatorConfigs {
     pub fn sanitize_source(&mut self) {
+        self.glide_ms = finite(self.glide_ms, 0.0).clamp(0.0, 2000.0);
         let minimum = self
             .sample
             .as_ref()

@@ -1,4 +1,5 @@
 //! Shared mouse-editable controls and visualizations for quick and expanded views.
+pub use super::parameter_input::take_pending_text;
 use super::theme;
 use crate::config::config_type::{EnumConfig, NumericConfig};
 use crate::config::envelope_configs::*;
@@ -7,17 +8,64 @@ use eframe::egui::{self, Color32, Stroke, pos2};
 
 pub fn number(ui: &mut egui::Ui, config: &mut NumericConfig, min: usize, max: usize, log: bool) {
     let lang = crate::app_support::language::Language::current(ui.ctx());
-    if super::navigation::register(
-        ui.add(
-            egui::Slider::new(&mut config.value, min..=max)
-                .text(lang.text(&config.label))
-                .logarithmic(log),
-        ),
+    let mut value = config.value as f64;
+    if super::parameter_input::slider(
+        ui,
+        &mut value,
+        min as f64,
+        max as f64,
+        1.0,
+        lang.text(&config.label),
+        log,
     )
     .changed()
     {
+        config.value = value.round() as usize;
         config.buffer.clear();
     }
+}
+
+pub fn float(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    min: f32,
+    max: f32,
+    step: f32,
+    label: &str,
+    log: bool,
+) -> egui::Response {
+    let mut edit = f64::from(*value);
+    let response = super::parameter_input::slider(
+        ui,
+        &mut edit,
+        f64::from(min),
+        f64::from(max),
+        f64::from(step),
+        label,
+        log,
+    );
+    *value = edit as f32;
+    response
+}
+pub fn integer<N: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    value: &mut N,
+    min: N,
+    max: N,
+    label: &str,
+) -> egui::Response {
+    let mut edit = value.to_f64();
+    let response = super::parameter_input::slider(
+        ui,
+        &mut edit,
+        min.to_f64(),
+        max.to_f64(),
+        1.0,
+        label,
+        false,
+    );
+    *value = N::from_f64(edit.round());
+    response
 }
 
 pub fn choice<T: Clone + PartialEq + std::fmt::Display>(
@@ -52,14 +100,16 @@ pub fn choice<T: Clone + PartialEq + std::fmt::Display>(
                 }
             })
             .response;
-        let response = super::navigation::register(response);
-        if response.has_focus() {
-            if ui.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
-                config.prev();
-            }
-            if ui.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
-                config.next();
-            }
+        let delta = super::parameter_input::enum_step(&response);
+        if !config.options.is_empty() && delta != 0 {
+            let index = config
+                .options
+                .iter()
+                .position(|option| *option == config.value)
+                .unwrap_or(0);
+            config.value = config.options
+                [(index as i32 + delta).rem_euclid(config.options.len() as i32) as usize]
+                .clone();
         }
         if !device {
             ui.label(lang.text(&config.label));
@@ -75,26 +125,132 @@ pub fn selector<T: Copy + PartialEq>(
 ) -> bool {
     let lang = crate::app_support::language::Language::current(ui.ctx());
     let previous = *value;
-    let index = options.iter().position(|(v, _)| v == value).unwrap_or(0);
+    let selected = options.iter().position(|(v, _)| v == value);
+    let index = selected.unwrap_or(0);
     let response = egui::ComboBox::from_id_source(id)
-        .selected_text(lang.text(options[index].1))
+        .selected_text(
+            selected
+                .map(|index| lang.text(options[index].1))
+                .unwrap_or_else(|| lang.choose("Custom", "自定义")),
+        )
         .show_ui(ui, |ui| {
             for (option, label) in options {
                 ui.selectable_value(value, *option, lang.text(label));
             }
         })
         .response;
-    if response.has_focus() {
-        let delta = ui.input(|i| {
-            i32::from(i.key_pressed(egui::Key::ArrowRight))
-                - i32::from(i.key_pressed(egui::Key::ArrowLeft))
-        });
-        if delta != 0 {
-            *value = options[(index as i32 + delta).rem_euclid(options.len() as i32) as usize].0;
-        }
+    let delta = super::parameter_input::enum_step(&response);
+    #[cfg(debug_assertions)]
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(egui::Id::new(("selector", id)), response.id));
+    if delta != 0 {
+        let origin = if selected.is_some() {
+            index as i32
+        } else if delta > 0 {
+            -1
+        } else {
+            0
+        };
+        *value = options[(origin + delta).rem_euclid(options.len() as i32) as usize].0;
     }
-    super::navigation::register(response);
     previous != *value
+}
+
+pub fn filter_sweep(ui: &mut egui::Ui, sweep: &mut FilterSweepConfig, full: bool) {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
+    if full {
+        ui.separator();
+        theme::caption(ui, lang.choose("Cutoff sweep", "截止扫频"));
+    }
+    let mut depth = sweep.depth * 100.0;
+    if float(
+        ui,
+        &mut depth,
+        0.0,
+        100.0,
+        0.1,
+        lang.choose("Sweep depth (%)", "扫频深度（%）"),
+        false,
+    )
+    .changed()
+    {
+        sweep.depth = depth / 100.0;
+    }
+    super::navigation::register(
+        ui.checkbox(&mut sweep.sync, lang.choose("Sync to tempo", "跟随拍速")),
+    );
+    if sweep.sync {
+        selector(
+            ui,
+            "filter-sweep-beats",
+            &mut sweep.beats,
+            &[
+                (0.0625, "1/64"),
+                (0.125, "1/32"),
+                (0.25, "1/16"),
+                (0.5, "1/8"),
+                (1.0, "1/4"),
+                (2.0, "1/2"),
+                (4.0, lang.choose("1 bar", "1 小节")),
+                (8.0, lang.choose("2 bars", "2 小节")),
+                (16.0, lang.choose("4 bars", "4 小节")),
+                (32.0, lang.choose("8 bars", "8 小节")),
+                (64.0, lang.choose("16 bars", "16 小节")),
+            ],
+        );
+    } else {
+        float(
+            ui,
+            &mut sweep.rate_hz,
+            0.01,
+            20.0,
+            0.01,
+            lang.choose("Sweep rate (Hz)", "扫频速度（Hz）"),
+            true,
+        );
+    }
+    if full {
+        super::navigation::register(
+            ui.checkbox(&mut sweep.stepped, lang.choose("Stepped sweep", "阶梯扫频")),
+        );
+        ui.add_enabled_ui(sweep.stepped, |ui| {
+            super::navigation::register(ui.checkbox(
+                &mut sweep.step_sync,
+                lang.choose("Sync steps", "阶梯跟随拍速"),
+            ));
+            if sweep.step_sync {
+                selector(
+                    ui,
+                    "filter-step-beats",
+                    &mut sweep.step_beats,
+                    &[
+                        (0.015625, "1/256"),
+                        (0.03125, "1/128"),
+                        (0.0625, "1/64"),
+                        (0.125, "1/32"),
+                        (0.25, "1/16"),
+                        (0.5, "1/8"),
+                        (1.0, "1/4"),
+                        (2.0, "1/2"),
+                        (4.0, lang.choose("1 bar", "1 小节")),
+                        (8.0, lang.choose("2 bars", "2 小节")),
+                        (16.0, lang.choose("4 bars", "4 小节")),
+                    ],
+                );
+            } else {
+                float(
+                    ui,
+                    &mut sweep.step_hz,
+                    0.1,
+                    100.0,
+                    0.1,
+                    lang.choose("Step rate (Hz)", "阶梯速度（Hz）"),
+                    true,
+                );
+            }
+        });
+    }
+    *sweep = sweep.sanitized();
 }
 
 pub fn filter(ui: &mut egui::Ui, config: &mut FilterConfigs, full: bool) {
@@ -107,19 +263,29 @@ pub fn filter(ui: &mut egui::Ui, config: &mut FilterConfigs, full: bool) {
         FILTER_CUTOFF_MAX_HZ,
         true,
     );
-    number(
+    let mut q = config.resonance_x10.value as f32 / 10.0;
+    if float(
         ui,
-        &mut config.resonance_x10,
-        FILTER_Q_MIN_X10,
-        FILTER_Q_MAX_X10,
+        &mut q,
+        FILTER_Q_MIN_X10 as f32 / 10.0,
+        FILTER_Q_MAX_X10 as f32 / 10.0,
+        0.1,
+        lang.choose("Resonance (Q)", "共振（Q）"),
         false,
-    );
+    )
+    .changed()
+    {
+        config.resonance_x10.value = (q * 10.0).round() as usize;
+    }
     number(ui, &mut config.drive, 0, FILTER_DRIVE_MAX, false);
     number(ui, &mut config.mix, 0, FILTER_MIX_MAX, false);
     if full {
         theme::caption(
             ui,
-            lang.text("FILTER RESPONSE / steady-state, 48 kHz • drag to set cutoff and resonance"),
+            lang.choose(
+                "Filter response · drag cutoff / resonance",
+                "滤波响应 · 拖动调整截止与共振",
+            ),
         );
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), 210.0),
@@ -221,9 +387,16 @@ pub fn envelope(ui: &mut egui::Ui, config: &mut EnvelopeConfigs) {
             (&mut config.tension_r, "Release curve", "释音曲率"),
         ] {
             let mut curve = ((value.value as f32 - 100.0) / 100.0).clamp(-1.0, 1.0);
-            if cols[1]
-                .add(egui::Slider::new(&mut curve, -1.0..=1.0).text(lang.choose(en, cn)))
-                .changed()
+            if float(
+                &mut cols[1],
+                &mut curve,
+                -1.0,
+                1.0,
+                0.01,
+                lang.choose(en, cn),
+                false,
+            )
+            .changed()
             {
                 value.value = (100.0 + curve * 100.0).round() as usize;
             }
@@ -244,184 +417,18 @@ pub fn envelope(ui: &mut egui::Ui, config: &mut EnvelopeConfigs) {
             *config = EnvelopeConfigs::new();
         }
     });
-    theme::caption(ui,lang.choose("Drag A/H/D/R nodes horizontally for time; drag Start/S vertically for level. Small midpoint handles bend the curve. Values and graph stay synchronized; the dotted line is Note Off.","横拖 A/H/D/R 节点调整时间，竖拖 Start/S 调整电平；小中点调整曲率。参数与图形同步，虚线为音符松开。"));
+    theme::caption(
+        ui,
+        lang.choose(
+            "Drag nodes for time and level; drag midpoints for curvature. The view stays fixed.",
+            "拖节点调整时长和电平，拖中点调整曲率；视窗保持固定。",
+        ),
+    );
 }
+#[path = "envelope_view.rs"]
+mod envelope_view;
 fn envelope_curve(ui: &mut egui::Ui, c: &mut EnvelopeConfigs) {
-    let lang = crate::app_support::language::Language::current(ui.ctx());
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), 230.0),
-        egui::Sense::hover(),
-    );
-    ui.painter().rect_filled(rect, 6.0, theme::BACKGROUND);
-    let plot = rect.shrink2(egui::vec2(20.0, 28.0));
-    let a = c.attack_ms.value as f32;
-    let h = c.hold_ms.value as f32;
-    let d = c.decay_ms.value as f32;
-    let r = c.release_ms.value.max(1) as f32;
-    let sustain_hold = 300.0;
-    let total = (a + h + d + r + sustain_hold).max(500.0);
-    let snapshot_id = ui.id().with("envelope_drag_scale");
-    let any_down = ui.input(|i| i.pointer.primary_down());
-    if !any_down {
-        ui.ctx().data_mut(|data| data.remove::<f32>(snapshot_id));
-    }
-    let scale = ui.ctx().data_mut(|data| {
-        if any_down {
-            *data.get_temp_mut_or_insert_with(snapshot_id, || total)
-        } else {
-            total
-        }
-    });
-    let sustain = c.sustain_pct.value as f32 / 100.0;
-    let start = c.start_pct.value as f32 / 100.0;
-    let off = a + h + d + sustain_hold;
-    let point = |ms: f32, v: f32| {
-        pos2(
-            plot.left() + plot.width() * ms / scale,
-            plot.bottom() - plot.height() * v,
-        )
-    };
-    let anchors = [
-        (0.0, start, lang.choose("Start", "起点")),
-        (a, 1.0, if h == 0.0 { "A/H" } else { "A" }),
-        (a + h, 1.0, "H"),
-        (a + h + d, sustain, "D / S"),
-        (off, sustain, lang.choose("Off", "松键")),
-        (off + r, 0.0, "R"),
-    ];
-    for n in 0..=4 {
-        let y = plot.bottom() - plot.height() * n as f32 / 4.0;
-        ui.painter()
-            .hline(plot.x_range(), y, Stroke::new(1.0, Color32::from_gray(45)));
-    }
-    let shape = |ms: f32| {
-        if ms < a && a > 0.0 {
-            start + (1.0 - start) * (ms / a).powf(tension(c.tension_a.value))
-        } else if ms < a + h {
-            1.0
-        } else if ms < a + h + d && d > 0.0 {
-            sustain
-                + (1.0 - sustain)
-                    * (1.0 - (ms - a - h) / d)
-                        .clamp(0.0, 1.0)
-                        .powf(tension(c.tension_d.value))
-        } else if ms < off {
-            sustain
-        } else {
-            sustain
-                * (1.0 - (ms - off) / r)
-                    .clamp(0.0, 1.0)
-                    .powf(tension(c.tension_r.value))
-        }
-    };
-    let points = (0..600)
-        .map(|i| {
-            let time = scale * i as f32 / 599.0;
-            point(time, shape(time))
-        })
-        .collect();
-    ui.painter().add(egui::Shape::line(
-        points,
-        Stroke::new(2.0, theme::accent(ui)),
-    ));
-    ui.painter().vline(
-        point(off, 0.0).x,
-        plot.y_range(),
-        Stroke::new(1.0, theme::MUTED),
-    );
-    for (index, (time, value, label)) in anchors.iter().enumerate() {
-        // A zero hold shares the attack endpoint. One hit target avoids an
-        // invisible H handle stealing drags intended for the visible A peak.
-        if index == 2 && h == 0.0 {
-            continue;
-        }
-        let pos = point(*time, *value);
-        let hit = egui::Rect::from_center_size(pos, egui::vec2(14.0, 14.0));
-        let response = ui.interact(
-            hit,
-            ui.id().with(("envelope_node", index)),
-            egui::Sense::drag(),
-        );
-        ui.painter().circle_filled(
-            pos,
-            5.0,
-            if index == 4 {
-                theme::MUTED
-            } else {
-                theme::accent(ui)
-            },
-        );
-        ui.painter().text(
-            pos + egui::vec2(0.0, if *value > 0.8 { -8.0 } else { 10.0 }),
-            if *value > 0.8 {
-                egui::Align2::CENTER_BOTTOM
-            } else {
-                egui::Align2::CENTER_TOP
-            },
-            label,
-            egui::FontId::monospace(12.0),
-            theme::MUTED,
-        );
-        if response.dragged() {
-            if let Some(p) = response.interact_pointer_pos() {
-                let ms = ((p.x - plot.left()) / plot.width() * scale).max(0.0);
-                let level =
-                    ((plot.bottom() - p.y) / plot.height() * 100.0).clamp(0.0, 100.0) as usize;
-                match index {
-                    0 => c.start_pct.value = level,
-                    1 => c.attack_ms.value = (ms as usize).min(ENVELOPE_ATTACK_MAX_MS),
-                    2 => c.hold_ms.value = ((ms - a).max(0.0) as usize).min(ENVELOPE_HOLD_MAX_MS),
-                    3 => {
-                        c.decay_ms.value =
-                            ((ms - a - h).max(0.0) as usize).min(ENVELOPE_DECAY_MAX_MS);
-                        c.sustain_pct.value = level;
-                    }
-                    4 => c.sustain_pct.value = level,
-                    5 => {
-                        c.release_ms.value =
-                            ((ms - off).max(1.0) as usize).min(ENVELOPE_RELEASE_MAX_MS)
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-    for (index, begin, end, y0, y1, value) in [
-        (0, 0.0, a, start, 1.0, &mut c.tension_a),
-        (1, a + h, a + h + d, 1.0, sustain, &mut c.tension_d),
-        (2, off, off + r, sustain, 0.0, &mut c.tension_r),
-    ] {
-        if end - begin < 1.0 {
-            continue;
-        }
-        let mid_value = if index == 0 {
-            y0 + (y1 - y0) * 0.5f32.powf(tension(value.value))
-        } else {
-            y1 + (y0 - y1) * 0.5f32.powf(tension(value.value))
-        };
-        let pos = point((begin + end) * 0.5, mid_value);
-        let response = ui.interact(
-            egui::Rect::from_center_size(pos, egui::vec2(12.0, 12.0)),
-            ui.id().with(("envelope_midpoint", index)),
-            egui::Sense::click_and_drag(),
-        );
-        ui.painter().circle_filled(pos, 3.5, theme::secondary(ui));
-        if response.dragged() {
-            if let Some(p) = response.interact_pointer_pos() {
-                let y = ((plot.bottom() - p.y) / plot.height()).clamp(0.0, 1.0);
-                let normalized = if index == 0 {
-                    (y - y0) / (y1 - y0).max(0.001)
-                } else {
-                    (y - y1) / (y0 - y1).max(0.001)
-                };
-                let exponent = normalized.clamp(0.01, 0.99).ln() / 0.5f32.ln();
-                value.value = (100.0 + 50.0 * exponent.log2()).clamp(0.0, 200.0).round() as usize;
-            }
-        }
-        if response.double_clicked() {
-            value.value = 100;
-        }
-    }
+    envelope_view::draw(ui, c);
 }
 
 fn tension(value: usize) -> f32 {

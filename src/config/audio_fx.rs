@@ -106,6 +106,8 @@ pub struct AudioFxConfig {
     pub mix: f32,
     pub level_db: f32,
     pub semitones: f32,
+    pub preserve_formants: bool,
+    pub formant_shift_semitones: f32,
     pub pitch_steps: [f32; 16],
     pub pitch_step_count: u8,
     pub pitch_sequence: bool,
@@ -134,14 +136,35 @@ pub struct AudioFxConfig {
     pub mid_db: f32,
     pub mid_hz: f32,
     pub mid_q: f32,
+    pub high_mid_db: f32,
+    pub high_mid_hz: f32,
+    pub high_mid_q: f32,
     pub high_db: f32,
     pub high_hz: f32,
+    pub phaser_stages: u8,
+    pub phaser_manual: f32,
+    pub flanger_manual: f32,
+    pub chorus_low_cut_hz: f32,
+    pub chorus_high_cut_hz: f32,
+    pub mod_shape: f32,
+    pub mod_phase_degrees: f32,
+    pub mod_retrigger: bool,
+    pub mod_stepped: bool,
+    pub mod_step_hz: f32,
+    pub mod_step_beats: f32,
+    pub slicer_duty: f32,
+    pub slicer_compress: bool,
     pub rate_hz: f32,
     /// 0: free rate. Otherwise one LFO cycle / this many quarter-note beats.
     pub sync_beats: f32,
     pub depth: f32,
     pub pan: f32,
     pub width: f32,
+    /// Legacy presets keep mono enhancement off; new instances opt in.
+    pub enhance_mono: bool,
+    pub enhance_amount: f32,
+    pub enhance_low_cut_hz: f32,
+    pub enhance_high_cut_hz: f32,
     pub time_ms: f32,
     pub feedback: f32,
     /// 0 is manual coefficient; 1..=16 maps to -60 dB after that many repeats.
@@ -196,6 +219,8 @@ impl Default for AudioFxConfig {
             mix: 1.0,
             level_db: 0.0,
             semitones: 0.0,
+            preserve_formants: false,
+            formant_shift_semitones: 0.0,
             pitch_steps: [0.0; 16],
             pitch_step_count: 8,
             pitch_sequence: false,
@@ -223,13 +248,33 @@ impl Default for AudioFxConfig {
             mid_db: 0.0,
             mid_hz: 1000.0,
             mid_q: 0.707,
+            high_mid_db: 0.0,
+            high_mid_hz: 3150.0,
+            high_mid_q: 1.0,
             high_db: 0.0,
             high_hz: 6000.0,
+            phaser_stages: 6,
+            phaser_manual: 0.5,
+            flanger_manual: 0.5,
+            chorus_low_cut_hz: 0.0,
+            chorus_high_cut_hz: 0.0,
+            mod_shape: 0.0,
+            mod_phase_degrees: 0.0,
+            mod_retrigger: false,
+            mod_stepped: false,
+            mod_step_hz: 4.0,
+            mod_step_beats: 0.0,
+            slicer_duty: 1.0,
+            slicer_compress: false,
             rate_hz: 1.0,
             sync_beats: 0.0,
             depth: 0.7,
             pan: 0.0,
             width: 1.0,
+            enhance_mono: false,
+            enhance_amount: 0.5,
+            enhance_low_cut_hz: 0.0,
+            enhance_high_cut_hz: 0.0,
             time_ms: 320.0,
             feedback: 0.35,
             delay_ratio: 0.5,
@@ -255,12 +300,25 @@ impl AudioFxConfig {
             ..Self::default()
         };
         match kind {
-            AudioFxKind::Harmonist => p.scale = Scale::Major,
+            AudioFxKind::Harmonist => {
+                p.scale = Scale::Major;
+                p.preserve_formants = true;
+            }
+            AudioFxKind::Electric => p.preserve_formants = true,
             AudioFxKind::PanningDelay | AudioFxKind::Delay => {
                 p.mix = 1.0;
                 p.feedback_repeats = 8;
             }
-            AudioFxKind::Phaser | AudioFxKind::Flanger | AudioFxKind::Chorus => p.mix = 0.5,
+            AudioFxKind::Phaser => {
+                p.mix = 0.5;
+                p.phaser_stages = 4;
+            }
+            AudioFxKind::Flanger | AudioFxKind::Chorus => p.mix = 0.5,
+            AudioFxKind::Equalizer => {
+                p.mid_hz = 800.0;
+                p.mid_q = 1.0;
+            }
+            AudioFxKind::StereoEnhance => p.enhance_mono = true,
             AudioFxKind::Reverb => p.mix = 0.25,
             AudioFxKind::Sustainer => {
                 p.threshold_db = -28.0;
@@ -272,6 +330,7 @@ impl AudioFxConfig {
                 p.octave_two = 0.25;
             }
             AudioFxKind::StepSlicer => p.sync_beats = 4.0,
+            AudioFxKind::AutoPan => p.mod_retrigger = true,
             _ => {}
         }
         p
@@ -299,6 +358,7 @@ impl AudioFxConfig {
             };
         }
         bound!(semitones, -12.0, 12.0);
+        bound!(formant_shift_semitones, -12.0, 12.0);
         p.root %= 12;
         p.harmony_steps = p.harmony_steps.clamp(-7, 7);
         bound!(direct, 0.0, 1.0);
@@ -317,17 +377,46 @@ impl AudioFxConfig {
         bound!(low_db, -24.0, 24.0);
         bound!(low_hz, 30.0, 800.0);
         bound!(mid_db, -24.0, 24.0);
-        bound!(mid_hz, 100.0, 12000.0);
-        bound!(mid_q, 0.2, 12.0);
+        bound!(mid_hz, 20.0, 12000.0);
+        bound!(mid_q, 0.2, 16.0);
+        bound!(high_mid_db, -24.0, 24.0);
+        bound!(high_mid_hz, 20.0, 12000.0);
+        bound!(high_mid_q, 0.2, 16.0);
         bound!(high_db, -24.0, 24.0);
         bound!(high_hz, 1000.0, 18000.0);
+        p.phaser_stages = match p.phaser_stages {
+            4 | 6 | 8 | 12 => p.phaser_stages,
+            _ => 6,
+        };
+        bound!(phaser_manual, 0.0, 1.0);
+        bound!(flanger_manual, 0.0, 1.0);
+        bound!(chorus_low_cut_hz, 0.0, 12500.0);
+        bound!(chorus_high_cut_hz, 0.0, 12500.0);
+        bound!(enhance_amount, 0.0, 1.0);
+        bound!(enhance_low_cut_hz, 0.0, 12500.0);
+        bound!(enhance_high_cut_hz, 0.0, 12500.0);
+        bound!(mod_shape, 0.0, 1.0);
+        bound!(mod_phase_degrees, 0.0, 180.0);
+        bound!(mod_step_hz, 0.1, 100.0);
+        bound!(mod_step_beats, 0.0, 16.0);
+        if p.mod_step_beats > 0.0 {
+            p.mod_step_beats = p.mod_step_beats.max(0.015625);
+        }
+        bound!(slicer_duty, 0.01, 1.0);
+        if p.kind == AudioFxKind::Sustainer {
+            p.low_db = p.low_db.clamp(-20.0, 20.0);
+            p.high_db = p.high_db.clamp(-20.0, 20.0);
+        }
         bound!(rate_hz, 0.05, 20.0);
         bound!(sync_beats, 0.0, 16.0);
         bound!(depth, 0.0, 1.0);
         bound!(pan, -1.0, 1.0);
         bound!(width, 0.0, 2.0);
         bound!(time_ms, 1.0, 2000.0);
-        bound!(feedback, 0.0, 0.95);
+        bound!(feedback, 0.0, 1.0);
+        if matches!(p.kind, AudioFxKind::Phaser | AudioFxKind::Flanger) {
+            p.feedback = p.feedback.min(0.85);
+        }
         bound!(delay_ratio, 0.1, 1.0);
         p.feedback_repeats = p.feedback_repeats.min(16);
         bound!(effect_level, 0.0, 1.2);

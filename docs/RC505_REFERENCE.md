@@ -1,6 +1,6 @@
 # RC‑505mkII 对照与实现依据
 
-更新日期：2026-10-04。0.3 按用户批注增加音高、动态、空间和调制效果；完整范围见[效果清单](RC505_MK2_FX_CATALOG_CN.md)和[算法说明](FX_IMPLEMENTATION_CN.md)。公开文档用于校对行为，无法证明自研 DSP 与硬件逐采样或听感一致；没有使用 Serum 的非公开代码或逆向产物。
+更新日期：2026-10-04。0.4继续按用户批注完善音源、调制、回放和效果时间对齐；完整范围见[效果清单](RC505_MK2_FX_CATALOG_CN.md)和[算法说明](FX_IMPLEMENTATION_CN.md)。公开文档用于校对行为，无法证明自研DSP与硬件逐采样或听感一致；没有使用Serum的非公开代码或逆向产物。
 
 ## 已查阅的主要来源
 
@@ -14,14 +14,14 @@
 |---|---|---|
 | 五轨循环 | 采样时钟、音频持久化、Undo/Redo、One Shot、Reverse、Stop、固定长度与量化 | 完整硬件同步/通道矩阵、Tempo Sync音频伸缩、Assign/MIDI未覆盖 |
 | FX bank/slot | Input / Track 各4×4；Track 按轨启用 | 串并联、Assign、MIDI、详细路由尚未覆盖 |
-| OSC | 基础/元音/采样波形，单音与8/16声部，960 PPQ乐句、AHDSR、独立LFO、内部滤波 | 软件音源扩展；不能将复音/采样能力称为 OSC BOT 的完整硬件覆盖 |
+| OSC | 基础/元音/采样波形、单音/8/16声部、Legato/Glide、960 PPQ链接乐句、固定AHDSR视窗、双LFO、内部滤波 | 软件音源扩展；不能将复音/采样能力称为OSC BOT的完整硬件覆盖 |
 | Vocoder | 音轨/输入声道载波、Tone/Mod Sens、频谱包络归一化、formant移动 | 输入仅一个立体声设备；Attack毫秒、Bands/Release/Formant/Sibilance属于软件参数；灵敏度和频响需A/B标定 |
 | Roll | 捕获前级效果输出；Roll1反馈/Roll2次数；Time、细分、Balance | 按公开控制语义独立实现；反馈曲线、取样时机和瞬态没有实机标定 |
 | Delay / Panning Delay | 共用延迟核，1–2000ms与拍点同步，Direct/Effect、高低切、次数或百分比反馈、立体声双抽头 | 次数以衰减阈值映射；BOSS抽头与交叉反馈拓扑未实测，滑动读头改变时间会改变音高 |
 | Reverb | 扩散器+4线FDN，干湿、密度、RT60、0–500ms预延迟、高切Hz | 旧高切百分比映射到原频率；Size/Width/12秒上限为软件扩展；需实测IR/听感 |
-| Filter | RBJ biquad、Q、Drive、干湿；可视曲线 | 门限与调制语义为自研；应实测扫频、共振、饱和及电平 |
+| Filter | TPT状态变量、Q、Drive、干湿、扫频和阶梯；可视曲线 | 深度映射等为自研；应实测扫频、共振、饱和及电平 |
 | 旧 MyDelay | 合并为 OSC 的采样波形/采样音色；旧配置需重新捕获或导入素材 | 旧JSON没有保存捕获缓存，无法从参数恢复历史采样；旧回放需注意迁移提示 |
-| 新音高/调制/动态效果 | 共用可操作机架与独立算法；Transpose控制序列不是音符卷帘 | 保留共振峰移调、完整原机模型与全工程插件延迟补偿尚未实现 |
+| 新音高/调制/动态效果 | 共振峰保持/偏移、PDC、四段EQ、调制与阶梯、mono拓宽；Transpose是控制序列 | 原机专有子型号与听感尚未完整标定；PDC不消除物理监听延迟 |
 
 ## 延续的算法约定
 
@@ -33,7 +33,7 @@
 6. rev.04的TRACK说明明确：Reverse和One Shot不进入叠录；One Shot再次播放键重触发；Stop含Immediate/Fade/Loop，再次Stop立即停止。软件沿用这些可核对语义，但量化UI统一为Off/Beat/Measure/Loop，并非原机所有LOOP SYNC子参数的完整复制。
 7. 实时线程设计参考[PortAudio回调约束](https://portaudio.com/docs/v19-doxydocs/writing_a_callback.html)：避开分配、文件I/O和mutex。CPAL输入/输出时间戳只作诊断；补偿建议来自实际回环，不假设驱动时间戳包含全部硬件延迟。
 8. 静默录入对应官方第12页 **INPUT THRU OFF**：切断输入到输出的直通分支，输入处理与轨道录音继续，已有循环播放保持。合成音源也走软件的同一输入总线。
-9. 新音色、包络和移调算法会改变0.2项目/回放的声音。renderer4记录当前确定性语义；接受旧版文件不代表保留每种历史DSP的逐位输出。
+9. 新音色、包络和移调算法会改变旧项目/回放的声音。renderer5记录当前确定性语义及PDC应用标记；旧2/3/4回放关闭新增PDC，接受旧版文件不代表保留每种历史DSP的逐位输出。
 
 ## 硬件听感验证建议
 

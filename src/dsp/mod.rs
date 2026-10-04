@@ -1,10 +1,12 @@
 pub mod audio_fx;
+pub mod audio_modulation;
 pub mod biquad;
 pub mod delay;
 pub mod detector;
 pub mod dynamics;
 pub mod envelope;
 pub mod filter;
+pub mod filter_sweep;
 pub mod master;
 pub mod my_delay;
 pub mod note;
@@ -13,6 +15,7 @@ pub mod pitch_shift;
 pub mod pitch_tracker;
 pub mod reverb;
 pub mod roll;
+pub mod stereo_enhance;
 pub mod vocoder;
 
 /// Internal floating-point buses keep 24 dB of headroom. Physical output clipping

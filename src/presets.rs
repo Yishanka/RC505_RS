@@ -87,8 +87,11 @@ pub fn encode(config: &AppConfig, target: FxTarget) -> Result<String> {
     };
     if let SlotData::Input(slot) = &mut slot {
         slot.source_id.clear();
+        slot.clip_link = None;
         slot.detached_clip = None;
         if let Some(osc) = &mut slot.osc {
+            osc.phrase_serial = 0;
+            osc.pending_clip = None;
             osc.clip = None;
             osc.note_seq.clear();
             osc.note_step_len_seq.clear();
@@ -110,6 +113,7 @@ pub fn decode(config: &mut AppConfig, target: FxTarget, text: &str) -> Result<()
     let mut data = project::data_from_config(&staging);
     match (target, preset.slot) {
         (FxTarget::Input { bank, slot }, SlotData::Input(value)) => {
+            let playback = note_mut(config, target).map(|n| (n.launch_serial, n.pending.clone()));
             let previous = clip(config, target)
                 .or_else(|| config.input_fx.banks[bank].slots[slot].clip.clone());
             data.input_fx.banks[0].slots[0] = value;
@@ -122,6 +126,10 @@ pub fn decode(config: &mut AppConfig, target: FxTarget, text: &str) -> Result<()
                     note.set_clip(previous);
                 } else {
                     note.replace_events(0, &[]);
+                }
+                if let Some((serial, pending)) = playback {
+                    note.launch_serial = serial;
+                    note.pending = pending;
                 }
             }
             config.input_fx.banks[bank].slots[slot].clip = previous;
@@ -322,6 +330,18 @@ pub fn save_clip(config: &AppConfig, target: FxTarget, name: &str) -> Result<()>
     Ok(())
 }
 pub fn load_clip(config: &mut AppConfig, target: FxTarget, name: &str) -> Result<()> {
+    load_clip_timed(config, target, name, false)
+}
+pub fn load_clip_timed(
+    config: &mut AppConfig,
+    target: FxTarget,
+    name: &str,
+    next_loop: bool,
+) -> Result<()> {
+    anyhow::ensure!(
+        !next_loop || note_mut(config, target).is_none_or(|n| n.pending.is_none()),
+        "Cancel the queued phrase change first"
+    );
     let path = clip_file(name)?;
     if fs::metadata(&path)?.len() > 1024 * 1024 {
         bail!("Clip exceeds the 1 MB size limit");
@@ -339,6 +359,7 @@ pub fn load_clip(config: &mut AppConfig, target: FxTarget, name: &str) -> Result
     );
     note_mut(config, target)
         .context("This effect does not accept notes")?
-        .set_clip(&value.clip);
+        .launch_clip(&value.clip, next_loop);
+    crate::phrases::propagate(config, target);
     Ok(())
 }

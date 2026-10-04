@@ -70,7 +70,7 @@ pub fn draw(ctx: &egui::Context, app: &mut MyApp) {
     egui::Window::new(lang.choose("Keyboard shortcuts","键盘快捷键"))
         .id(egui::Id::new("shortcut-editor")).open(&mut open)
         .default_size([850.0,610.0]).min_width(560.0).resizable(true).show(ctx,|ui|{
-        ui.label(lang.choose("Click a key to replace it, then press your combination. Holds and double presses keep their original behavior. Changes apply after Save.","点击键帽后按下新组合；长按和双击仍保留对应动作的语义。点击保存后生效。"));
+        ui.label(lang.choose("Click a key, press its replacement, then Save.","点击键帽，按下新按键，保存后生效。"));
         super::theme::control_row(ui,|ui|{
             ui.label(lang.choose("Find","查找"));
             ui.add(egui::TextEdit::singleline(&mut app.shortcut_editor.search).desired_width(150.0));
@@ -110,7 +110,7 @@ pub fn draw(ctx: &egui::Context, app: &mut MyApp) {
         }
         if !app.shortcut_editor.message.is_empty(){ui.label(&app.shortcut_editor.message);}
         ui.separator();
-        ui.label(lang.choose("Esc, Tab and Enter remain navigation keys. Piano-roll Ctrl+Z/Y, Delete and player Space keep their local meaning. Performance keys pause while entering text.","Esc、Tab、Enter 保留为导航键。卷帘的 Ctrl+Z/Y、Delete 与播放器空格保留局部语义；输入文字时暂停演奏键。"));
+        ui.label(lang.choose("While editing, arrows and edit shortcuts stay local; recording and faders remain active. Text entry pauses performance keys.","编辑时方向键和编辑组合键留给当前控件，录放和推子仍可用；输入文字时暂停演奏键。"));
         ui.horizontal(|ui|{
             apply=ui.add_enabled(conflict.is_none()&&!app.read_only,egui::Button::new(lang.choose("Save shortcuts","保存快捷键"))).clicked();
             if ui.button(lang.choose("Cancel","取消")).clicked(){app.shortcut_editor.open=false;}

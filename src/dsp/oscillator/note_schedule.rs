@@ -10,6 +10,7 @@ pub struct ScheduledNote {
 #[derive(Clone)]
 pub struct NoteBoundary {
     pub at: usize,
+    pub connected: bool,
     pub notes: Vec<ScheduledNote>,
 }
 pub(super) fn compiled_schedule(
@@ -67,6 +68,7 @@ pub(super) fn compiled_schedule(
     if c.loop_len() > 0 && commands.first().is_none_or(|command| command.0 > 0) {
         boundaries.push(NoteBoundary {
             at: 0,
+            connected: false,
             notes: Vec::new(),
         });
     }
@@ -75,6 +77,10 @@ pub(super) fn compiled_schedule(
         if at >= c.loop_len() {
             break;
         }
+        let connected = active.iter().any(|index| {
+            let note = &c.event_slice()[*index];
+            note.start + note.len > at
+        });
         while cursor < commands.len() && commands[cursor].0 == at {
             let (_, on, index) = commands[cursor];
             if on == 0 {
@@ -90,6 +96,7 @@ pub(super) fn compiled_schedule(
         }
         boundaries.push(NoteBoundary {
             at,
+            connected,
             notes: active
                 .iter()
                 .rev()

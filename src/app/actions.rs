@@ -160,8 +160,9 @@ impl MyApp {
         if let Some(id) = ctx.memory(|m| m.focused()) {
             ctx.memory_mut(|m| m.surrender_focus(id));
         }
-        self.fader_keys.fill(faders::KeyFader::default());
-        self.speed_keys.fill(faders::KeyFader::default());
+        // Moving between live panels must not restart an already held fader.
+        // Text/modal/window-focus gates reset continuous controls in keyboard.rs.
+        self.clear_gesture.cancel();
     }
     pub fn open_editor(&mut self, ctx: &egui::Context) {
         self.editor.expanded = true;

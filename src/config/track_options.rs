@@ -17,9 +17,19 @@ pub enum StopMode {
     Fade,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecordReference {
+    /// A performer follows the audible click/loops: compensate H + Li + M.
+    #[default]
+    External,
+    /// An internally clocked generator: compensate Li, not physical I/O latency.
+    Internal,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TrackOptions {
+    pub record_reference: RecordReference,
     pub reverse: bool,
     pub one_shot: bool,
     pub stop_mode: StopMode,
@@ -33,6 +43,7 @@ pub struct TrackOptions {
 impl Default for TrackOptions {
     fn default() -> Self {
         Self {
+            record_reference: RecordReference::External,
             reverse: false,
             one_shot: false,
             stop_mode: StopMode::Immediate,

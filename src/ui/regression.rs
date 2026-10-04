@@ -318,14 +318,314 @@ fn mouse_fader_keyboard_regression(ctx: &egui::Context, app: &mut MyApp, time: &
         app.config.track_levels[0], level,
         "Track-selection arrow must not also adjust the focused fader"
     );
-    // Actual text editing still has priority over performance shortcuts.
+    // Master parameters allow performance shortcuts as well.
     app.master_fx_open = true;
     frame(ctx, app, time, vec![]);
     let monitor = app.config.input_thru;
     press(ctx, app, time, Key::J, Modifiers::NONE);
-    assert_eq!(app.config.input_thru, monitor);
+    assert_ne!(app.config.input_thru, monitor);
     press(ctx, app, time, Key::Escape, Modifiers::NONE);
 }
+fn editor_performance_regression(ctx: &egui::Context, app: &mut MyApp, time: &mut f64) {
+    use crate::{
+        config::{InputFx, track_options::Quantize},
+        engine::core::{Action, Mode},
+    };
+    super::preview::configure(app, "audio-fx-panning-small-en");
+    app.language = crate::app_support::language::Language::English;
+    app.audio.online = true;
+    app.action(Action::Panic);
+    for track in 0..5 {
+        app.action(Action::Clear(track));
+        app.config.track_options[track].quantize = Quantize::Off;
+    }
+    app.track_sel = Some(0);
+    if let Some(InputFx::Audio(delay)) = &mut app.config.input_fx.banks[0].slots[0].fx {
+        delay.time_ms = 1.23;
+        delay.sync_beats = 0.0;
+    }
+    frame(ctx, app, time, vec![]);
+    let parameter = ctx
+        .data(|d| d.get_temp::<egui::Id>(egui::Id::new(("parameter", "Time (ms)"))))
+        .expect("Delay control is visible");
+    ctx.memory_mut(|m| m.request_focus(parameter));
+    frame(ctx, app, time, vec![]);
+    for down in [true, false] {
+        frame(
+            ctx,
+            app,
+            time,
+            [Key::ArrowRight, Key::Num1]
+                .into_iter()
+                .map(|key| egui::Event::Key {
+                    key,
+                    physical_key: Some(key),
+                    pressed: down,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                })
+                .collect(),
+        );
+    }
+    let delay_time = |app: &MyApp| match &app.config.input_fx.banks[0].slots[0].fx {
+        Some(InputFx::Audio(p)) => p.time_ms,
+        _ => panic!("Changed pinned effect"),
+    };
+    assert!(
+        (delay_time(app) - 1.24).abs() < 1e-5,
+        "Arrow precision is independent of slider width"
+    );
+    // The offline bridge accepts commands without advancing audio samples.
+    assert!(
+        app.view.tracks[0].pending,
+        "Parameter editing must send Record to the engine in the same frame"
+    );
+    assert_eq!(
+        app.track_sel,
+        Some(0),
+        "Parameter arrows must not select another track"
+    );
+    press(ctx, app, time, Key::Num2, Modifiers::CTRL);
+    press(ctx, app, time, Key::Delete, Modifiers::NONE);
+    press(ctx, app, time, Key::Delete, Modifiers::NONE);
+    assert_eq!(app.track_sel, Some(0));
+    assert!(
+        app.view.tracks[0].pending,
+        "Editor Delete must not clear a track or cancel its Record command"
+    );
+    press(ctx, app, time, Key::ArrowUp, Modifiers::NONE);
+    assert!(
+        (delay_time(app) - 1.34).abs() < 1e-5,
+        "Up is ten fine steps, not focus traversal"
+    );
+    app.config.input_fx.banks[0].slots[1].is_enabled = false;
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::NONE
+    };
+    frame(
+        ctx,
+        app,
+        time,
+        vec![egui::Event::Key {
+            key: Key::W,
+            physical_key: Some(Key::W),
+            pressed: true,
+            repeat: false,
+            modifiers: shift,
+        }],
+    );
+    assert!(app.config.input_fx.banks[0].slots[1].is_enabled);
+    press(ctx, app, time, Key::ArrowRight, shift);
+    assert!(
+        (delay_time(app) - 1.35).abs() < 1e-5,
+        "A held momentary FX must not block arrow adjustment"
+    );
+    assert!(app.config.input_fx.banks[0].slots[1].is_enabled);
+    frame(
+        ctx,
+        app,
+        time,
+        vec![egui::Event::Key {
+            key: Key::W,
+            physical_key: Some(Key::W),
+            pressed: false,
+            repeat: false,
+            modifiers: shift,
+        }],
+    );
+    assert!(!app.config.input_fx.banks[0].slots[1].is_enabled);
+    press(ctx, app, time, Key::Enter, Modifiers::NONE);
+    frame(
+        ctx,
+        app,
+        time,
+        vec![
+            egui::Event::Text("7.89".into()),
+            egui::Event::Key {
+                key: Key::Num2,
+                physical_key: Some(Key::Num2),
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            },
+        ],
+    );
+    frame(
+        ctx,
+        app,
+        time,
+        vec![egui::Event::Key {
+            key: Key::Num2,
+            physical_key: Some(Key::Num2),
+            pressed: false,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    press(ctx, app, time, Key::Enter, Modifiers::NONE);
+    assert!(
+        (delay_time(app) - 7.89).abs() < 1e-5,
+        "Enter commits a precise typed value"
+    );
+    assert_eq!(app.view.tracks[1].mode, Mode::Empty);
+    assert!(
+        !app.view.tracks[1].pending,
+        "Typing a number must not record another track"
+    );
+    press(ctx, app, time, Key::Enter, Modifiers::NONE);
+    frame(ctx, app, time, vec![egui::Event::Text("500".into())]);
+    press(ctx, app, time, Key::Escape, Modifiers::NONE);
+    assert!(app.editor.expanded);
+    assert!(
+        (delay_time(app) - 7.89).abs() < 1e-5,
+        "Escape cancels numeric entry before closing the editor"
+    );
+    frame(ctx, app, time, vec![]);
+    press(ctx, app, time, Key::F1, Modifiers::NONE);
+    assert!(
+        !app.view.tracks[0].pending,
+        "Stop key stays available while editing"
+    );
+    app.action(Action::Panic);
+    for track in 0..5 {
+        app.action(Action::Clear(track));
+    }
+    frame(ctx, app, time, vec![]);
+    app.audio.online = false;
+    app.close_editor(ctx);
+}
+fn fader_panel_transition_regression(ctx: &egui::Context, app: &mut MyApp, time: &mut f64) {
+    super::preview::configure(app, "performance");
+    app.focus_panel(ctx, Focus::Performance);
+    app.config.track_levels[0] = 0.5;
+    app.config.track_options[0].fader_speed = 24.0;
+    frame(ctx, app, time, vec![]);
+    frame(
+        ctx,
+        app,
+        time,
+        vec![egui::Event::Key {
+            key: Key::Z,
+            physical_key: Some(Key::Z),
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    for _ in 0..45 {
+        frame(ctx, app, time, vec![]);
+    }
+    let before = crate::app::faders::decibels(app.config.track_levels[0]);
+    app.open_editor(ctx);
+    frame(ctx, app, time, vec![]);
+    let after = crate::app::faders::decibels(app.config.track_levels[0]);
+    assert!(
+        (before - after - 0.4).abs() < 0.02,
+        "Panel focus must preserve the running fader ramp, not restart its 0.5 dB tap"
+    );
+    frame(
+        ctx,
+        app,
+        time,
+        vec![egui::Event::Key {
+            key: Key::Z,
+            physical_key: Some(Key::Z),
+            pressed: false,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    app.close_editor(ctx);
+}
+
+fn phrase_keyboard_regression(ctx: &egui::Context, app: &mut MyApp, time: &mut f64) {
+    use crate::{
+        config::{FxKind, InputFx},
+        presets::FxTarget,
+    };
+    super::preview::configure(app, "sequence-links");
+    app.language = crate::app_support::language::Language::English;
+    app.config.input_fx.set_slot_kind(0, 2, FxKind::Oscillator);
+    app.open_editor(ctx);
+    frame(ctx, app, time, vec![]);
+    let source_id = ctx
+        .data(|d| d.get_temp::<egui::Id>(egui::Id::new(("selector", "phrase-link-source"))))
+        .expect("Source selector is drawn");
+    let mut reached = false;
+    for _ in 0..40 {
+        if ctx.memory(|m| m.focused()) == Some(source_id) {
+            reached = true;
+            break;
+        }
+        press(ctx, app, time, Key::Tab, Modifiers::NONE);
+    }
+    assert!(
+        reached,
+        "Tab must reach source selection in the phrase manager"
+    );
+    let before = app.editor.phrase_source.clone();
+    press(ctx, app, time, Key::ArrowDown, Modifiers::NONE);
+    assert_ne!(
+        app.editor.phrase_source, before,
+        "A source enum accepts arrows without leaving the editor"
+    );
+    assert!(app.editor.expanded);
+    app.editor.phrase_manager_open = false;
+    frame(ctx, app, time, vec![]);
+    let snap = ctx
+        .data(|d| d.get_temp::<egui::Id>(egui::Id::new(("selector", "snap"))))
+        .expect("Piano toolbar is drawn");
+    let mut reached = false;
+    for _ in 0..40 {
+        if ctx.memory(|m| m.focused()) == Some(snap) {
+            reached = true;
+            break;
+        }
+        press(ctx, app, time, Key::Tab, Modifiers::NONE);
+    }
+    assert!(reached, "Tab must reach the piano toolbar");
+    let old_snap = app.editor.piano.snap;
+    press(ctx, app, time, Key::ArrowRight, Modifiers::NONE);
+    assert_ne!(app.editor.piano.snap, old_snap);
+    let canvas = ctx
+        .data(|d| d.get_temp::<egui::Id>(egui::Id::new("piano-canvas")))
+        .expect("Piano canvas is drawn");
+    let mut reached = false;
+    for _ in 0..40 {
+        if ctx.memory(|m| m.focused()) == Some(canvas) {
+            reached = true;
+            break;
+        }
+        press(ctx, app, time, Key::Tab, Modifiers::NONE);
+    }
+    assert!(reached, "Tab must reach the piano canvas");
+    let notes = |app: &MyApp| match &app.config.input_fx.banks[0].slots[0].fx {
+        Some(InputFx::Oscillator(o)) => o.note.events(),
+        _ => panic!("OSC source changed"),
+    };
+    let old = notes(app);
+    press(ctx, app, time, Key::A, Modifiers::CTRL);
+    press(ctx, app, time, Key::ArrowUp, Modifiers::NONE);
+    let moved = notes(app);
+    assert_eq!(moved.len(), old.len());
+    assert_ne!(
+        moved, old,
+        "Canvas arrows move selected notes instead of panel focus"
+    );
+    press(ctx, app, time, Key::Z, Modifiers::CTRL);
+    assert_eq!(
+        notes(app),
+        old,
+        "Piano undo is local while performance shortcuts remain available"
+    );
+    assert_eq!(
+        app.editor.target,
+        Some(FxTarget::Input { bank: 0, slot: 0 })
+    );
+    app.close_editor(ctx);
+}
+
 pub fn run() {
     assert!(
         std::env::args().any(|a| a == "--offline")
@@ -359,6 +659,11 @@ pub fn run() {
                     );
                 }
             }
+            // Arrow keys now edit enum/numeric values. Restore the fixture
+            // before independently exercising the page navigation contract.
+            super::preview::configure(&mut app, mode);
+            app.open_editor(&ctx);
+            frame(&ctx, &mut app, &mut time, vec![]);
             let previous = app.editor.page;
             press(&ctx, &mut app, &mut time, Key::Tab, Modifiers::CTRL);
             if mode == "performance" {
@@ -471,7 +776,7 @@ pub fn run() {
         press(&ctx, &mut app, &mut time, key, Modifiers::NONE);
         assert!(app.master_fx_open && app.app_state == AppState::MainLoop);
     }
-    assert_eq!(monitor, app.config.input_thru);
+    assert_ne!(monitor, app.config.input_thru);
     press(&ctx, &mut app, &mut time, Key::Escape, Modifiers::NONE);
     assert!(
         !app.master_fx_open && app.editor.expanded,
@@ -520,6 +825,9 @@ pub fn run() {
     replay_import_regression(&ctx, &mut app, &mut time);
     tap_start_regression(&ctx, &mut app, &mut time);
     mouse_fader_keyboard_regression(&ctx, &mut app, &mut time);
+    editor_performance_regression(&ctx, &mut app, &mut time);
+    fader_panel_transition_regression(&ctx, &mut app, &mut time);
+    phrase_keyboard_regression(&ctx, &mut app, &mut time);
     app.app_state = AppState::Init;
     app.active_project_idx = None;
     let count = app.projects.len();

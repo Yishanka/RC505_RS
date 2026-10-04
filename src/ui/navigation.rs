@@ -59,6 +59,27 @@ pub fn register(response: Response) -> Response {
     }
     response
 }
+pub fn parameter(response: Response) -> Response {
+    response
+        .ctx
+        .data_mut(|d| d.insert_temp(response.id.with("parameter"), true));
+    register(response)
+}
+pub fn parameter_focused(ctx: &egui::Context) -> bool {
+    ctx.memory(|m| m.focused())
+        .is_some_and(|id| ctx.data(|d| d.get_temp::<bool>(id.with("parameter")).unwrap_or(false)))
+}
+pub fn focused_scope(ctx: &egui::Context) -> Option<Focus> {
+    let focused = ctx.memory(|m| m.focused())?;
+    [Focus::Transport, Focus::Left, Focus::Right, Focus::Editor]
+        .into_iter()
+        .find(|scope| {
+            ctx.data(|d| {
+                d.get_temp::<Vec<Entry>>(key(*scope))
+                    .is_some_and(|entries| entries.iter().any(|entry| entry.id == focused))
+            })
+        })
+}
 pub fn end(ui: &Ui) {
     let group = ui.ctx().data_mut(|d| {
         let group = d.get_temp::<Group>(Id::new("nav-group"));
@@ -110,6 +131,7 @@ pub fn end(ui: &Ui) {
                             tab: true,
                             vertical_arrows: true,
                             horizontal_arrows: true,
+                            escape: true,
                             ..Default::default()
                         }
                     },

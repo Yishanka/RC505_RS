@@ -24,6 +24,9 @@ pub struct Plan {
 impl Plan {
     pub fn new(sr: f32) -> Arc<Self> {
         let n = latency_frames(sr) + 1;
+        Self::with_size(n)
+    }
+    fn with_size(n: usize) -> Arc<Self> {
         // Construction only: immutable plans are shared across slots, tracks and
         // replay renderers. Audio processing neither locks nor mutates this cache.
         static PLANS: OnceLock<Mutex<HashMap<usize, Weak<Plan>>>> = OnceLock::new();
@@ -86,6 +89,13 @@ impl Plan {
 }
 #[derive(Clone)]
 pub struct PitchShift {
+    envelope: FormantEnvelope,
+    source_magnitudes: Vec<[f32; 2]>,
+    preserve_formants: bool,
+    formant_ratio: f32,
+    fundamental_hint: f32,
+    envelope_tick: u8,
+    envelope_ready: bool,
     plan: Arc<Plan>,
     input: Vec<[f32; 2]>,
     work: Vec<[f32; 2]>,
@@ -105,14 +115,163 @@ pub struct PitchShift {
     primed: bool,
     offset: usize,
 }
+
+/// Bounded, subsampled true-envelope approximation: max-pool narrow spectral
+/// regions, then three cepstral upper-envelope projections with a Hamming lifter.
+/// The 512-point envelope FFT is separate from (and smaller than) the audio FFT.
+/// Based on the public Röbel/Rodet DAFx2005 and source/filter PV literature;
+/// fixed iteration count is deliberate, not a claim of exact convergence.
+#[derive(Clone)]
+struct FormantEnvelope {
+    plan: Arc<Plan>,
+    observed: Vec<[f32; 2]>,
+    upper: Vec<[f32; 2]>,
+    estimate: Vec<[f32; 2]>,
+    work: Vec<[f32; 2]>,
+    ranges: Vec<(usize, usize)>,
+    lifters: Vec<Vec<f32>>,
+    orders: [f32; 7],
+    virtual_rate: f32,
+    bin_to_grid: f32,
+    valid: [bool; 2],
+}
+impl FormantEnvelope {
+    fn new(audio_n: usize, sr: f32) -> Self {
+        let n = 512;
+        let high = (sr * 0.5).min(12000.0).max(500.0);
+        let virtual_rate = high * 2.0;
+        let bin_hz = sr / audio_n as f32;
+        let grid_hz = high / (n / 2) as f32;
+        let orders = [16.0, 24.0, 32.0, 48.0, 64.0, 96.0, 128.0];
+        Self {
+            plan: Plan::with_size(n),
+            observed: vec![[0.0; 2]; n / 2 + 1],
+            upper: vec![[0.0; 2]; n / 2 + 1],
+            estimate: vec![[0.0; 2]; n / 2 + 1],
+            work: vec![[0.0; 2]; n],
+            ranges: (0..=n / 2)
+                .map(|i| {
+                    let lo = (((i as f32 - 0.5).max(0.0) * grid_hz) / bin_hz).floor() as usize;
+                    let hi = (((i as f32 + 0.5) * grid_hz) / bin_hz).ceil() as usize;
+                    (lo.min(audio_n / 2), hi.max(lo + 1).min(audio_n / 2 + 1))
+                })
+                .collect(),
+            lifters: orders
+                .iter()
+                .map(|cutoff| {
+                    (0..n)
+                        .map(|i| {
+                            let q = i.min(n - i) as f32;
+                            if q > *cutoff {
+                                0.0
+                            } else {
+                                0.54 + 0.46 * (PI * q / cutoff).cos()
+                            }
+                        })
+                        .collect()
+                })
+                .collect(),
+            orders,
+            virtual_rate,
+            bin_to_grid: bin_hz / grid_hz,
+            valid: [false; 2],
+        }
+    }
+    fn update(&mut self, magnitudes: &[[f32; 2]], fundamental: f32) {
+        let target = (self.virtual_rate * 0.005).min(if fundamental > 0.0 {
+            self.virtual_rate * 0.45 / fundamental
+        } else {
+            f32::INFINITY
+        });
+        let order = (0..self.orders.len())
+            .min_by(|a, b| {
+                (self.orders[*a] - target)
+                    .abs()
+                    .total_cmp(&(self.orders[*b] - target).abs())
+            })
+            .unwrap_or(3);
+        let mut peak = [0.0f32; 2];
+        for m in magnitudes {
+            for ch in 0..2 {
+                peak[ch] = peak[ch].max(m[ch]);
+            }
+        }
+        for ch in 0..2 {
+            let peaks = (1..magnitudes.len() - 1)
+                .filter(|i| {
+                    magnitudes[*i][ch] > peak[ch] * 0.05
+                        && magnitudes[*i][ch] > magnitudes[*i - 1][ch]
+                        && magnitudes[*i][ch] >= magnitudes[*i + 1][ch]
+                })
+                .count();
+            self.valid[ch] =
+                peaks >= 3 && peak[ch] > peak[0].max(peak[1]) * 0.0001 && peak[ch] > 1e-8;
+        }
+        for (i, (lo, hi)) in self.ranges.iter().copied().enumerate() {
+            for ch in 0..2 {
+                let local = magnitudes[lo..hi].iter().fold(0.0f32, |m, v| m.max(v[ch]));
+                let log = local.max((peak[ch] * 1e-5).max(1e-10)).ln();
+                self.observed[i][ch] = log;
+                self.upper[i][ch] = log;
+                self.estimate[i][ch] = log;
+            }
+        }
+        let n = self.plan.n;
+        for _ in 0..3 {
+            for i in 0..n {
+                let k = i.min(n - i);
+                self.work[i] = self.upper[k];
+            }
+            self.plan.fft(&mut self.work, true);
+            for (sample, lifter) in self.work.iter_mut().zip(&self.lifters[order]) {
+                sample[0] *= *lifter;
+                sample[1] *= *lifter;
+            }
+            self.plan.fft(&mut self.work, false);
+            for i in 0..=n / 2 {
+                self.estimate[i] = self.work[i];
+                for ch in 0..2 {
+                    self.upper[i][ch] = self.upper[i][ch].max(self.estimate[i][ch]);
+                }
+            }
+        }
+    }
+    fn log_at(&self, bin: f32, ch: usize) -> f32 {
+        let x = (bin * self.bin_to_grid).clamp(0.0, (self.estimate.len() - 1) as f32);
+        let i = x as usize;
+        let j = (i + 1).min(self.estimate.len() - 1);
+        let f = x - i as f32;
+        self.estimate[i][ch] * (1.0 - f) + self.estimate[j][ch] * f
+    }
+    fn correction(&self, source_bin: f32, target_bin: f32, ch: usize) -> f32 {
+        if !self.valid[ch] {
+            return 1.0;
+        }
+        // Bound valley whitening to ±36 dB; a separate frame-energy guard avoids
+        // arbitrarily boosting a narrow spectral hole. No noise is generated.
+        (self.log_at(target_bin, ch) - self.log_at(source_bin, ch))
+            .clamp(-4.158883, 4.158883)
+            .exp()
+    }
+}
 impl PitchShift {
     pub fn new(plan: Arc<Plan>) -> Self {
         Self::new_with_offset(plan, 0)
     }
     pub fn new_with_offset(plan: Arc<Plan>, offset: usize) -> Self {
+        Self::new_with_offset_and_rate(plan, offset, 48000.0)
+    }
+    pub fn new_with_offset_and_rate(plan: Arc<Plan>, offset: usize, sr: f32) -> Self {
         let n = plan.n;
         let offset = offset % (n / 4);
         Self {
+            envelope: FormantEnvelope::new(n, sr),
+            source_magnitudes: vec![[0.0; 2]; n / 2 + 1],
+            preserve_formants: false,
+            formant_ratio: 1.0,
+            fundamental_hint: 0.0,
+            envelope_tick: 0,
+            envelope_ready: false,
             plan,
             input: vec![[0.0; 2]; n],
             work: vec![[0.0; 2]; n],
@@ -134,6 +293,8 @@ impl PitchShift {
         }
     }
     pub fn reset(&mut self) {
+        self.envelope_ready = false;
+        self.envelope_tick = 0;
         self.position = 0;
         self.filled = 0;
         self.hop_count = self.plan.n / 4 - self.offset - 1;
@@ -142,6 +303,16 @@ impl PitchShift {
     }
     pub fn latency_frames(&self) -> usize {
         self.plan.n - 1
+    }
+    pub fn set_formants(&mut self, preserve: bool, ratio: f32) {
+        if preserve && !self.preserve_formants {
+            self.envelope_ready = false;
+        }
+        self.preserve_formants = preserve;
+        self.formant_ratio = ratio.clamp(0.5, 2.0);
+    }
+    pub fn set_fundamental_hint(&mut self, hz: f32) {
+        self.fundamental_hint = hz.max(0.0);
     }
     pub fn next(&mut self, input: [f32; 2], ratio: f32) -> [f32; 2] {
         let n = self.plan.n;
@@ -179,10 +350,28 @@ impl PitchShift {
             self.work[i] = [x[0] * self.plan.window[i], x[1] * self.plan.window[i]];
         }
         self.plan.fft(&mut self.work, false);
+        if self.preserve_formants {
+            for k in 0..=half {
+                let a = self.work[k];
+                let b = self.work[(n - k) % n];
+                self.source_magnitudes[k] = [
+                    ((a[0] + b[0]) * 0.5).hypot((a[1] - b[1]) * 0.5),
+                    ((a[1] + b[1]) * 0.5).hypot((b[0] - a[0]) * 0.5),
+                ];
+            }
+            if !self.envelope_ready || self.envelope_tick == 0 {
+                self.envelope
+                    .update(&self.source_magnitudes, self.fundamental_hint);
+                self.envelope_ready = true;
+            }
+            self.envelope_tick = (self.envelope_tick + 1) % 2;
+        }
         self.magnitude.fill([0.0; 2]);
         self.frequency.fill([0.0; 2]);
         self.phase_strength.fill(0.0);
         self.phase_difference.fill(0.0);
+        let mut original_energy = 0.0f64;
+        let mut corrected_energy = 0.0f64;
         for k in 0..=half {
             let a = self.work[k];
             let b = self.work[(n - k) % n];
@@ -191,14 +380,18 @@ impl PitchShift {
                 [(a[1] + b[1]) * 0.5, (b[0] - a[0]) * 0.5],
             ];
             let phases = channels.map(|z| z[1].atan2(z[0]));
-            let mags = channels.map(|z| z[0].hypot(z[1]));
+            let mags = if self.preserve_formants {
+                self.source_magnitudes[k]
+            } else {
+                channels.map(|z| z[0].hypot(z[1]))
+            };
             let destination = (k as f32 * ratio).round() as usize;
             if destination <= half && mags[0] + mags[1] > self.phase_strength[destination] {
                 self.phase_strength[destination] = mags[0] + mags[1];
                 self.phase_difference[destination] = phases[1] - phases[0];
             }
             for ch in 0..2 {
-                let mag = mags[ch];
+                let mut mag = mags[ch];
                 let phase = phases[ch];
                 let delta = if self.primed {
                     (phase - self.last_phase[k][ch] - k as f32 * expected + PI).rem_euclid(TAU) - PI
@@ -207,6 +400,15 @@ impl PitchShift {
                 };
                 self.last_phase[k][ch] = phase;
                 let frequency = (k as f32 + delta / expected) * ratio;
+                if self.preserve_formants {
+                    original_energy += f64::from(mag) * f64::from(mag);
+                    mag *= self.envelope.correction(
+                        frequency / ratio,
+                        frequency / self.formant_ratio,
+                        ch,
+                    );
+                    corrected_energy += f64::from(mag) * f64::from(mag);
+                }
                 if destination <= half {
                     self.magnitude[destination][ch] += mag;
                     self.frequency[destination][ch] += frequency * mag;
@@ -217,6 +419,11 @@ impl PitchShift {
             }
         }
         self.work.fill([0.0; 2]);
+        let formant_gain = if self.preserve_formants && corrected_energy > original_energy * 4.0 {
+            ((original_energy * 4.0) / corrected_energy.max(1e-30)).sqrt() as f32
+        } else {
+            1.0
+        };
         for k in 0..=half {
             let mut channels = [[0.0; 2]; 2];
             for ch in 0..2 {
@@ -261,8 +468,15 @@ impl PitchShift {
             }
             for ch in 0..2 {
                 let phase = self.sum_phase[k][ch];
-                let mag = self.magnitude[k][ch];
+                let mag = self.magnitude[k][ch] * formant_gain;
                 channels[ch] = [mag * phase.cos(), mag * phase.sin()];
+            }
+            // DC and Nyquist are self-conjugate for each real channel. Leaving
+            // an imaginary value here leaks the left channel into the packed
+            // right channel (especially during a zero-padded attack).
+            if k == 0 || k == half {
+                channels[0][1] = 0.0;
+                channels[1][1] = 0.0;
             }
             let l = channels[0];
             let r = channels[1];
@@ -288,6 +502,143 @@ impl PitchShift {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn formant_preservation_keeps_vowel_envelope_while_pitch_moves() {
+        let sr = 48000.0;
+        let ratio = 1.5;
+        let fundamental = 80.0;
+        let harmonics: Vec<_> = (1..90)
+            .map(|h| {
+                let f = h as f32 * fundamental;
+                let envelope = 0.008
+                    + (-0.5 * ((f - 600.0) / 95.0).powi(2)).exp()
+                    + 0.8 * (-0.5 * ((f - 1800.0) / 150.0).powi(2)).exp()
+                    + 0.5 * (-0.5 * ((f - 3000.0) / 180.0).powi(2)).exp();
+                (f, envelope * 0.015)
+            })
+            .collect();
+        let mut plain = PitchShift::new(Plan::new(sr));
+        let mut preserved = PitchShift::new(Plan::new(sr));
+        preserved.set_formants(true, 1.0);
+        let bins: Vec<_> = (2..42).map(|h| h as f32 * fundamental * ratio).collect();
+        let mut sums_plain = vec![[0.0f64; 2]; bins.len()];
+        let mut sums_preserved = vec![[0.0f64; 2]; bins.len()];
+        let allocations = crate::test_alloc::count(|| {
+            for n in 0..72000 {
+                let t = n as f32 / sr;
+                let x = harmonics
+                    .iter()
+                    .map(|(f, a)| (TAU * f * t).sin() * a)
+                    .sum::<f32>();
+                let a = plain.next([x, -x], ratio);
+                let b = preserved.next([x, -x], ratio);
+                assert!(b.iter().all(|v| v.is_finite() && v.abs() < 2.0));
+                assert!((b[0] + b[1]).abs() < 0.0005);
+                if n >= 24000 {
+                    for (i, f) in bins.iter().enumerate() {
+                        let phase = std::f64::consts::TAU * (*f as f64) * n as f64 / sr as f64;
+                        sums_plain[i][0] += a[0] as f64 * phase.cos();
+                        sums_plain[i][1] += a[0] as f64 * phase.sin();
+                        sums_preserved[i][0] += b[0] as f64 * phase.cos();
+                        sums_preserved[i][1] += b[0] as f64 * phase.sin();
+                    }
+                }
+            }
+        });
+        assert_eq!(allocations, 0);
+        let energy = |sums: &[[f64; 2]], low: f32, high: f32| {
+            bins.iter()
+                .zip(sums)
+                .filter(|(f, _)| **f >= low && **f <= high)
+                .map(|(_, c)| c[0] * c[0] + c[1] * c[1])
+                .sum::<f64>()
+        };
+        let plain_ratio = energy(&sums_plain, 480.0, 720.0) / energy(&sums_plain, 840.0, 1080.0);
+        let preserved_ratio =
+            energy(&sums_preserved, 480.0, 720.0) / energy(&sums_preserved, 840.0, 1080.0);
+        println!(
+            "Formant F1 region preserved/natural energy ratio: plain {plain_ratio:.3}, preserved {preserved_ratio:.3}"
+        );
+        assert!(plain_ratio < 0.3 && preserved_ratio > plain_ratio * 8.0 && preserved_ratio > 1.3);
+        let plain_second =
+            energy(&sums_plain, 1680.0, 1920.0) / energy(&sums_plain, 2520.0, 2880.0);
+        let preserved_second =
+            energy(&sums_preserved, 1680.0, 1920.0) / energy(&sums_preserved, 2520.0, 2880.0);
+        assert!(
+            preserved_second > plain_second * 6.0 && preserved_second > 1.0,
+            "F2 {plain_second} / {preserved_second}"
+        );
+    }
+    #[test]
+    fn formant_offset_moves_the_envelope_without_moving_harmonic_frequencies() {
+        let sr = 48000.0;
+        let mut shifter = PitchShift::new(Plan::new(sr));
+        shifter.set_formants(true, 1.5);
+        shifter.set_fundamental_hint(80.0);
+        let harmonics: Vec<_> = (1..70)
+            .map(|h| {
+                let f = h as f32 * 80.0;
+                let a = 0.006
+                    + (-0.5 * ((f - 600.0) / 110.0).powi(2)).exp()
+                    + 0.5 * (-0.5 * ((f - 1800.0) / 170.0).powi(2)).exp();
+                (f, a * 0.012)
+            })
+            .collect();
+        let mut sums = vec![[0.0f64; 2]; harmonics.len()];
+        for n in 0..72000 {
+            let t = n as f32 / sr;
+            let x = harmonics
+                .iter()
+                .map(|(f, a)| (TAU * f * t).sin() * a)
+                .sum::<f32>();
+            let y = shifter.next([x, x], 1.0)[0];
+            if n >= 24000 {
+                for (i, (f, _)) in harmonics.iter().enumerate() {
+                    let phase = std::f64::consts::TAU * (*f as f64) * n as f64 / sr as f64;
+                    sums[i][0] += y as f64 * phase.cos();
+                    sums[i][1] += y as f64 * phase.sin();
+                }
+            }
+        }
+        let energy = |low: f32, high: f32| {
+            harmonics
+                .iter()
+                .zip(&sums)
+                .filter(|((f, _), _)| *f >= low && *f <= high)
+                .map(|(_, v)| v[0] * v[0] + v[1] * v[1])
+                .sum::<f64>()
+        };
+        assert!(energy(800.0, 1040.0) > energy(480.0, 720.0) * 2.0);
+    }
+    #[test]
+    fn formant_mode_does_not_erase_a_sparse_tone_or_allocate_at_sample_rate_boundaries() {
+        for sr in [8000.0, 44100.0, 48000.0, 96000.0, 192000.0] {
+            let plan = Plan::new(sr);
+            let mut plain = PitchShift::new_with_offset_and_rate(plan.clone(), 0, sr);
+            let mut kept = PitchShift::new_with_offset_and_rate(plan, 0, sr);
+            kept.set_formants(true, 1.0);
+            let mut ordinary = 0.0f64;
+            let mut preserved = 0.0f64;
+            let count = crate::test_alloc::count(|| {
+                for n in 0..sr as usize / 2 {
+                    let x = (TAU * 220.0 * n as f32 / sr).sin() * 0.1;
+                    let a = plain.next([x, 0.0], 1.5);
+                    let b = kept.next([x, 0.0], 1.5);
+                    assert!(b[0].is_finite() && b[1].abs() < 0.00001);
+                    if n > sr as usize / 4 {
+                        ordinary += f64::from(a[0] * a[0]);
+                        preserved += f64::from(b[0] * b[0]);
+                    }
+                }
+            });
+            assert_eq!(count, 0);
+            assert!(
+                preserved / ordinary > 0.75 && preserved / ordinary < 1.25,
+                "{sr}: {}",
+                preserved / ordinary
+            );
+        }
+    }
     #[test]
     fn frequency_and_stereo_phase_are_preserved_through_octave_shift() {
         for input_hz in [110.0, 220.0, 333.0, 440.0] {

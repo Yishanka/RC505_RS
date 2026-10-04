@@ -6,23 +6,33 @@ use eframe::egui::{self, Stroke, pos2};
 
 fn value(ui: &mut egui::Ui, v: &mut f32, min: f32, max: f32, en: &str, zh: &str, log: bool) {
     let lang = Language::current(ui.ctx());
-    let mut slider = egui::Slider::new(v, min..=max)
-        .text(lang.choose(en, zh))
-        .logarithmic(log);
     if min >= 0.0 && max <= 1.2 && max >= 0.5 {
-        slider = slider
-            .step_by(0.01)
-            .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-            .custom_parser(|text| {
-                text.trim()
-                    .trim_end_matches('%')
-                    .trim()
-                    .parse::<f64>()
-                    .ok()
-                    .map(|v| v / 100.0)
-            });
+        let mut percent = *v * 100.0;
+        if parameters::float(
+            ui,
+            &mut percent,
+            min * 100.0,
+            max * 100.0,
+            0.1,
+            &format!("{} (%)", lang.choose(en, zh)),
+            log,
+        )
+        .changed()
+        {
+            *v = percent / 100.0;
+        }
+    } else {
+        let step = if en.contains("(ms") || en.contains("(Hz") && max <= 50.0 {
+            0.01
+        } else if en.contains("(Hz") {
+            1.0
+        } else if en.contains("Semitone") {
+            0.01
+        } else {
+            0.1
+        };
+        parameters::float(ui, v, min, max, step, lang.choose(en, zh), log);
     }
-    navigation::register(ui.add(slider));
 }
 fn section(ui: &mut egui::Ui, en: &str, zh: &str) {
     let lang = Language::current(ui.ctx());
@@ -105,7 +115,16 @@ pub fn draw(ui: &mut egui::Ui, p: &mut AudioFxConfig, full: bool) {
             .data(|d| d.get_temp::<u32>(egui::Id::new("audio-fx-sample-rate")))
             .unwrap_or(48000)
             .max(1000);
-        let frames = if p.kind == K::Transpose && !p.pitch_sequence && p.semitones == 0.0 {
+        let pdc = ui
+            .ctx()
+            .data(|d| d.get_temp::<bool>(egui::Id::new("audio-fx-pdc")))
+            .unwrap_or(false);
+        let frames = if !pdc
+            && p.kind == K::Transpose
+            && !p.pitch_sequence
+            && p.semitones == 0.0
+            && (!p.preserve_formants || p.formant_shift_semitones == 0.0)
+        {
             0
         } else {
             crate::dsp::pitch_shift::latency_frames(sr as f32)
@@ -118,37 +137,68 @@ pub fn draw(ui: &mut egui::Ui, p: &mut AudioFxConfig, full: bool) {
             frames as f64 * 1000.0 / sr as f64,
             sr
         ));
-        theme::caption(ui,lang.choose("Pitch-effect dry and wet paths are aligned. Physical loopback calibration excludes this effect window; automatic inter-track delay compensation is not implemented.","此音高效果的内部干湿声已对齐。声卡回环测量不包含该窗口延迟；目前不自动补偿不同轨道间的效果延迟。"));
     }
     ui.spacing_mut().slider_width = if full {
         ui.available_width().min(500.0) * 0.55
     } else {
         ui.available_width().min(340.0) * 0.46
     };
+    if full
+        && matches!(
+            p.kind,
+            K::Transpose | K::Electric | K::Harmonist | K::Octave
+        )
+    {
+        navigation::register(ui.checkbox(
+            &mut p.preserve_formants,
+            lang.choose("Preserve formants", "保持共振峰"),
+        ));
+        if p.preserve_formants {
+            parameters::float(
+                ui,
+                &mut p.formant_shift_semitones,
+                -12.0,
+                12.0,
+                0.01,
+                lang.choose("Formant shift (st)", "共振峰偏移（半音）"),
+                false,
+            );
+        }
+    }
     match p.kind {
         K::Transpose => {
-            navigation::register(
-                ui.add(
-                    egui::Slider::new(&mut p.semitones, -12.0..=12.0)
-                        .step_by(1.0)
-                        .text(lang.choose("Semitones", "半音")),
-                ),
+            parameters::float(
+                ui,
+                &mut p.semitones,
+                -12.0,
+                12.0,
+                0.01,
+                lang.choose("Semitones", "半音"),
+                false,
             );
             if full {
                 pitch_lane(ui, p);
             }
             if full {
-                theme::caption(ui,lang.choose("Shifts existing audio without changing loop duration. A stereo phase vocoder uses a 2048-frame window at 48 kHz (about 43 ms). Transients can soften and formants are not preserved.","改变已有音频的音高，保持循环时长。立体声相位声码器在 48 kHz 下使用 2048 帧窗口（约 43 ms）；瞬态会变柔和，不保留原共振峰。"));
+                theme::caption(
+                    ui,
+                    lang.choose(
+                        "Pitch changes; loop length stays the same.",
+                        "移调不改变循环长度。",
+                    ),
+                );
             }
         }
         K::Electric => {
             key(ui, p);
-            navigation::register(
-                ui.add(
-                    egui::Slider::new(&mut p.semitones, -12.0..=12.0)
-                        .step_by(1.0)
-                        .text(lang.choose("Pitch shift", "移调（半音）")),
-                ),
+            parameters::float(
+                ui,
+                &mut p.semitones,
+                -12.0,
+                12.0,
+                0.01,
+                lang.choose("Semitones", "半音"),
+                false,
             );
             value(
                 ui,
@@ -169,7 +219,13 @@ pub fn draw(ui: &mut egui::Ui, p: &mut AudioFxConfig, full: bool) {
                     "音高稳定度",
                     false,
                 );
-                theme::caption(ui,lang.choose("Stepped vocal pitch correction: 0 ms retune creates a hard electric-vocal transition. Use one clear voice at a time. Unvoiced consonants pass through; this is not a polyphonic tuner or a formant-preserving vocal engine.","阶梯式人声校音：过渡为 0 ms 时产生明显电音跳阶。输入应为清晰的单声部人声；无音高的辅音保留原声，不适合多声部校音，目前不保留共振峰。"));
+                theme::caption(
+                    ui,
+                    lang.choose(
+                        "For a single voice. Set retune to 0 for hard pitch changes.",
+                        "适合单声部人声。过渡设为 0，音高跳转更明显。",
+                    ),
+                );
             }
         }
         K::Harmonist => {
@@ -221,7 +277,13 @@ pub fn draw(ui: &mut egui::Ui, p: &mut AudioFxConfig, full: bool) {
                     "过渡（ms）",
                     false,
                 );
-                theme::caption(ui,lang.choose("Intervals follow the selected scale, e.g. C major: C → E and D → F for +3. Monophonic detection; formants are not preserved. Chromatic selection uses major-scale harmony degrees.","和声随调式选择音程，例如 C 大调 +3：C → E，D → F。仅分析单声部输入，不保留共振峰；选择半音阶时，和声音程按大调音阶计算。"));
+                theme::caption(
+                    ui,
+                    lang.choose(
+                        "Single voice. In C major, +3 gives C → E and D → F.",
+                        "输入单声部。例如 C 大调 +3：C → E，D → F。",
+                    ),
+                );
             }
         }
         K::Octave => {
@@ -282,11 +344,29 @@ pub fn draw(ui: &mut egui::Ui, p: &mut AudioFxConfig, full: bool) {
                 "音色低通（Hz）",
                 true,
             );
-            if full {
-                theme::caption(ui,lang.choose("Three original clipping curves, interpolated 2× shaping, DC removal and a tone filter. These are not simulations of BOSS amplifier or distortion model names.","三种自研削波曲线，插值二倍整形、直流去除与音色滤波；不冒充 BOSS 的音箱或失真型号。"));
-            }
+            if full {}
         }
         K::Dynamics | K::Sustainer => {
+            if p.kind == K::Sustainer {
+                value(
+                    ui,
+                    &mut p.low_db,
+                    -20.0,
+                    20.0,
+                    "Low tone (dB)",
+                    "低音（dB）",
+                    false,
+                );
+                value(
+                    ui,
+                    &mut p.high_db,
+                    -20.0,
+                    20.0,
+                    "High tone (dB)",
+                    "高音（dB）",
+                    false,
+                );
+            }
             parameters::selector(
                 ui,
                 "dynamics-mode",
@@ -348,7 +428,6 @@ pub fn draw(ui: &mut egui::Ui, p: &mut AudioFxConfig, full: bool) {
                         false,
                     );
                 }
-                theme::caption(ui,lang.choose("Stereo-linked peak detector. Sustainer starts with deeper compression and makeup. Limiter is causal with an output ceiling, not a true-peak or lookahead mastering limiter.","左右声道联动的峰值检测。Sustainer 默认较深压缩与增益补偿。限幅采用无前瞻处理和输出上限，不是真峰值母带限幅器。"));
             }
         }
         K::Equalizer => {
@@ -369,8 +448,17 @@ pub fn draw(ui: &mut egui::Ui, p: &mut AudioFxConfig, full: bool) {
                 &mut p.mid_db,
                 -24.0,
                 24.0,
-                "Mid peak (dB)",
-                "中频峰值（dB）",
+                "Low mid (dB)",
+                "中低频（dB）",
+                false,
+            );
+            value(
+                ui,
+                &mut p.high_mid_db,
+                -24.0,
+                24.0,
+                "High mid (dB)",
+                "中高频（dB）",
                 false,
             );
             value(
@@ -395,13 +483,31 @@ pub fn draw(ui: &mut egui::Ui, p: &mut AudioFxConfig, full: bool) {
                 value(
                     ui,
                     &mut p.mid_hz,
-                    100.0,
+                    20.0,
                     12000.0,
-                    "Mid frequency (Hz)",
-                    "中频频率（Hz）",
+                    "Low mid frequency (Hz)",
+                    "中低频频率（Hz）",
                     true,
                 );
-                value(ui, &mut p.mid_q, 0.2, 12.0, "Mid Q", "中频 Q", true);
+                value(ui, &mut p.mid_q, 0.2, 16.0, "Low mid Q", "中低频 Q", true);
+                value(
+                    ui,
+                    &mut p.high_mid_hz,
+                    20.0,
+                    12000.0,
+                    "High mid frequency (Hz)",
+                    "中高频频率（Hz）",
+                    true,
+                );
+                value(
+                    ui,
+                    &mut p.high_mid_q,
+                    0.2,
+                    16.0,
+                    "High mid Q",
+                    "中高频 Q",
+                    true,
+                );
                 value(
                     ui,
                     &mut p.high_hz,
@@ -428,16 +534,148 @@ pub fn draw(ui: &mut egui::Ui, p: &mut AudioFxConfig, full: bool) {
                 &mut p.width,
                 0.0,
                 2.0,
-                "Width (0 mono, 1 original)",
-                "宽度（0 单声道、1 原声）",
+                "Width (0 = mono)",
+                "宽度（0 单声道）",
                 false,
             );
+            navigation::register(ui.checkbox(
+                &mut p.enhance_mono,
+                lang.choose("Widen mono sources", "拓宽单声道"),
+            ));
+            ui.add_enabled_ui(p.enhance_mono, |ui| {
+                value(
+                    ui,
+                    &mut p.enhance_amount,
+                    0.0,
+                    1.0,
+                    "Enhance",
+                    "拓宽强度",
+                    false,
+                );
+            });
             if full {
-                theme::caption(ui,lang.choose("Mid/side width control preserves the mono sum. It does not synthesize stereo from mono.","中侧声道宽度控制，保持合并单声道后的原始内容，不为单声道凭空生成空间。"));
+                value(
+                    ui,
+                    &mut p.enhance_low_cut_hz,
+                    0.0,
+                    12500.0,
+                    "Side low cut (Hz; 0 = off)",
+                    "侧声道低切（Hz；0 关闭）",
+                    true,
+                );
+                value(
+                    ui,
+                    &mut p.enhance_high_cut_hz,
+                    0.0,
+                    12500.0,
+                    "Side high cut (Hz; 0 = off)",
+                    "侧声道高切（Hz；0 关闭）",
+                    true,
+                );
+                theme::caption(
+                    ui,
+                    lang.choose(
+                        "Adds width mainly above the bass range.",
+                        "主要拓宽中高频，保留低音。",
+                    ),
+                );
             }
         }
         K::AutoPan | K::Tremolo | K::Vibrato | K::Phaser | K::Flanger | K::Chorus => {
             rate(ui, p);
+            if full && matches!(p.kind, K::AutoPan | K::Tremolo) {
+                value(
+                    ui,
+                    &mut p.mod_shape,
+                    0.0,
+                    1.0,
+                    "Wave sharpness",
+                    "波形尖锐度",
+                    false,
+                );
+                value(
+                    ui,
+                    &mut p.mod_phase_degrees,
+                    0.0,
+                    180.0,
+                    "Phase (degrees)",
+                    "相位（度）",
+                    false,
+                );
+                navigation::register(ui.checkbox(
+                    &mut p.mod_retrigger,
+                    lang.choose("Restart on enable", "开启时重置相位"),
+                ));
+            }
+            if full && matches!(p.kind, K::AutoPan | K::Tremolo | K::Phaser | K::Flanger) {
+                navigation::register(ui.checkbox(
+                    &mut p.mod_stepped,
+                    lang.choose("Stepped modulation", "阶梯调制"),
+                ));
+                ui.add_enabled_ui(p.mod_stepped, |ui| {
+                    parameters::selector(
+                        ui,
+                        "mod-step-time",
+                        &mut p.mod_step_beats,
+                        &[
+                            (0.0, lang.choose("Step rate (Hz)", "阶梯速度（Hz）")),
+                            (0.0625, "1/64"),
+                            (0.125, "1/32"),
+                            (0.25, "1/16"),
+                            (0.5, "1/8"),
+                            (1.0, "1/4"),
+                            (2.0, "1/2"),
+                            (4.0, lang.choose("1 bar", "1 小节")),
+                            (8.0, lang.choose("2 bars", "2 小节")),
+                            (16.0, lang.choose("4 bars", "4 小节")),
+                        ],
+                    );
+                    if p.mod_step_beats == 0.0 {
+                        value(
+                            ui,
+                            &mut p.mod_step_hz,
+                            0.1,
+                            100.0,
+                            "Step rate (Hz)",
+                            "阶梯速度（Hz）",
+                            true,
+                        );
+                    }
+                });
+            }
+            if p.kind == K::Phaser {
+                parameters::selector(
+                    ui,
+                    "phaser-stages",
+                    &mut p.phaser_stages,
+                    &[
+                        (4, lang.choose("4 stages", "4 级")),
+                        (6, lang.choose("6 stages (legacy)", "6 级（旧版）")),
+                        (8, lang.choose("8 stages", "8 级")),
+                        (12, lang.choose("12 stages", "12 级")),
+                    ],
+                );
+                value(
+                    ui,
+                    &mut p.phaser_manual,
+                    0.0,
+                    1.0,
+                    "Sweep center",
+                    "扫频中心",
+                    false,
+                );
+            }
+            if p.kind == K::Flanger {
+                value(
+                    ui,
+                    &mut p.flanger_manual,
+                    0.0,
+                    1.0,
+                    "Sweep center",
+                    "扫频中心",
+                    false,
+                );
+            }
             if matches!(p.kind, K::Phaser | K::Flanger) {
                 value(ui, &mut p.feedback, 0.0, 0.85, "Feedback", "反馈", false);
             }
@@ -452,8 +690,25 @@ pub fn draw(ui: &mut egui::Ui, p: &mut AudioFxConfig, full: bool) {
                     false,
                 );
             }
-            if full {
-                theme::caption(ui,lang.choose("Free mode runs at the chosen Hz rate. Synced mode follows the performance sample clock; modulation continues freely while transport is stopped.","自由模式按 Hz 运行；同步模式跟随演出采样时钟。演出停止时调制仍按对应速度自由运行。"));
+            if full && p.kind == K::Chorus {
+                value(
+                    ui,
+                    &mut p.chorus_low_cut_hz,
+                    0.0,
+                    12500.0,
+                    "Wet low cut (Hz; 0 = off)",
+                    "湿声低切（Hz；0 关闭）",
+                    true,
+                );
+                value(
+                    ui,
+                    &mut p.chorus_high_cut_hz,
+                    0.0,
+                    12500.0,
+                    "Wet high cut (Hz; 0 = off)",
+                    "湿声高切（Hz；0 关闭）",
+                    true,
+                );
             }
         }
         K::PanningDelay | K::Delay => {
@@ -478,8 +733,8 @@ pub fn draw(ui: &mut egui::Ui, p: &mut AudioFxConfig, full: bool) {
                     &mut p.time_ms,
                     1.0,
                     2000.0,
-                    "Delay time (ms)",
-                    "延迟时间（ms）",
+                    "Time (ms)",
+                    "时间（毫秒）",
                     true,
                 );
             } else {
@@ -506,14 +761,15 @@ pub fn draw(ui: &mut egui::Ui, p: &mut AudioFxConfig, full: bool) {
                     ));
                 }
             }
-            navigation::register(
-                ui.add(
-                    egui::Slider::new(&mut p.feedback_repeats, 0..=16)
-                        .text(lang.choose("Repeats (0 = manual)", "重复次数（0 手动反馈）")),
-                ),
+            parameters::integer(
+                ui,
+                &mut p.feedback_repeats,
+                0,
+                16,
+                lang.choose("Repeats (0 = manual)", "次数（0 手动）"),
             );
             if p.feedback_repeats == 0 {
-                value(ui, &mut p.feedback, 0.0, 0.95, "Feedback", "反馈", false);
+                value(ui, &mut p.feedback, 0.0, 1.0, "Feedback", "反馈", false);
             }
             value(
                 ui,
@@ -563,7 +819,13 @@ pub fn draw(ui: &mut egui::Ui, p: &mut AudioFxConfig, full: bool) {
                     "反馈低切（Hz；0 直通）",
                     true,
                 );
-                theme::caption(ui,lang.choose("Repeat count maps feedback to -60 dB after the selected number of echoes; manual mode exposes the coefficient. This decay mapping is not a measured BOSS law.","重复次数将反馈映射为对应次数后降至 -60 dB；手动模式直接设置系数。此衰减映射不是实测的 BOSS 曲线。"));
+                theme::caption(
+                    ui,
+                    lang.choose(
+                        "Repeats 0: manual feedback · Cutoff 0: off",
+                        "次数 0：手动反馈 · 切频 0：关闭",
+                    ),
+                );
                 if p.kind == K::PanningDelay {
                     value(
                         ui,
@@ -574,11 +836,51 @@ pub fn draw(ui: &mut egui::Ui, p: &mut AudioFxConfig, full: bool) {
                         "立体声宽度",
                         false,
                     );
-                    theme::caption(ui,lang.choose("The left echo arrives at Time × Ratio; the right echo arrives at Time. Later echoes circulate through crossed feedback. This is a stereo multi-tap interpretation of Panning Delay, not a verified BOSS feedback topology.","左侧回声出现在「时间 × 比例」，右侧出现在「时间」，随后交叉反馈循环。这是立体声多抽头的实现，BOSS 的具体内部反馈结构尚未实机核验。"));
+                    theme::caption(
+                        ui,
+                        lang.choose(
+                            "Left: Time × Ratio · Right: Time",
+                            "左声道：时间 × 比例 · 右声道：时间",
+                        ),
+                    );
                 }
             }
         }
         K::StepSlicer => {
+            value(
+                ui,
+                &mut p.slicer_duty,
+                0.01,
+                1.0,
+                "Step length",
+                "每步发声长度",
+                false,
+            );
+            if full {
+                navigation::register(
+                    ui.checkbox(&mut p.slicer_compress, lang.choose("Compression", "压缩")),
+                );
+                ui.add_enabled_ui(p.slicer_compress, |ui| {
+                    value(
+                        ui,
+                        &mut p.threshold_db,
+                        -60.0,
+                        0.0,
+                        "Threshold (dB)",
+                        "阈值（dB）",
+                        false,
+                    );
+                    value(
+                        ui,
+                        &mut p.makeup_db,
+                        0.0,
+                        24.0,
+                        "Makeup (dB)",
+                        "增益补偿（dB）",
+                        false,
+                    );
+                });
+            }
             rate(ui, p);
             if full {
                 navigation::register(ui.add(
@@ -660,7 +962,13 @@ pub fn draw(ui: &mut egui::Ui, p: &mut AudioFxConfig, full: bool) {
                 );
             }
             if full {
-                theme::caption(ui,lang.choose("Holds a 90 ms input texture with overlapping, complementary windows. Turn Hold off to capture a fresh texture. This granular sustain is not a spectral freeze or a beat-synced Roll.","用重叠互补窗延续最近约 90 ms 的声音纹理。取消保持后可捕获新声音；这是颗粒式延音，不是频谱冻结，也不按节拍细分。"));
+                theme::caption(
+                    ui,
+                    lang.choose(
+                        "Hold the current sound; release to capture again.",
+                        "保持当前声音；松开后重新取样。",
+                    ),
+                );
             }
         }
         K::Reverb => {
@@ -746,12 +1054,13 @@ fn eq_graph(ui: &mut egui::Ui, p: &mut AudioFxConfig) {
     let nodes = [
         to_pos(p.low_hz, p.low_db),
         to_pos(p.mid_hz, p.mid_db),
+        to_pos(p.high_mid_hz, p.high_mid_db),
         to_pos(p.high_hz, p.high_db),
     ];
     let id = response.id.with("drag-band");
     if response.drag_started() || response.clicked() {
         if let Some(pos) = response.interact_pointer_pos() {
-            let i = (0..3)
+            let i = (0..4)
                 .min_by(|a, b| {
                     nodes[*a]
                         .distance_sq(pos)
@@ -774,8 +1083,12 @@ fn eq_graph(ui: &mut egui::Ui, p: &mut AudioFxConfig) {
                 p.low_db = db;
             }
             1 => {
-                p.mid_hz = hz.clamp(100.0, 12000.0);
+                p.mid_hz = hz.clamp(20.0, 12000.0);
                 p.mid_db = db;
+            }
+            2 => {
+                p.high_mid_hz = hz.clamp(20.0, 12000.0);
+                p.high_mid_db = db;
             }
             _ => {
                 p.high_hz = hz.clamp(1000.0, 18000.0);
@@ -793,6 +1106,7 @@ fn eq_graph(ui: &mut egui::Ui, p: &mut AudioFxConfig) {
     let coeff = [
         crate::dsp::biquad::shelf(48000.0, p.low_hz, p.low_db, false),
         crate::dsp::biquad::peak(48000.0, p.mid_hz, p.mid_q, p.mid_db),
+        crate::dsp::biquad::peak(48000.0, p.high_mid_hz, p.high_mid_q, p.high_mid_db),
         crate::dsp::biquad::shelf(48000.0, p.high_hz, p.high_db, true),
     ];
     let points = (0..256)
@@ -852,20 +1166,17 @@ pub fn track_vocoder(
     if full {
         parameters::number(ui, &mut v.attack_ms, 0, VOCODER_ATTACK_MAX_MS, false);
         parameters::number(ui, &mut v.release_ms, 0, VOCODER_RELEASE_MAX_MS, false);
-        navigation::register(
-            ui.add(egui::Slider::new(&mut v.tone, -50..=50).text(lang.text("Tone"))),
-        );
-        navigation::register(
-            ui.add(egui::Slider::new(&mut v.mod_sens, -50..=50).text(lang.text("Mod sensitivity"))),
-        );
-        navigation::register(
-            ui.add(
-                egui::Slider::new(&mut v.formant_semitones, -12..=12)
-                    .text(lang.text("Formant (semitones)")),
-            ),
+        parameters::integer(ui, &mut v.tone, -50, 50, lang.text("Tone"));
+        parameters::integer(ui, &mut v.mod_sens, -50, 50, lang.text("Mod sensitivity"));
+        parameters::integer(
+            ui,
+            &mut v.formant_semitones,
+            -12,
+            12,
+            lang.text("Formant (semitones)"),
         );
         parameters::number(ui, &mut v.sibilance, 0, 100, false);
-        theme::caption(ui,lang.choose("This track supplies the voice/modulator. The carrier comes from live input or a pre-FX track snapshot shared by all tracks, so track order cannot create feedback. An empty carrier produces silence at 100% wet. Live carrier monitoring is controlled by Input Thru.","当前轨道作为人声／调制信号。载波来自实时输入或所有轨道共享的 FX 前快照，不随轨道处理顺序形成反馈。载波为空时，100% 湿声静音。实时输入载波是否直接监听由 Input Thru 控制。"));
+        theme::caption(ui,lang.choose("This track supplies the voice; the carrier supplies its tone. No carrier means no wet sound.","轨道提供人声，载波提供音色。载波为空时没有湿声。"));
     }
 }
 
@@ -902,18 +1213,56 @@ pub fn draw_master(ctx: &egui::Context, app: &mut crate::app::MyApp) {
     let config = &mut app.config.master_fx;
     let lang = app.language;
     let id = egui::Id::new("master-fx-window");
-    egui::Window::new(lang.choose("Master effects","主输出效果"))
-        .id(id).open(&mut open).default_size(egui::vec2(740.0,680.0)).resizable(true).show(ctx,|ui| {
-            navigation::begin(ui,crate::app::Focus::Editor,ui.memory(|m|m.focused().is_none()));
-            let page_id=id.with("page");let mut page=ui.ctx().data(|d|d.get_temp::<bool>(page_id)).unwrap_or(false);
+    egui::Window::new(lang.choose("Master effects", "主输出效果"))
+        .id(id)
+        .open(&mut open)
+        .default_size(egui::vec2(740.0, 680.0))
+        .resizable(true)
+        .show(ctx, |ui| {
+            navigation::begin(
+                ui,
+                crate::app::Focus::Editor,
+                ui.memory(|m| m.focused().is_none()),
+            );
+            let page_id = id.with("page");
+            let mut page = ui
+                .ctx()
+                .data(|d| d.get_temp::<bool>(page_id))
+                .unwrap_or(false);
             ui.horizontal(|ui| {
-                navigation::register(ui.selectable_value(&mut page,false,lang.choose("Compressor / limiter / gate","压缩／限幅／噪声门")));
-                navigation::register(ui.selectable_value(&mut page,true,lang.choose("Reverb","混响")));
-            });ui.ctx().data_mut(|d|d.insert_temp(page_id,page));ui.separator();
-            egui::ScrollArea::vertical().show(ui,|ui| {
-                if page {navigation::register(ui.checkbox(&mut config.reverb_enabled,lang.choose("Enabled","启用")));draw(ui,&mut config.reverb,true);}
-                else {navigation::register(ui.checkbox(&mut config.compressor_enabled,lang.choose("Enabled","启用")));draw(ui,&mut config.compressor,true);}
-                theme::caption(ui,lang.choose("Master processing affects the heard mix and replay export. Track recordings stay unaffected. The monitor-only metronome is added after this bus.","主输出效果作用于听到的混音与回放导出，不写入各轨录音。仅监听的节拍器在主输出处理之后加入。"));
+                navigation::register(ui.selectable_value(
+                    &mut page,
+                    false,
+                    lang.choose("Compressor / limiter / gate", "压缩／限幅／噪声门"),
+                ));
+                navigation::register(ui.selectable_value(
+                    &mut page,
+                    true,
+                    lang.choose("Reverb", "混响"),
+                ));
+            });
+            ui.ctx().data_mut(|d| d.insert_temp(page_id, page));
+            ui.separator();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                if page {
+                    navigation::register(
+                        ui.checkbox(&mut config.reverb_enabled, lang.choose("Enabled", "启用")),
+                    );
+                    draw(ui, &mut config.reverb, true);
+                } else {
+                    navigation::register(ui.checkbox(
+                        &mut config.compressor_enabled,
+                        lang.choose("Enabled", "启用"),
+                    ));
+                    draw(ui, &mut config.compressor, true);
+                }
+                theme::caption(
+                    ui,
+                    lang.choose(
+                        "Affects the output mix, not track recordings.",
+                        "作用于总输出，不录进轨道。",
+                    ),
+                );
             });
             navigation::end(ui);
         });
@@ -1017,5 +1366,8 @@ fn pitch_lane(ui: &mut egui::Ui, p: &mut AudioFxConfig) {
             theme::MUTED,
         );
     }
-    theme::caption(ui,lang.choose("Draw relative semitones from −12 to +12. The running transport replaces the base Semitones value with each step; stopped transport uses the base value. The lane processes existing audio and produces no sound on its own.","拖画 −12 至 +12 半音。演出运行时每步替代基础移调值；停止时使用基础值。此序列只处理已有音频，不自行发声。"));
+    theme::caption(
+        ui,
+        lang.choose("Drag to set each step's pitch.", "拖动设置每步半音。"),
+    );
 }

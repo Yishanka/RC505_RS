@@ -18,6 +18,12 @@ pub struct RollDspState {
     anchor: usize,
     phase: usize,
     length: usize,
+    base_length: usize,
+    capture_end: usize,
+    last_wet: [f32; 2],
+    transition_from: [f32; 2],
+    transition_left: usize,
+    transition_length: usize,
     cycles: usize,
     was_enabled: bool,
     frozen: bool,
@@ -47,6 +53,9 @@ impl RollDspState {
         self.mix = 0.0;
         self.filled = 0;
         self.feedback_key = None;
+        self.base_length = 0;
+        self.transition_left = 0;
+        self.last_wet = [0.0; 2];
     }
 }
 pub fn process_frame(
@@ -63,30 +72,42 @@ pub fn process_frame(
         1 | 2 | 4 | 8 | 16 => p.step,
         _ => 4,
     };
-    let length = (p.time_ms.clamp(1.0, 2000.0) * 0.001 * state.sample_rate / step as f32)
-        .round()
-        .max(1.0) as usize;
-    let length = length.min(state.buffer.len());
-    if enabled && state.was_enabled && state.frozen && state.length != length {
-        // A different slice length needs fresh material, not stale frozen history.
+    let base_samples = p.time_ms.clamp(1.0, 2000.0) * 0.001 * state.sample_rate;
+    let base_length = (base_samples.round().max(1.0) as usize).min(state.buffer.len());
+    let length = ((base_samples / step as f32).round().max(1.0) as usize).min(base_length);
+    if enabled && state.was_enabled && state.frozen && state.base_length != base_length {
+        // Changing the base TIME requests a new capture. Division changes only
+        // reinterpret the already frozen base window and never record new input.
         state.frozen = false;
         state.filled = 0;
         state.mix = 0.0;
+        state.transition_left = 0;
     }
-    if !enabled || (!state.frozen && state.filled < length) {
+    if !enabled || (!state.frozen && state.filled < base_length) {
         state.buffer[state.write] = [input_l, input_r];
         state.write = (state.write + 1) % state.buffer.len();
         state.filled = (state.filled + 1).min(state.buffer.len());
     }
-    if enabled
-        && (!state.was_enabled || state.length != length || !state.frozen)
-        && state.filled >= length
-    {
-        state.anchor = (state.write + state.buffer.len() - length) % state.buffer.len();
+    if enabled && (!state.was_enabled || !state.frozen) && state.filled >= base_length {
+        state.capture_end = state.write;
+        state.base_length = base_length;
+        state.anchor = (state.capture_end + state.buffer.len() - length) % state.buffer.len();
         state.length = length;
         state.phase = 0;
         state.cycles = 0;
         state.frozen = true;
+        state.transition_left = 0;
+        state.feedback_key = None;
+    } else if enabled && state.frozen && state.length != length {
+        state.transition_from = state.last_wet;
+        state.transition_length = ((state.sample_rate * 0.002).round() as usize).min(length / 2);
+        state.transition_left = state.transition_length;
+        state.phase = ((state.phase as u64 * length as u64) / state.length.max(1) as u64) as usize;
+        state.phase = state.phase.min(length - 1);
+        state.anchor = (state.capture_end + state.buffer.len() - length) % state.buffer.len();
+        state.length = length;
+        state.cycles = 0;
+        state.feedback_key = None;
     }
     let feedback = p.feedback.clamp(0.0, 1.0);
     let gain = if step == 1 && p.mode == RollMode::Roll1 {
@@ -126,11 +147,20 @@ pub fn process_frame(
                 tail[1] * (1.0 - t) + wet[1] * t,
             ];
         }
+        if state.transition_left > 0 {
+            let blend = 1.0 - state.transition_left as f32 / state.transition_length.max(1) as f32;
+            wet = [
+                state.transition_from[0] + (wet[0] - state.transition_from[0]) * blend,
+                state.transition_from[1] + (wet[1] - state.transition_from[1]) * blend,
+            ];
+            state.transition_left -= 1;
+        }
         state.phase = (phase + 1) % state.length;
         if state.phase == 0 {
             state.cycles = state.cycles.saturating_add(1);
         }
     }
+    state.last_wet = wet;
     state.was_enabled = enabled;
     if !enabled && state.mix < 1e-5 {
         state.frozen = false;
@@ -230,5 +260,52 @@ mod tests {
             }
         });
         assert_eq!(allocations, 0);
+    }
+    #[test]
+    fn division_changes_reuse_the_frozen_base_instead_of_recording_new_audio() {
+        let mut state = RollDspState::new();
+        state.prepare(1000.0);
+        let mut p = params();
+        for n in 0..200 {
+            let x = if n < 150 { 0.2 } else { 0.6 };
+            process_frame(&mut state, p, false, x, -x);
+        }
+        for _ in 0..2000 {
+            process_frame(&mut state, p, true, -0.8, 0.8);
+        }
+        let capture_end = state.capture_end;
+        let filled = state.filled;
+        for division in [8, 2, 16, 1, 4] {
+            p.step = division;
+            for _ in 0..220 {
+                let (l, r) = process_frame(&mut state, p, true, -0.8, 0.8);
+                assert!(l > 0.19 && l < 0.61, "Division recaptured new input: {l}");
+                assert!((l + r).abs() < 1e-6);
+            }
+            assert!(state.frozen);
+            assert_eq!(state.capture_end, capture_end);
+            assert_eq!(state.filled, filled);
+            assert_eq!(state.base_length, 200);
+        }
+    }
+    #[test]
+    fn rapid_division_changes_are_bounded_and_allocation_free() {
+        let mut state = RollDspState::new();
+        state.prepare(48000.0);
+        let mut p = params();
+        for n in 0..12000 {
+            let x = (n as f32 * 0.07).sin() * 0.2;
+            process_frame(&mut state, p, false, x, -x);
+        }
+        let count = crate::test_alloc::count(|| {
+            for n in 0..24000 {
+                if n % 31 == 0 {
+                    p.step = [1, 2, 4, 8, 16][(n / 31) % 5];
+                }
+                let (l, r) = process_frame(&mut state, p, true, 0.7, -0.7);
+                assert!(l.is_finite() && r.is_finite() && l.abs() <= 1.0 && r.abs() <= 1.0);
+            }
+        });
+        assert_eq!(count, 0);
     }
 }

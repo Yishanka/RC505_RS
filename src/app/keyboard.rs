@@ -34,37 +34,26 @@ impl MyApp {
     }
     pub(super) fn handle_input(&mut self, ctx: &egui::Context) {
         let mut input = ctx.input(Clone::clone);
+        if !self.master_fx_open {
+            if let Some(scope) = ui::navigation::focused_scope(ctx) {
+                self.focus = scope;
+            }
+        }
         let text = ctx.wants_keyboard_input();
-        let typing = ctx
-            .memory(|m| m.focused())
-            .is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some());
+        let pending_text = ui::parameters::take_pending_text(ctx);
+        let typing = pending_text
+            || ctx
+                .memory(|m| m.focused())
+                .is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some());
         if !typing {
             // egui treats repeated Enter/Space as another widget click. Keep
             // first activation and held state, without repeatedly toggling.
             remove_button_repeat(&mut input);
             ctx.input_mut(remove_button_repeat);
         }
-        let local_editor_key = self.editor.expanded
-            && input.events.iter().any(|event| {
-                matches!(
-                    event,
-                    egui::Event::Key {
-                        key: Key::Delete,
-                        pressed: true,
-                        ..
-                    } | egui::Event::Key {
-                        key: Key::Z | Key::Y,
-                        pressed: true,
-                        modifiers: egui::Modifiers { ctrl: true, .. },
-                        ..
-                    }
-                )
-            });
-        let global_keys = !typing
-            && !local_editor_key
-            && !self.player_open
-            && !self.replay_browser
-            && !self.master_fx_open;
+        let global_keys = !typing && !self.player_open && !self.replay_browser;
+        let editing_controls =
+            self.editor.expanded || self.master_fx_open || self.focus != Focus::Performance;
         let popup_open = ctx.memory(|m| m.any_popup_open());
         if self.shortcut_editor.open && !self.show_save_prompt {
             let capturing = self.shortcut_editor.capture.is_some();
@@ -94,15 +83,12 @@ impl MyApp {
         }
         let performance = input.focused
             && !typing
-            && !self.master_fx_open
             && !popup_open
-            && !self.editor.expanded
             && !self.calibration_open
             && !self.help_open
             && !self.player_open
             && !self.replay_browser
             && self.draft.is_none()
-            && self.focus == Focus::Performance
             && self.app_state == AppState::MainLoop
             && !self.show_save_prompt
             && !self.performance_locked();
@@ -111,8 +97,13 @@ impl MyApp {
         } else {
             self.performance_keys.suspend();
         }
+        let performance_input = scoped_performance_input(&input, &self.shortcuts, editing_controls);
         for index in 0..8 {
-            if !performance || !self.shortcuts.held(Command::HoldFx(index), &input) {
+            if !performance
+                || !self
+                    .shortcuts
+                    .held(Command::HoldFx(index), &performance_input)
+            {
                 self.release_momentary(index);
             }
         }
@@ -163,8 +154,23 @@ impl MyApp {
             return;
         }
         if self.master_fx_open {
-            if pressed(&input, Key::Escape) {
+            if !typing && pressed(&input, Key::Escape) {
                 self.master_fx_open = false;
+            } else if !typing {
+                let parameter = ui::navigation::parameter_focused(ctx);
+                if !input.modifiers.ctrl && !input.modifiers.alt && !popup_open {
+                    let next = input.key_pressed(Key::Tab) && !input.modifiers.shift
+                        || !parameter && input.key_pressed(Key::ArrowDown);
+                    let previous = input.key_pressed(Key::Tab) && input.modifiers.shift
+                        || !parameter && input.key_pressed(Key::ArrowUp);
+                    if next || previous {
+                        consume_navigation_keys(ctx);
+                        ui::navigation::advance(ctx, Focus::Editor, if next { 1 } else { -1 });
+                    }
+                }
+                if performance {
+                    self.handle_performance_commands(ctx, &performance_input, true);
+                }
             }
             return;
         }
@@ -231,6 +237,29 @@ impl MyApp {
             }
             return;
         }
+        // Numeric/text entry owns Escape, digits and editing shortcuts until it
+        // commits or loses focus; the sound engine continues independently.
+        if typing {
+            if pressed(&input, Key::Escape)
+                && !ctx.memory(|m| m.focused()).is_some_and(|id| {
+                    ctx.data(|d| {
+                        d.get_temp::<bool>(id.with("numeric-entry"))
+                            .unwrap_or(false)
+                    })
+                })
+            {
+                ctx.memory_mut(|m| m.stop_text_input());
+            }
+            if !input.modifiers.ctrl && !input.modifiers.alt && input.key_pressed(Key::Tab) {
+                consume_navigation_keys(ctx);
+                ui::navigation::advance(
+                    ctx,
+                    self.focus,
+                    if input.modifiers.shift { -1 } else { 1 },
+                );
+            }
+            return;
+        }
         if self.performance_locked() {
             return;
         }
@@ -293,22 +322,31 @@ impl MyApp {
             let editing = ctx
                 .memory(|m| m.focused())
                 .is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some());
+            let parameter = ui::navigation::parameter_focused(ctx);
             let next = no_command
-                && ((!editing && input.key_pressed(Key::ArrowDown))
+                && ((!editing && !parameter && input.key_pressed(Key::ArrowDown))
                     || input.key_pressed(Key::Tab) && !input.modifiers.shift);
             let previous = no_command
-                && ((!editing && input.key_pressed(Key::ArrowUp))
+                && ((!editing && !parameter && input.key_pressed(Key::ArrowUp))
                     || input.key_pressed(Key::Tab) && input.modifiers.shift);
             if next || previous {
                 consume_navigation_keys(ctx);
                 ui::navigation::advance(ctx, self.focus, if next { 1 } else { -1 });
             }
-            return;
         }
         if !performance {
             return;
         }
-        consume_performance_keys(ctx, &self.shortcuts);
+        self.handle_performance_commands(ctx, &performance_input, editing_controls);
+    }
+
+    fn handle_performance_commands(
+        &mut self,
+        ctx: &egui::Context,
+        input: &egui::InputState,
+        editing_controls: bool,
+    ) {
+        consume_performance_keys(ctx, &self.shortcuts, editing_controls);
         // Commit Tap before every transport action in this input batch; action()
         // then sends the resulting Config before sending Start to the callback.
         if self.shortcuts.pressed(Command::Tap, &input) && self.tempo_edit_allowed() {
@@ -321,7 +359,7 @@ impl MyApp {
         let changing_track = is_pressed(Command::PreviousTrack)
             || is_pressed(Command::NextTrack)
             || (0..5).any(|i| is_pressed(Command::Select(i)));
-        if !changing_track && !input.pointer.any_pressed() {
+        if !editing_controls && !changing_track && !input.pointer.any_pressed() {
             if self
                 .clear_gesture
                 .update(selected, clear_held, clear, input.time)
@@ -386,7 +424,14 @@ impl MyApp {
                 } else {
                     FxTarget::Input { bank, slot }
                 });
-                self.focus_panel(ctx, Focus::Right);
+                self.focus_panel(
+                    ctx,
+                    if self.editor.expanded {
+                        Focus::Editor
+                    } else {
+                        Focus::Right
+                    },
+                );
             }
             if self.shortcuts.pressed(Command::Bank(index), &input) {
                 if track.is_some() {
@@ -437,7 +482,69 @@ impl MyApp {
     }
 }
 
-fn consume_performance_keys(ctx: &egui::Context, bindings: &shortcuts::Bindings) {
+fn available_during_edit(command: Command, key: Key, modifiers: egui::Modifiers) -> bool {
+    !matches!(
+        command,
+        Command::Clear
+            | Command::Select(_)
+            | Command::PreviousTrack
+            | Command::NextTrack
+            | Command::UndoSelected
+            | Command::RedoSelected
+    ) && !matches!(
+        key,
+        Key::ArrowLeft
+            | Key::ArrowRight
+            | Key::ArrowUp
+            | Key::ArrowDown
+            | Key::Delete
+            | Key::Tab
+            | Key::Enter
+            | Key::Escape
+    ) && !(modifiers.ctrl
+        && matches!(
+            key,
+            Key::A | Key::C | Key::V | Key::X | Key::D | Key::Z | Key::Y
+        ))
+}
+fn bound_for_performance(
+    bindings: &shortcuts::Bindings,
+    editing: bool,
+    key: Key,
+    modifiers: egui::Modifiers,
+) -> bool {
+    bindings.entries().iter().any(|definition| {
+        (!editing || available_during_edit(definition.command, key, modifiers))
+            && bindings.chords(definition).iter().any(|chord| {
+                Key::from_name(&chord.key) == Some(key)
+                    && chord.ctrl == modifiers.ctrl
+                    && chord.alt == modifiers.alt
+                    && chord.shift == modifiers.shift
+                    && !modifiers.mac_cmd
+            })
+    })
+}
+fn scoped_performance_input(
+    input: &egui::InputState,
+    bindings: &shortcuts::Bindings,
+    editing: bool,
+) -> egui::InputState {
+    let mut result = input.clone();
+    result.events.retain(|event| match event {
+        egui::Event::Key {
+            key,
+            physical_key,
+            modifiers,
+            ..
+        } => bound_for_performance(bindings, editing, physical_key.unwrap_or(*key), *modifiers),
+        _ => false,
+    });
+    result
+        .keys_down
+        .retain(|key| bound_for_performance(bindings, editing, *key, input.modifiers));
+    result
+}
+fn consume_performance_keys(ctx: &egui::Context, bindings: &shortcuts::Bindings, editing: bool) {
     ctx.input_mut(|input| {
         let bound = |event: &egui::Event| {
             let egui::Event::Key {
@@ -450,15 +557,7 @@ fn consume_performance_keys(ctx: &egui::Context, bindings: &shortcuts::Bindings)
                 return false;
             };
             let key = physical_key.unwrap_or(*key);
-            bindings.entries().iter().any(|definition| {
-                bindings.chords(definition).iter().any(|chord| {
-                    Key::from_name(&chord.key) == Some(key)
-                        && chord.ctrl == modifiers.ctrl
-                        && chord.alt == modifiers.alt
-                        && chord.shift == modifiers.shift
-                        && !modifiers.mac_cmd
-                })
-            })
+            bound_for_performance(bindings, editing, key, *modifiers)
         };
         let consumed_text = input
             .events

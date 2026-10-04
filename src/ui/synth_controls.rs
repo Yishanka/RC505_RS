@@ -18,6 +18,37 @@ pub fn sound(ui: &mut egui::Ui, osc: &mut OscillatorConfigs, full: bool) {
             selectable_value(ui, &mut osc.voices, count, lang.choose(en, cn));
         }
     });
+    if full || osc.voices == 1 {
+        ui.add_enabled_ui(osc.voices == 1, |ui| {
+            checkbox(ui, &mut osc.mono_legato, lang.choose("Legato", "连奏"));
+            parameters::float(
+                ui,
+                &mut osc.glide_ms,
+                0.0,
+                2000.0,
+                0.1,
+                lang.choose("Glide (ms)", "滑音（ms）"),
+                true,
+            );
+            if osc.glide_ms > 0.0 {
+                parameters::selector(
+                    ui,
+                    "glide_mode",
+                    &mut osc.glide_mode,
+                    &[
+                        (
+                            GlideMode::Overlap,
+                            lang.choose("Overlapping notes", "重叠音符"),
+                        ),
+                        (GlideMode::AllNotes, lang.choose("All notes", "所有音符")),
+                    ],
+                );
+            }
+        });
+        if full {
+            theme::caption(ui,lang.choose("Legato keeps envelopes and LFO phase. Glide connects pitches over the chosen time.","连奏保持包络与 LFO 相位；滑音按设定时长连接音高。"));
+        }
+    }
     checkbox(
         ui,
         &mut osc.input_gate,
@@ -38,14 +69,30 @@ pub fn sound(ui: &mut egui::Ui, osc: &mut OscillatorConfigs, full: bool) {
         }
         return;
     }
-    theme::caption(ui,lang.choose("Sound presets keep your phrase. The piano roll sends independent notes; Mono retains chords for later polyphonic playback.","切换音色保留乐句。卷帘发送独立音符；单音模式仍保留和弦，切回复音即可演奏。"));
+    theme::caption(
+        ui,
+        lang.choose(
+            "Changing the sound keeps your phrase. Mono preserves chord notes.",
+            "换音色不改乐句；单音模式保留和弦。",
+        ),
+    );
     if osc.waveform.value == Waveform::Vocal {
-        add(
+        parameters::float(
             ui,
-            egui::Slider::new(&mut osc.vocal_formant, 0.0..=1.0)
-                .text(lang.choose("Vowel A → I", "元音 A → I")),
+            &mut osc.vocal_formant,
+            0.0,
+            1.0,
+            0.01,
+            lang.choose("Vowel A → I", "元音 A → I"),
+            false,
         );
-        theme::caption(ui,lang.choose("Synthetic harmonic vowel wave; this is a voice-like oscillator, not a vocal recording.","合成的元音谐波波形，用于人声质感音色。"));
+        theme::caption(
+            ui,
+            lang.choose(
+                "Drag to move between A and I vowels.",
+                "拖动参数，切换 A/I 元音。",
+            ),
+        );
     }
     if osc.waveform.value == Waveform::Sample {
         sample_controls(ui, osc);
@@ -56,6 +103,13 @@ pub fn sound(ui: &mut egui::Ui, osc: &mut OscillatorConfigs, full: bool) {
 
 fn sample_controls(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
     let lang = crate::app_support::language::Language::current(ui.ctx());
+    parameters::integer(
+        ui,
+        &mut osc.capture_ms,
+        20,
+        2000,
+        lang.choose("Capture (ms)", "采样时长（ms）"),
+    );
     theme::control_row(ui, |ui| {
         if add_enabled(
             ui,
@@ -73,11 +127,6 @@ fn sample_controls(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
                 let _ = tx.send(result);
             });
         }
-        ui.label(lang.choose("Capture ms", "采样时长 ms"));
-        add(
-            ui,
-            egui::DragValue::new(&mut osc.capture_ms).clamp_range(20..=2000),
-        );
         if add_enabled(
             ui,
             osc.capture.is_none() && osc.sample_job.is_none(),
@@ -144,12 +193,14 @@ fn sample_controls(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
         osc.select_sample_region();
     }
     if osc.sample_mode == SampleMode::Sampler {
+        parameters::integer(
+            ui,
+            &mut osc.sample_root,
+            0,
+            119,
+            lang.choose("Root note", "原音高"),
+        );
         ui.horizontal(|ui| {
-            ui.label(lang.choose("Root note", "素材原音高"));
-            add(
-                ui,
-                egui::DragValue::new(&mut osc.sample_root).clamp_range(0..=119),
-            );
             ui.label(
                 crate::config::note_configs::NoteOct::from_pitch_index(osc.sample_root).to_string(),
             );
@@ -158,17 +209,25 @@ fn sample_controls(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
                 &mut osc.sample_loop,
                 lang.choose("Loop while held", "按住时循环"),
             );
-            add(
-                ui,
-                egui::DragValue::new(&mut osc.sample_fine_cents)
-                    .clamp_range(-100.0..=100.0)
-                    .speed(0.1)
-                    .suffix(lang.choose(" cents", " 音分")),
-            );
         });
+        parameters::float(
+            ui,
+            &mut osc.sample_fine_cents,
+            -100.0,
+            100.0,
+            0.1,
+            lang.choose("Fine tune (cents)", "微调（音分）"),
+            false,
+        );
     }
     let Some(sample) = &osc.sample else {
-        theme::caption(ui,lang.choose("No sample yet. Import a WAV, drop a WAV here, or capture live input. Imported/captured audio is embedded in the sound preset and project.","还没有采样。可导入或拖入 WAV，或捕获实时输入；素材随音色预设与工程保存。"));
+        theme::caption(
+            ui,
+            lang.choose(
+                "Import or drop a WAV here, or capture the input.",
+                "导入或拖入 WAV，也可捕获输入。",
+            ),
+        );
         return;
     };
     ui.label(format!(
@@ -186,8 +245,8 @@ fn sample_controls(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
         theme::caption(
             ui,
             lang.choose(
-                "No stable fundamental found; Waveform starts with a short region you can adjust.",
-                "未检测到稳定基频；采样波形先选择一个可手动调整的短片段。",
+                "No stable cycle found. Adjust the sample region.",
+                "未识别稳定周期，请调整采样区域。",
             ),
         );
     }
@@ -200,26 +259,29 @@ fn sample_controls(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
     }
     let mut start_ms = osc.sample_start * duration_ms;
     let mut end_ms = osc.sample_end * duration_ms;
-    ui.horizontal(|ui| {
-        if add(
-            ui,
-            egui::Slider::new(&mut start_ms, 0.0..=(end_ms - minimum_ms).max(0.0))
-                .max_decimals(3)
-                .text(lang.choose("Start (ms)", "起点（ms）")),
+    ui.columns(2, |cols| {
+        if parameters::float(
+            &mut cols[0],
+            &mut start_ms,
+            0.0,
+            (end_ms - minimum_ms).max(0.0),
+            minimum_ms * 0.5,
+            lang.choose("Start (ms)", "起点（ms）"),
+            false,
         )
         .changed()
             && start_ms.is_finite()
         {
             osc.sample_start = start_ms / duration_ms.max(0.001);
         }
-        if add(
-            ui,
-            egui::Slider::new(
-                &mut end_ms,
-                (start_ms + minimum_ms).min(duration_ms)..=duration_ms,
-            )
-            .max_decimals(3)
-            .text(lang.choose("End (ms)", "终点（ms）")),
+        if parameters::float(
+            &mut cols[1],
+            &mut end_ms,
+            (start_ms + minimum_ms).min(duration_ms),
+            duration_ms,
+            minimum_ms * 0.5,
+            lang.choose("End (ms)", "终点（ms）"),
+            false,
         )
         .changed()
             && end_ms.is_finite()
@@ -229,7 +291,7 @@ fn sample_controls(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
     });
     osc.sanitize_source();
     waveform(ui, osc);
-    theme::caption(ui,lang.choose("Waveform maps the selected region to one periodic wave. Sampler preserves its temporal texture and uses Root note to transpose. Import uses at most the first 2 seconds; capture preserves up to 2 seconds at 8–192 kHz, then stores 48 kHz mono.","采样波形把所选区域映射为一个周期；采样音色保留素材时间纹理，按原音高移调。导入最多使用前 2 秒，实时捕获在 8–192 kHz 下最多保留 2 秒，随后保存为 48 kHz 单声道素材。"));
+    theme::caption(ui,lang.choose("Waveform loops the selected cycle; Sampler follows the root note. Samples are mono, up to 2 seconds.","采样波形循环所选周期；采样音色按原音高重奏。素材转为单声道，最长 2 秒。"));
 }
 
 fn waveform(ui: &mut egui::Ui, osc: &OscillatorConfigs) {
@@ -302,6 +364,56 @@ fn waveform(ui: &mut egui::Ui, osc: &OscillatorConfigs) {
     }
 }
 
+pub fn modulation(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
+    let id = ui.id().with("lfo_editor_selection");
+    let mut selected = ui
+        .ctx()
+        .data(|data| data.get_temp::<usize>(id))
+        .unwrap_or_else(|| usize::from(!osc.lfo.enabled && osc.lfo2.enabled))
+        .min(1);
+    theme::control_row(ui, |ui| {
+        for (index, enabled) in [osc.lfo.enabled, osc.lfo2.enabled].into_iter().enumerate() {
+            let text = format!(
+                "LFO {} · {}",
+                index + 1,
+                lang.choose(
+                    if enabled { "On" } else { "Off" },
+                    if enabled { "开" } else { "关" }
+                )
+            );
+            selectable_value(ui, &mut selected, index, text);
+        }
+    });
+    ui.ctx().data_mut(|data| data.insert_temp(id, selected));
+    ui.push_id(("lfo", selected), |ui| {
+        lfo(
+            ui,
+            if selected == 0 {
+                &mut osc.lfo
+            } else {
+                &mut osc.lfo2
+            },
+        )
+    });
+    theme::caption(ui,lang.choose("Each LFO has its own clock and target. Same-target modulation combines; switching tabs does not reset playback.","两个 LFO 独立运行；同一目标可叠加调制，切换编辑页不重置播放。"));
+    let active = if selected == 0 { &osc.lfo } else { &osc.lfo2 };
+    let bypassed =
+        active.enabled && active.target == LfoTarget::Cutoff && osc.osc_filter.mix.value == 0;
+    ui.label(
+        egui::RichText::new(if bypassed {
+            lang.choose(
+                "Cutoff modulation needs the internal filter enabled.",
+                "截止调制需要打开内部滤波。",
+            )
+        } else {
+            " "
+        })
+        .small()
+        .color(theme::MUTED),
+    );
+}
+
 pub fn lfo(ui: &mut egui::Ui, lfo: &mut LfoConfig) {
     let lang = crate::app_support::language::Language::current(ui.ctx());
     checkbox(ui, &mut lfo.enabled, lang.choose("Enable LFO", "启用 LFO"));
@@ -346,27 +458,43 @@ pub fn lfo(ui: &mut egui::Ui, lfo: &mut LfoConfig) {
     });
     checkbox(ui, &mut lfo.sync, lang.choose("Sync to tempo", "跟随速度"));
     if lfo.sync {
-        add(
+        parameters::float(
             ui,
-            egui::Slider::new(&mut lfo.beats, 0.0625..=32.0)
-                .logarithmic(true)
-                .text(lang.choose("Period (beats)", "周期（拍）")),
+            &mut lfo.beats,
+            0.0625,
+            32.0,
+            0.0625,
+            lang.choose("Period (beats)", "周期（拍）"),
+            true,
         );
     } else {
-        add(
+        parameters::float(
             ui,
-            egui::Slider::new(&mut lfo.rate_hz, 0.01..=40.0)
-                .logarithmic(true)
-                .text(lang.choose("Rate (Hz)", "频率（Hz）")),
+            &mut lfo.rate_hz,
+            0.01,
+            40.0,
+            0.01,
+            lang.choose("Rate (Hz)", "频率（Hz）"),
+            true,
         );
     }
-    add(
+    let mut depth_pct = lfo.depth * 100.0;
+    if parameters::float(
         ui,
-        egui::Slider::new(&mut lfo.depth, 0.0..=1.0).text(lang.choose("Depth", "深度")),
-    );
+        &mut depth_pct,
+        0.0,
+        100.0,
+        1.0,
+        lang.choose("Depth (%)", "深度（%）"),
+        false,
+    )
+    .changed()
+    {
+        lfo.depth = depth_pct / 100.0;
+    }
     lfo.sanitize();
     curve_editor(ui, lfo);
-    theme::caption(ui,lang.choose("LFO runs independently from AHDSR. Volume modulation cannot reopen a released note. Cutoff moves in octaves; pitch depth spans up to ±12 semitones.","LFO 与 AHDSR 独立运行；音量调制不会重新打开已释放的音符。截止频率按八度调制，音高深度最大为 ±12 半音。"));
+    theme::caption(ui,lang.choose("LFO runs independently from AHDSR. Volume modulation cannot reopen a released note. Cutoff moves in octaves; pitch depth spans up to ±12 semitones.","音量调制受包络控制；每个音高 LFO 最大为 ±12 半音。"));
 }
 
 fn curve_editor(ui: &mut egui::Ui, lfo: &mut LfoConfig) {
@@ -499,9 +627,6 @@ fn pick_sample() -> Option<std::path::PathBuf> {
     None
 }
 
-fn add(ui: &mut egui::Ui, widget: impl egui::Widget) -> egui::Response {
-    crate::ui::navigation::register(ui.add(widget))
-}
 fn add_enabled(ui: &mut egui::Ui, enabled: bool, widget: impl egui::Widget) -> egui::Response {
     crate::ui::navigation::register(ui.add_enabled(enabled, widget))
 }

@@ -5,6 +5,7 @@ mod config;
 mod dsp;
 mod engine;
 mod maintenance;
+mod phrases;
 mod presets;
 mod project;
 mod replay;
