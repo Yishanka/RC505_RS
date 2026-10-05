@@ -18,6 +18,7 @@ try {
     & $Iscc "/DAppVersion=$Version" "/DSourceRoot=$workspace" installer/RC505-RS.iss
     if ($LASTEXITCODE -ne 0) {throw 'Installer compilation failed.'}
     & (Join-Path $PSScriptRoot 'test-installer.ps1') -Version $Version -Iscc $Iscc
+    & (Join-Path $PSScriptRoot 'test-uninstall-data.ps1')
     $portable=Join-Path $workspace ("var/package-$Version-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $portable | Out-Null
     Copy-Item -LiteralPath target/release/rc505_rs.exe,target/release/rc505_launcher.exe,README_CN.md -Destination $portable -Force

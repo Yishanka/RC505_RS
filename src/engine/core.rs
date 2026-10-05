@@ -40,6 +40,7 @@ pub enum Action {
 /// Allocated on the control thread. Old runtimes are moved back into the same
 /// envelope and retired on the worker, never freed by the callback.
 pub struct Parameters {
+    pub input_noise: crate::dsp::input_noise::InputNoiseParams,
     pub input_patch: InputFxRuntime,
     pub external_input: InputFxRuntime,
     pub external_patch: InputFxRuntime,
@@ -68,6 +69,10 @@ impl Parameters {
             config.pdc_enabled,
         );
         Self {
+            input_noise: crate::dsp::input_noise::InputNoiseParams::from_config(
+                config.input_noise,
+                sample_rate,
+            ),
             input_patch: input.clone(),
             external_input: input.clone(),
             external_patch: input.clone(),
@@ -334,6 +339,10 @@ impl DeferredGraph {
     }
 }
 pub struct RenderCore {
+    input_noise: crate::dsp::input_noise::InputNoiseState,
+    input_noise_params: crate::dsp::input_noise::InputNoiseParams,
+    allow_input_noise: bool,
+    conditioned_input: Frame,
     separate_recording_sources: bool,
     external_input: Box<InputFxEngine>,
     deferred_graph: Box<DeferredGraph>,
@@ -376,6 +385,13 @@ impl RenderCore {
         let mut track_fx = TrackFxEngine::new(sr as f32, TRACKS);
         track_fx.prepare();
         Self {
+            input_noise: Default::default(),
+            input_noise_params: crate::dsp::input_noise::InputNoiseParams::from_config(
+                Default::default(),
+                sr,
+            ),
+            allow_input_noise: true,
+            conditioned_input: [0.0; 2],
             separate_recording_sources: true,
             external_input,
             pdc: Box::new(super::pdc::Compensation::new(sr as f32)),
@@ -452,6 +468,7 @@ impl RenderCore {
             self.external_input.set_routing(p.routing);
         }
         self.master.configure(p.master);
+        self.input_noise_params = p.input_noise;
         self.input_thru = p.input_thru;
         if self.clock.frame == 0 {
             self.input_monitor_gain = if p.input_thru { 1.0 } else { 0.0 };
@@ -496,12 +513,14 @@ impl RenderCore {
         self.external_input.set_legacy_fallback(enabled);
         if enabled {
             self.separate_recording_sources = false;
+            self.allow_input_noise = false;
         }
     }
     pub fn set_renderer_version(&mut self, version: u32) {
         self.legacy_renderer(version == 2);
         self.allow_pdc = version >= 5;
         self.separate_recording_sources = version >= 7;
+        self.allow_input_noise = version >= 8;
         if !self.allow_pdc {
             self.pdc.plan = super::pdc::LatencyPlan::default();
             self.pdc.reset();
@@ -509,6 +528,9 @@ impl RenderCore {
             self.external_input.set_pdc(false, [0; 5]);
             self.track_fx.set_pdc(false);
         }
+    }
+    pub fn conditioned_input(&self) -> Frame {
+        self.conditioned_input
     }
     pub fn pdc_frames(&self) -> usize {
         self.pdc.plan.output_frames
@@ -593,6 +615,8 @@ impl RenderCore {
     }
     /// Swaps a prepared snapshot; the caller retires the previous pages off-thread.
     pub fn restore(&mut self, snapshot: &mut AudioSnapshot) {
+        self.input_noise = Default::default();
+        self.conditioned_input = [0.0; 2];
         self.pdc.reset();
         for i in 0..TRACKS {
             let t = &mut self.tracks[i];
@@ -910,7 +934,13 @@ impl RenderCore {
         }
     }
     pub fn process(&mut self, input: Frame, pool: &mut impl PageAllocator) -> Frame {
-        let input = input.map(crate::dsp::headroom);
+        let raw_input = input.map(crate::dsp::headroom);
+        let input = if self.allow_input_noise {
+            self.input_noise.process(self.input_noise_params, raw_input)
+        } else {
+            raw_input
+        };
+        self.conditioned_input = input;
         for i in 0..TRACKS {
             if self.tracks[i]
                 .pending
@@ -1171,7 +1201,9 @@ impl RenderCore {
         mixed[1] += monitored[1];
         mixed = self.master.process(mixed);
         mixed = mixed.map(crate::dsp::headroom);
-        self.input_peak = self.input_peak.max(input[0].abs().max(input[1].abs()));
+        self.input_peak = self
+            .input_peak
+            .max(raw_input[0].abs().max(raw_input[1].abs()));
         self.output_peak = self.output_peak.max(mixed[0].abs().max(mixed[1].abs()));
         if mixed.iter().any(|v| v.abs() > 1.0) {
             self.clipped += 1;
@@ -1947,3 +1979,7 @@ mod tests {
 #[cfg(test)]
 #[path = "source_recording_tests.rs"]
 mod source_recording_tests;
+
+#[cfg(test)]
+#[path = "input_noise_tests.rs"]
+mod input_noise_tests;

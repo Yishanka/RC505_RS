@@ -250,7 +250,17 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
             theme::caption(ui,lang.choose("Phrase files contain notes only. Loading a phrase keeps the sound; loading a sound keeps this phrase.","乐句文件只保存音符。载入乐句保留音色；载入音色保留当前乐句。"));
         }
         ui.push_id(target.label(), |ui| {
-            let changed = if full {header_kind_changed} else {kind_picker(ui, &mut app.config, target)};
+            let changed = if full {header_kind_changed} else {
+                theme::control_row(ui, |ui| {
+                    let changed = kind_picker(ui, &mut app.config, target);
+                    if let FxTarget::Input { bank, slot } = target {
+                        if let Some(InputFx::Oscillator(osc)) = &mut app.config.input_fx.banks[bank].slots[slot].fx {
+                            synth_controls::capture_button(ui, osc);
+                        }
+                    }
+                    changed
+                }).inner
+            };
             if changed { app.editor.piano.reset_history();app.editor.automation.reset(); app.editor.page = EditorPage::Sound; }
             let synth = matches!(target, FxTarget::Input { bank, slot } if matches!(app.config.input_fx.banks[bank].slots[slot].fx, Some(InputFx::Oscillator(_)|InputFx::MyDelay(_))));
             if full && synth {

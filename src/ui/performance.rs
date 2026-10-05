@@ -427,6 +427,7 @@ fn transport(ui: &mut egui::Ui, app: &mut MyApp) {
             app.left_page = LeftPage::Audio;
             app.focus_panel(ui.ctx(), Focus::Left);
         }
+        super::help::update_notice(ui, app);
         theme::caption(
             ui,
             if taking {
@@ -638,6 +639,42 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
         }
         LeftPage::Audio => {
             super::audio_fx_panel::master(ui, &mut app.config.master_fx, &mut app.master_fx_open);
+            ui.separator();
+            theme::control_row(ui, |ui| {
+                let response = nav::register(ui.checkbox(
+                    &mut app.config.input_noise.enabled,
+                    lang.choose("Input noise gate", "输入噪声门"),
+                ));
+                #[cfg(debug_assertions)]
+                {
+                    ui.ctx().data_mut(|data| {
+                        data.insert_temp(egui::Id::new("input-noise-control"), response.id)
+                    });
+                    if std::env::args()
+                        .any(|arg| arg.starts_with("--ui-preview=performance-audio-noise"))
+                    {
+                        response.scroll_to_me(Some(egui::Align::Min));
+                    }
+                }
+                response.on_hover_text(lang.choose("Before input FX. Set the threshold 6–10 dB above room noise; 0 dBFS is digital full scale.","在输入效果前抑制小声音。可先设在环境音上方 6–10 dB；0 dBFS 是数字满幅。"));
+                ui.small(format!(
+                    "{} {:.1} dBFS",
+                    lang.choose("Input", "输入"),
+                    20.0 * app.view.input_peak.max(0.0001).log10()
+                ));
+            });
+            ui.add_enabled_ui(app.config.input_noise.enabled, |ui| {
+                parameters::float_with_keys(
+                    ui,
+                    &mut app.config.input_noise.threshold_db,
+                    -80.0,
+                    0.0,
+                    0.1,
+                    0.5,
+                    lang.choose("Threshold (dBFS)", "阈值（dBFS）"),
+                    false,
+                );
+            });
             ui.separator();
             let mut follow = app.config.system_config.follow_system_output;
             if nav::register(ui.checkbox(

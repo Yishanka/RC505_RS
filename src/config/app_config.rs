@@ -3,6 +3,7 @@
 use crate::config::{BeatConfigs, InputFxConfigs, SystemConfigs, TrackFxConfigs};
 
 pub struct AppConfig {
+    pub input_noise: super::input_noise::InputNoiseConfig,
     pub pdc_enabled: bool,
     pub master_fx: super::audio_fx::MasterFxConfig,
     pub input_thru: bool,
@@ -22,6 +23,7 @@ impl AppConfig {
     pub fn new(bpm: usize, latency_comp: usize, track_count: usize) -> Self {
         Self {
             pdc_enabled: true,
+            input_noise: Default::default(),
             master_fx: super::audio_fx::MasterFxConfig::default(),
             input_thru: true,
             metronome_volume: 0.35,

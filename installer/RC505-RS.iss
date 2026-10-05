@@ -11,6 +11,9 @@ AppId=RC505-RS-Installer-Smoke
 Uninstallable=no
 #else
 AppId={{D70BC68C-93D0-4FA4-A660-7552396837B5}
+Uninstallable=yes
+CreateUninstallRegKey=yes
+UninstallDisplayName=RC505 RS
 #endif
 AppName=RC505 RS
 AppVersion={#AppVersion}
@@ -45,6 +48,11 @@ Source: "{#SourceRoot}\target\release\rc505_launcher.exe"; DestDir: "{app}"; Fla
 Source: "{#SourceRoot}\README_CN.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceRoot}\docs\*"; DestDir: "{app}\docs"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceRoot}\scripts\update.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
+Source: "{#SourceRoot}\scripts\uninstall-data.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
+
+[UninstallDelete]
+Type: files; Name: "{app}\install-settings.json"
+Type: files; Name: "{app}\uninstall-paths.ini"
 
 [Icons]
 #ifndef InstallerSmokeTest
@@ -64,12 +72,14 @@ var
   ImportChoicePage: TInputOptionWizardPage;
   FollowProgramFolder: Boolean;
   SuggestedDataDir: String;
+  DeleteDataOnUninstall: Boolean;
+  ConfirmedUninstallDataDir: String;
 
 procedure InitializeWizard;
 begin
   PathsPage := CreateInputDirPage(wpSelectDir, 'Data and download folders',
     'Keep your music separate from application updates.',
-    'Projects, snapshots and replays are never removed by an update or uninstall. Downloaded installers are kept in the second folder.', False, '');
+    'Updates preserve your data. Uninstall also preserves it unless you explicitly choose to delete application data. Downloaded installers stay in the second folder.', False, '');
   PathsPage.Add('Project data folder:');
   PathsPage.Add('Installer download folder:');
   PathsPage.Values[0] := ExpandConstant('{param:DATADIR|}') ;
@@ -127,10 +137,56 @@ begin
     if not ForceDirectories(PathsPage.Values[1]) then RaiseException('Cannot create download folder.');
     Settings := '{"data_dir":"' + JsonPath(PathsPage.Values[0]) + '","download_dir":"' + JsonPath(PathsPage.Values[1]) + '"}';
     if not SaveStringToFile(ExpandConstant('{app}\install-settings.json'), Utf8Encode(Settings), False) then RaiseException('Cannot save installation settings.');
+    Settings := '{"product":"RC505 RS","schema":1,"data_dir":"' + JsonPath(ExpandFileName(PathsPage.Values[0])) + '"}';
+    if not SaveStringToFile(AddBackslash(PathsPage.Values[0]) + '.rc505-rs-data.json', Utf8Encode(Settings), False) then RaiseException('Cannot mark the application data directory.');
     if ImportChoicePage.Values[0] then begin
       Parameters := '--migrate-data="' + ImportPage.Values[0] + '" --data-dir="' + PathsPage.Values[0] + '"';
       if not Exec(ExpandConstant('{app}\rc505_rs.exe'), Parameters, ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then RaiseException('Cannot start data import.');
       if ExitCode <> 0 then RaiseException('Data import failed. Source data was preserved. Run rc505_rs.exe --migrate-data=SOURCE --data-dir=DESTINATION to inspect the error.');
     end;
   end;
+end;
+
+function RunUninstallData(Mode: String; ConfirmDelete: Boolean): Boolean;
+var
+  Params, Report, MessageText: String;
+  RawMessage: AnsiString;
+  ExitCode: Integer;
+begin
+  Report := ExpandConstant('{tmp}\rc505-uninstall-result.txt');
+  DeleteFile(Report);
+  Params := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\scripts\uninstall-data.ps1') + '" -Mode ' + Mode + ' -InstallDir "' + ExpandConstant('{app}') + '" -ReportFile "' + Report + '"';
+  if ConfirmDelete then Params := Params + ' -ConfirmDelete -ExpectedDataDir "' + ConfirmedUninstallDataDir + '"';
+  Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Params, ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) and (ExitCode = 0);
+  if Result and (Mode = 'Check') then begin
+    ConfirmedUninstallDataDir := '';
+    if LoadStringFromFile(Report, RawMessage) then ConfirmedUninstallDataDir := Utf8Decode(RawMessage);
+  end;
+  if not Result then begin
+    if LoadStringFromFile(Report, RawMessage) then MessageText := Utf8Decode(RawMessage)
+    else MessageText := 'Unable to verify or remove application data. Close RC505 RS and try again.';
+    Log(MessageText);
+    SuppressibleMsgBox(MessageText, mbError, MB_OK, IDOK);
+  end;
+end;
+
+function InitializeUninstall: Boolean;
+var
+  DataDir: String;
+  DeleteData: Boolean;
+begin
+  Result := RunUninstallData('Check', False);
+  if not Result then Exit;
+  DataDir := ConfirmedUninstallDataDir;
+  DeleteData := ExpandConstant('{param:DELETEDATA|0}') = '1';
+  if (DataDir <> '') and not UninstallSilent and not DeleteData then
+    DeleteData := SuppressibleMsgBox('Delete RC505 RS projects, snapshots, replays, sounds and settings in:' + #13#10 + DataDir + #13#10#13#10 + 'Choose No to keep your music (recommended). Yes permanently deletes the application-owned folders, including data shared with other installations. Other files and downloaded installers are kept.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES;
+  DeleteDataOnUninstall := DeleteData and (DataDir <> '');
+  if DataDir = '' then Log('Cannot resolve current data directory. Application data will be preserved.');
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if (CurUninstallStep = usUninstall) and DeleteDataOnUninstall then
+    if not RunUninstallData('Delete', True) then RaiseException('Application data removal failed. Uninstall stopped.');
 end;

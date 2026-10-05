@@ -49,6 +49,8 @@ struct ProjectIndex {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectData {
     #[serde(default)]
+    pub input_noise: crate::config::input_noise::InputNoiseConfig,
+    #[serde(default)]
     pub pdc_enabled: bool,
     #[serde(default)]
     pub master_fx: crate::config::audio_fx::MasterFxConfig,
@@ -981,6 +983,7 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
     }
 
     ProjectData {
+        input_noise: config.input_noise.sanitized(),
         pdc_enabled: config.pdc_enabled,
         master_fx: config.master_fx.sanitized(),
         input_thru: config.input_thru,
@@ -1014,6 +1017,7 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
 pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
     config.pdc_enabled = data.pdc_enabled;
     config.input_thru = data.input_thru;
+    config.input_noise = data.input_noise.sanitized();
     config.master_fx = data.master_fx.sanitized();
     config.metronome_volume = if data.metronome_volume.is_finite() {
         data.metronome_volume.clamp(0.0, 1.0)

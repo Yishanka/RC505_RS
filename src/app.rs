@@ -149,6 +149,8 @@ pub struct MyApp {
     pub language: crate::app_support::language::Language,
     pub update: Option<crate::updater::Release>,
     pub update_installer: Option<PathBuf>,
+    pub check_updates_at_startup: bool,
+    pub startup_update: crate::updater::StartupCheck,
     update_after_save: bool,
     #[cfg(debug_assertions)]
     preview_frame: usize,
@@ -157,6 +159,7 @@ pub struct MyApp {
 impl MyApp {
     pub fn new() -> Self {
         let launch = crate::app_support::launcher_config::load();
+        let check_updates_at_startup = launch.as_ref().is_none_or(|v| v.check_updates_at_startup);
         let language = launch.as_ref().map(|v| v.language).unwrap_or_default();
         let theme = launch.as_ref().map(|v| v.theme).unwrap_or_default();
         let guard = launch.as_ref().is_some_and(|v| v.calibration_guard);
@@ -298,6 +301,11 @@ impl MyApp {
             language,
             update: None,
             update_installer: None,
+            check_updates_at_startup,
+            startup_update: crate::updater::StartupCheck::new(
+                check_updates_at_startup,
+                std::env::args().any(|v| v == "--offline"),
+            ),
             update_after_save: false,
             #[cfg(debug_assertions)]
             preview_frame: 0,
@@ -753,6 +761,20 @@ impl MyApp {
             && !self.replay_browser;
     }
     pub(crate) fn render_frame(&mut self, ctx: &egui::Context) {
+        if let Some(release) = self.startup_update.poll() {
+            if crate::updater::newer(&release.version) && self.status.is_empty() {
+                self.status = self
+                    .language
+                    .choose(
+                        &format!("Update {} available — open F12 → Updates.", release.version),
+                        &format!("发现新版本 {}，按 F12 → 更新查看。", release.version),
+                    )
+                    .to_owned();
+            }
+            if self.update.is_none() {
+                self.update = Some(release);
+            }
+        }
         let scene = self.ui_scene();
         let fx_target_before = self.editor.target;
         if self.last_ui_scene.is_some_and(|old| old != scene) {

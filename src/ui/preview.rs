@@ -19,16 +19,31 @@ pub fn configure(app: &mut MyApp, mode: &str) {
     if std::env::args().any(|a| a.ends_with("-en")) {
         app.language = crate::app_support::language::Language::English;
     }
+    if mode.contains("update") {
+        app.update = Some(crate::updater::Release {
+            schema: 1,
+            version: "99.0.0".into(),
+            file: String::new(),
+            url: String::new(),
+            sha256: String::new(),
+        });
+        app.startup_update.state = crate::updater::StartupState::Available("99.0.0".into());
+    }
     if mode.starts_with("projects") {
         return;
     }
     app.active_project_idx = Some(0);
+    if mode.starts_with("performance-audio-noise") {
+        app.config.input_noise.enabled = true;
+        app.config.input_noise.threshold_db = -45.0;
+    }
     if mode.starts_with("shortcuts") {
         app.shortcut_editor.open(&app.shortcuts);
         return;
     }
     if mode.starts_with("performance") && mode.contains("audio") {
         app.left_page = crate::app::LeftPage::Audio;
+        app.config.input_noise.enabled = true;
         if mode.contains("master") {
             app.master_fx_open = true;
             app.config.master_fx.compressor_enabled = true;
@@ -133,6 +148,12 @@ pub fn configure(app: &mut MyApp, mode: &str) {
                     });
                 }
             }
+            if mode.contains("capture") {
+                osc.waveform.value = Waveform::Sine;
+                osc.capture = Some(std::sync::Arc::new(
+                    crate::config::osc_configs::SampleCapture::new(100),
+                ));
+            }
         }
         if mode.starts_with("lfo") {
             use crate::config::osc_configs::{CurvePoint, LfoShape, LfoTarget};
@@ -179,9 +200,10 @@ pub fn configure(app: &mut MyApp, mode: &str) {
         && !mode.starts_with("calibration")
         && !mode.starts_with("replays")
         && mode != "help";
-    if mode == "help" {
+    if mode == "help" || mode.starts_with("updates") {
+        app.editor.expanded = false;
         app.help_open = true;
-        app.help_tab = 2;
+        app.help_tab = if mode.starts_with("updates") { 5 } else { 2 };
     }
     if mode == "vocoder" {
         app.editor.select(FxTarget::Input { bank: 0, slot: 2 });
@@ -399,6 +421,9 @@ pub use super::capture::capture;
 
 /// UI-only fixture; it does not pretend to record real audio.
 pub fn sample_visuals(app: &mut MyApp, mode: &str) {
+    if mode.starts_with("performance-audio-noise") {
+        app.view.input_peak = 0.002;
+    }
     if mode.starts_with("playback") {
         app.audio
             .diagnostics

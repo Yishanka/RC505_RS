@@ -155,7 +155,14 @@ pub fn migrate(source: &Path, destination: &Path) -> Result<usize> {
         "Import destination must be outside the source folder"
     );
     let mut count = 0;
-    for name in ["projects", "launcher_config.json"] {
+    for name in [
+        "projects",
+        "presets",
+        "clips",
+        "replays",
+        "keyboard.json",
+        "launcher_config.json",
+    ] {
         let path = source.join(name);
         if path.exists() {
             copy_verified(&path, &destination.join(name), &mut count)?;
@@ -218,4 +225,63 @@ fn copy_verified(source: &Path, destination: &Path, count: &mut usize) -> Result
         *count += 1;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn installation_import_preserves_global_libraries_and_never_overwrites() {
+        let root = std::path::PathBuf::from("var")
+            .join(format!("installer-import-{}", crate::session::id()));
+        let source = root.join("source");
+        let destination = root.join("destination");
+        let files = [
+            ("projects/projects_index.json", "{\"projects\":[]}"),
+            ("projects/song.json", "project referencing saved sound"),
+            ("presets/sound.json", "saved sample source"),
+            ("clips/phrase.json", "phrase"),
+            ("replays/take/input.wav", "source fixture"),
+            ("keyboard.json", "key bindings"),
+            ("launcher_config.json", "device preferences"),
+        ];
+        for (name, bytes) in files {
+            let path = source.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+        fs::write(source.join("projects/editor.lock"), "lock").unwrap();
+        fs::write(source.join(".rc505-rs-data.json"), "old ownership marker").unwrap();
+        fs::write(source.join("unrelated.txt"), "keep outside migration").unwrap();
+        assert_eq!(migrate(&source, &destination).unwrap(), files.len());
+        for (name, bytes) in files {
+            assert_eq!(fs::read(source.join(name)).unwrap(), bytes.as_bytes());
+            assert_eq!(fs::read(destination.join(name)).unwrap(), bytes.as_bytes());
+        }
+        assert!(!destination.join("projects/editor.lock").exists());
+        assert!(!destination.join(".rc505-rs-data.json").exists());
+        assert!(!destination.join("unrelated.txt").exists());
+        assert_eq!(migrate(&source, &destination).unwrap(), 0);
+        fs::write(
+            destination.join("presets/sound.json"),
+            "different saved sound",
+        )
+        .unwrap();
+        assert!(migrate(&source, &destination).is_err());
+        assert_eq!(
+            fs::read(destination.join("presets/sound.json")).unwrap(),
+            b"different saved sound"
+        );
+        assert_eq!(
+            fs::read(source.join("presets/sound.json")).unwrap(),
+            b"saved sample source"
+        );
+        let root = fs::canonicalize(root).unwrap();
+        assert_eq!(
+            root.parent(),
+            Some(fs::canonicalize("var").unwrap().as_path())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }

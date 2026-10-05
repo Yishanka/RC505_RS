@@ -1,30 +1,51 @@
-# RC505 RS
+﻿# RC505 RS
 
-A five-track desktop loop station for keyboard performance and visual sound editing, built with Rust, CPAL and egui. Inspired by the RC‑505mkII workflow; this is an independent implementation, not a claim of hardware-identical audio.
+A five-track loop station for Windows, with keyboard performance controls and visual sound editing. Built with Rust, CPAL and egui, and inspired by the BOSS RC‑505mkII workflow. This is an independent implementation with software extensions; hardware-identical sound has not been verified.
 
-[中文](README_CN.md) · [Windows downloads](https://github.com/Yishanka/RC505_RS/releases) · [User guide](docs/USER_GUIDE_CN.md) · [Install, migrate and update](docs/INSTALL_UPDATE_CN.md)
+**Supported platform: Windows x64 only.** macOS and Linux are not supported.
+
+[中文](README_CN.md) · [Download the latest release](https://github.com/Yishanka/RC505_RS/releases/latest) · [User guide (Chinese)](docs/USER_GUIDE_CN.md) · [Installation and updates (Chinese)](docs/INSTALL_UPDATE_CN.md)
 
 ![Performance workspace](docs/images/performance.png)
 
-The installer lets you choose application, data and download folders. Data defaults to `data` beside the application. Updates preserve projects, audio snapshots, replay takes and media. Existing development data can be copied from `%APPDATA%\rc505_rs` without deleting the originals.
+## Install and play
 
-Start at the project browser. Check audio devices, set tempo, press **1–5** to record/play/overdub/finish; **Shift+1–5** or **F1–F5** stop tracks. **Ctrl+Shift+S** saves configuration and audio; **Ctrl+S** saves configuration while retaining the previous audio snapshot. **F12** opens the built-in guide and updater.
+Download the **setup EXE** from Releases. The installer lets you choose application, data and download folders separately. Data defaults to `data` beside the application. A portable ZIP is also available. Updates preserve saved projects, audio, sound presets and replays. Uninstalling from Windows **Installed apps** keeps data by default; deleting application data is a separate, optional choice.
 
-Features include customizable performance keys and independent fader speeds, momentary FX, a polyphonic piano roll, separate sound/phrase presets, editable envelopes and LFOs. OSC combines synthetic, vocal and sampled waveforms. Input and track racks include pitch, harmony, dynamics, EQ, distortion, panning delay and modulation effects; a separate master compressor/reverb follows the final mix. New projects process input slots A→D, while old projects retain their saved routing.
+On launch, the app checks for a newer release in the background. It prompts when one is available; downloading and installing remain manual. **F12 → Updates** provides update controls and the startup-check preference.
 
-The expanded editor keeps track recording and fader keys active. Up/Down or Tab selects controls; Left/Right adjusts values in practical steps (1 ms, 0.5 dB, 1 percentage point). Enter opens precise numeric entry. OSC has two independent LFOs, fixed envelope time views and mono legato/glide. Piano-roll selection, note audition, explicit shared phrases and next-loop launches are available. Plugin latency alignment and per-track live/internal recording references keep generated notes and external performances on their intended timelines; pitch processors offer optional formant preservation.
+1. Create or open a project, then choose your input in **Audio**. Output follows the Windows default device unless you choose a fixed device.
+2. Set the tempo. Press **1–5** to record, finish a loop, play or overdub. **Shift+1–5** or **F1–F5** stops the corresponding track; **Space** starts/stops all tracks.
+3. Click an FX slot to adjust it in the compact panel, or expand it for visual editing. Performance keys remain available while editing parameters.
+4. **Ctrl+S** saves configuration. **Ctrl+Shift+S** saves configuration and a track-audio snapshot.
+5. **Esc** returns from editing to performance, then to the project browser. **F12** opens help. The top **Keys** button customizes shortcuts.
 
-The metronome starts performance; independent FX audition uses its own clock. Both are monitor-only and excluded from recorded loops and replay exports. Track recording/overdub/clear history supports up to eight steps (page-budget bounded): **Alt+1–5** undo, **Ctrl+Alt+1–5** redo. Piano-roll history uses **Ctrl+Z/Y**. **F9** captures a replay; **F10** opens the replay library and a temporary performance panel that reproduces track, fader and FX states. Direct discard/delete/restore controls are available. The background is a worker-generated stereo FFT spectrum, with Mint/Rose/Ember palettes selectable at the top. Loop length is explicit, so note edits cannot silently extend it.
+## Sound and performance
 
-The global replay library is available from the project browser. Playback continuously simulates recorded input and sample-stamped commands through the DSP, without creating a full WAV. Seek, pause and import the current state into any existing or new project; importing remains unsaved until explicitly saved, so Discard restores the saved project. WAV export is explicit and exported files can be deleted. Capture starts from stopped tracks with clean FX state. Five-minute track and thirty-minute take limits bound recordings. Silent input (default J) disables Input Thru while recording and existing loops continue normally.
+- Five tracks with overdub, bounded undo/redo, reverse, one-shot playback, stop modes and recording quantization.
+- Independent keyboard faders and speeds, momentary FX, silent input monitoring and a monitor-only metronome.
+- OSC with synthetic, vocal and sampled waveforms; mono/8/16 voices, legato/glide, editable envelopes, two LFOs and an internal filter. Capture a sound directly in the compact panel. New samples remain temporary until explicitly saved as a sound preset.
+- Polyphonic piano roll with separate sound and phrase presets, note audition, shared phrases and next-loop phrase changes.
+- Input and track FX for pitch, harmony, distortion, dynamics, EQ, delay, reverb and modulation, plus master compression/reverb. See the [FX catalogue](docs/RC505_MK2_FX_CATALOG_CN.md) for coverage and differences from the hardware.
+- Global input noise gate with a threshold control, effect-latency alignment and measured recording compensation. Internally generated OSC notes retain their musical timing.
+- A global replay library: capture input and sample-timed operations with **F9**, open the library with **F10**, then play, seek, pause or import the current state into a project. Playback recalculates the audio; it creates a complete WAV only when you export one.
+- Chinese/English UI, three colour themes and a background frequency spectrum.
 
-The calibration wizard explains physical line-loopback requirements. Mute before connecting the cable; disconnect before explicitly restoring monitoring. Measurement failure, device changes and application restart keep the monitoring guard active.
+![Piano roll](docs/images/sequence.png)
+
+## Source code
+
+Releases contain ready-to-use Windows applications; this repository contains source code. You may fork or clone it, compile it for your own use, and modify it. Issues and pull requests are welcome.
+
+For a local Windows x64 build, install Rust with the MSVC toolchain and Visual Studio C++ Build Tools, then run:
 
 ```powershell
-cargo check --all-targets
-cargo test --all-targets
-cargo build --release --bins
-cargo run --bin rc505_rs -- --offline --data-dir=var/development
+git clone https://github.com/Yishanka/RC505_RS.git
+cd RC505_RS
+cargo build --release --bins --locked
+.\target\release\rc505_rs.exe --data-dir=.\local-data
 ```
 
-Pushing a matching version tag runs the Windows release workflow and publishes the installer, portable ZIP, checksums and update manifest. See the [release workflow](docs/INSTALL_UPDATE_CN.md), [architecture](docs/ARCHITECTURE.md), [validation](docs/VALIDATION.md), [hardware references](docs/RC505_REFERENCE.md) and [roadmap](docs/PLAN.md).
+This runs your compiled application with a separate data folder. It does not install or replace a release installation. The optional audio-setup launcher is `target\release\rc505_launcher.exe`.
+
+[Release notes](docs/RELEASE_NOTES_CN.md) · [Hardware references](docs/RC505_REFERENCE.md) · [Roadmap](docs/PLAN.md)

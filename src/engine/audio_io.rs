@@ -377,7 +377,7 @@ impl Callback {
         }
         let mut click = self.core.compensate_monitor_click(click);
         if let Some(audition) = &mut self.audition {
-            let preview = audition.next(dry, &self.core);
+            let preview = audition.next(self.core.conditioned_input(), &self.core);
             if audition.is_exclusive() {
                 result = preview;
                 click = 0.0;
@@ -1012,6 +1012,162 @@ mod output_tests {
             sample_rate: cpal::SampleRate(8000),
             buffer_size: cpal::BufferSize::Fixed(128),
         })
+    }
+    #[test]
+    fn input_noise_external_audition_is_gated_but_calibration_captures_raw_input() {
+        use crate::{
+            config::{FxKind, InputFx, audio_fx::AudioFxKind, input_noise::InputNoiseConfig},
+            engine::audition::{Audition, AuditionParameters},
+            presets::FxTarget,
+        };
+        let (mut audio, mut cb) = callback();
+        cb.enabled = true;
+        let mut config = AppConfig::new(120, 0, 5);
+        config.input_noise = InputNoiseConfig {
+            enabled: true,
+            threshold_db: -30.0,
+        };
+        config
+            .input_fx
+            .set_slot_kind(0, 0, FxKind::Audio(AudioFxKind::Pan));
+        if let Some(InputFx::Audio(p)) = &mut config.input_fx.banks[0].slots[0].fx {
+            p.level_db = 12.0;
+        }
+        cb.core
+            .configure(&mut Parameters::from_config(&config, 8000));
+        let params =
+            AuditionParameters::candidate(&config, FxTarget::Input { bank: 0, slot: 0 }, 0)
+                .unwrap();
+        audio
+            .send(Control::Audition(Some(Box::new(
+                Audition::new(params, 8000).exclusive(),
+            ))))
+            .unwrap();
+        cb.commands();
+        for _ in 0..1000 {
+            assert_eq!(
+                cb.frame([0.001; 2]),
+                [0.0; 2],
+                "Private external FX must use the same gated input"
+            );
+        }
+        let mut audible = 0.0f32;
+        for _ in 0..100 {
+            audible = audible.max(cb.frame([0.2; 2])[0].abs());
+        }
+        assert!(audible > 0.1);
+        audio.send(Control::Audition(None)).unwrap();
+        cb.commands();
+        let mut snapshot = AudioSnapshot::empty(8000);
+        cb.core.snapshot(&mut snapshot, &mut cb.pages);
+        cb.core.restore(&mut snapshot);
+        audio.send(Control::CalibrationHold(true)).unwrap();
+        cb.commands();
+        audio
+            .send(Control::Calibrate(Some(Box::new(
+                super::super::latency::Calibration::new(8000),
+            ))))
+            .unwrap();
+        cb.commands();
+        let frame = cb.core.clock.frame;
+        for _ in 0..64 {
+            cb.frame([0.001; 2]);
+        }
+        assert_eq!(cb.core.clock.frame, frame);
+        assert!(
+            cb.calibration.as_ref().unwrap().captured[..64]
+                .iter()
+                .all(|v| *v == 0.001),
+            "Calibration echo cannot pass through the noise gate"
+        );
+    }
+    #[test]
+    fn input_noise_begin_take_resets_open_history_and_matches_replay_from_raw_input() {
+        use crate::{
+            config::input_noise::InputNoiseConfig,
+            replay::streaming::{Machine, Source},
+        };
+        let (mut audio, mut cb) = callback();
+        cb.enabled = true;
+        let mut config = AppConfig::new(120, 0, 5);
+        config.input_noise = InputNoiseConfig {
+            enabled: true,
+            threshold_db: -30.0,
+        };
+        cb.core
+            .configure(&mut Parameters::from_config(&config, 8000));
+        for _ in 0..128 {
+            cb.frame([0.2; 2]);
+        }
+        assert_eq!(cb.core.conditioned_input(), [0.2; 2]);
+        let mut prepared = Box::new(RenderCore::new(8000));
+        prepared.configure(&mut Parameters::from_config(&config, 8000));
+        for _ in 0..64 {
+            prepared.process([0.2; 2], &mut super::super::loop_audio::OfflinePages);
+        }
+        let root = PathBuf::from("var").join(format!("input-noise-take-{}", crate::session::id()));
+        audio
+            .send(Control::BeginTake {
+                core: prepared,
+                snapshot: Box::new(AudioSnapshot::empty(8000)),
+                retired_audition: None,
+                root: root.clone(),
+                project_id: "noise.json".into(),
+                data: crate::project::data_from_config(&config),
+            })
+            .unwrap();
+        cb.commands();
+        assert!(cb.taking);
+        let mut live = Vec::new();
+        for _ in 0..64 {
+            live.push(cb.frame([0.2; 2]));
+        }
+        assert!(
+            live[0][0] < 0.02,
+            "BeginTake cannot inherit a fully open gate"
+        );
+        audio.send(Control::EndTake).unwrap();
+        cb.commands();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut finished = false;
+            for response in audio.responses() {
+                match response {
+                    Response::Take(path) => {
+                        assert_eq!(path, root);
+                        finished = true;
+                    }
+                    Response::Error(e) => panic!("{e}"),
+                    _ => {}
+                }
+            }
+            if finished {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let source = Source::open(&root).unwrap();
+        let mut replay = Machine::new(source.clone()).unwrap();
+        for expected in live {
+            assert_eq!(
+                replay.next().unwrap().unwrap().map(f32::to_bits),
+                expected.map(f32::to_bits)
+            );
+        }
+        let raw: Vec<f32> = hound::WavReader::open(root.join("input.wav"))
+            .unwrap()
+            .into_samples()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(raw, vec![0.2; 128]);
+        drop(replay);
+        drop(source);
+        drop(cb);
+        drop(audio);
+        let path = root.canonicalize().unwrap();
+        assert!(path.starts_with(std::path::Path::new("var").canonicalize().unwrap()));
+        std::fs::remove_dir_all(path).unwrap();
     }
     #[test]
     fn candidate_isolates_monitoring_without_changing_recording_or_live_parameters() {

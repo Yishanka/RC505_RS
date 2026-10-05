@@ -18,7 +18,7 @@ use std::{
 };
 
 // v7 excludes internally generated audio from physical input compensation.
-pub const RENDERER_VERSION: u32 = 7;
+pub const RENDERER_VERSION: u32 = 8;
 mod assets;
 mod delta;
 pub mod library;

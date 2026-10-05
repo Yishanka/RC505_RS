@@ -7,6 +7,15 @@ pub fn sound(ui: &mut egui::Ui, osc: &mut OscillatorConfigs, full: bool) {
     let lang = crate::app_support::language::Language::current(ui.ctx());
     osc.poll_sample();
     parameters::choice(ui, &mut osc.waveform);
+    if full
+        && osc.waveform.value != Waveform::Sample
+        && (osc.capture.is_some() || osc.sample_job.is_some())
+    {
+        theme::control_row(ui, |ui| capture_button(ui, osc));
+    }
+    if !full || osc.waveform.value != Waveform::Sample {
+        capture_status(ui, osc);
+    }
     if full {
         ui.columns(2, |cols| {
             parameters::number(&mut cols[0], &mut osc.level, 0, 100, false);
@@ -27,8 +36,8 @@ pub fn sound(ui: &mut egui::Ui, osc: &mut OscillatorConfigs, full: bool) {
             theme::caption(
                 ui,
                 lang.choose(
-                    "Sample missing: expand to capture or import.",
-                    "缺少采样：展开后捕获或导入素材。",
+                    "Capture a sound here, or expand to import a WAV.",
+                    "可直接捕获音色，或展开后导入 WAV。",
                 ),
             );
         }
@@ -163,6 +172,46 @@ fn input_controls(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
     }
 }
 
+pub(super) fn capture_button(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
+    if osc.capture.is_some() {
+        if button(ui, lang.choose("Cancel capture", "取消捕获")).clicked() {
+            osc.capture = None;
+            osc.capture_serial = osc.capture_serial.wrapping_add(1);
+        }
+    } else if add_enabled(
+        ui,
+        osc.sample_job.is_none(),
+        egui::Button::new(lang.choose("Capture sound", "捕获音色")),
+    )
+    .on_hover_text(lang.choose(
+        "Capture input from this active FX bank. Duration and threshold are in the expanded editor.",
+        "从当前效果组的输入捕获。时长和阈值可在展开界面调整。",
+    ))
+    .clicked()
+    {
+        osc.capture_serial = osc.capture_serial.wrapping_add(1);
+        osc.capture = Some(std::sync::Arc::new(SampleCapture::new(osc.capture_ms)));
+    }
+}
+
+fn capture_status(ui: &mut egui::Ui, osc: &OscillatorConfigs) {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
+    if let Some(capture) = &osc.capture {
+        let started = capture.state.load(std::sync::atomic::Ordering::Acquire) > 0;
+        theme::caption(
+            ui,
+            if started {
+                lang.choose("Capturing…", "正在捕获…")
+            } else {
+                lang.choose("Waiting for input above threshold…", "等待输入超过阈值…")
+            },
+        );
+    } else if osc.sample_job.is_some() {
+        ui.spinner();
+    }
+}
+
 fn sample_controls(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
     let lang = crate::app_support::language::Language::current(ui.ctx());
     parameters::integer(
@@ -175,7 +224,7 @@ fn sample_controls(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
     theme::control_row(ui, |ui| {
         if add_enabled(
             ui,
-            osc.sample_job.is_none(),
+            osc.sample_job.is_none() && osc.capture.is_none(),
             egui::Button::new(lang.choose("Import WAV…", "导入 WAV…")),
         )
         .clicked()
@@ -189,21 +238,7 @@ fn sample_controls(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
                 let _ = tx.send(result);
             });
         }
-        if add_enabled(
-            ui,
-            osc.capture.is_none() && osc.sample_job.is_none(),
-            egui::Button::new(lang.choose("Capture input", "捕获输入")),
-        )
-        .clicked()
-        {
-            osc.capture_serial = osc.capture_serial.wrapping_add(1);
-            osc.capture = Some(std::sync::Arc::new(SampleCapture::new(osc.capture_ms)));
-        }
-        if osc.capture.is_some() && button(ui, lang.choose("Cancel capture", "取消捕获")).clicked()
-        {
-            osc.capture = None;
-            osc.capture_serial = osc.capture_serial.wrapping_add(1);
-        }
+        capture_button(ui, osc);
         if (osc.sample.is_some() || osc.sample_ref.is_some())
             && button(ui, lang.choose("Clear sample", "移除采样")).clicked()
         {
@@ -214,7 +249,7 @@ fn sample_controls(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
         }
     });
     // A dropped WAV uses the same bounded worker import path as the native picker.
-    if osc.sample_job.is_none() {
+    if osc.sample_job.is_none() && osc.capture.is_none() {
         if let Some(path) = ui.input(|i| i.raw.dropped_files.iter().find_map(|f| f.path.clone())) {
             let (tx, rx) = std::sync::mpsc::channel();
             osc.sample_job = Some(rx);
@@ -223,20 +258,7 @@ fn sample_controls(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
             });
         }
     }
-    if let Some(capture) = &osc.capture {
-        let started = capture.state.load(std::sync::atomic::Ordering::Acquire) > 0;
-        ui.label(if started {
-            lang.choose("Capturing…", "正在捕获…")
-        } else {
-            lang.choose(
-                "Armed: waiting for input above Threshold in this bank.",
-                "已准备：等待当前效果组的输入超过阈值。",
-            )
-        });
-    }
-    if osc.sample_job.is_some() {
-        ui.spinner();
-    }
+    capture_status(ui, osc);
     if !osc.sample_message.is_empty() {
         ui.label(lang.text(&osc.sample_message));
     }

@@ -1,6 +1,39 @@
 use super::theme;
 use crate::app::MyApp;
 use eframe::egui;
+pub fn update_notice(ui: &mut egui::Ui, app: &mut MyApp) {
+    let version = app
+        .update
+        .as_ref()
+        .filter(|release| crate::updater::newer(&release.version))
+        .map(|release| release.version.as_str())
+        .or_else(|| {
+            if let crate::updater::StartupState::Available(version) = &app.startup_update.state {
+                Some(version.as_str())
+            } else {
+                None
+            }
+        });
+    if let Some(version) = version {
+        let lang = app.language;
+        let button = egui::Button::new(
+            egui::RichText::new(lang.choose("Update available", "有更新"))
+                .color(theme::accent(ui))
+                .size(16.0),
+        );
+        if super::navigation::register(ui.add_sized([138.0, 32.0], button))
+            .on_hover_text(format!(
+                "{} {version} · {}",
+                lang.choose("Version", "版本"),
+                lang.choose("Open Updates", "打开更新页")
+            ))
+            .clicked()
+        {
+            app.help_tab = 5;
+            app.help_open = true;
+        }
+    }
+}
 pub fn draw(ctx: &egui::Context, app: &mut MyApp) {
     let lang = crate::app_support::language::Language::current(ctx);
     if !app.help_open {
@@ -29,11 +62,12 @@ pub fn draw(ctx: &egui::Context, app: &mut MyApp) {
             1=>{
                 ui.heading(lang.choose("Where the sound goes", "声音从哪里来，到哪里去"));
                 theme::card().show(ui,|ui| {
-                    ui.colored_label(theme::accent(ui),lang.choose("Audio input → Input FX → recording / overdub + monitoring", "声卡输入 → 输入效果 → 录音 / 叠录，同时监听"));
+                    ui.colored_label(theme::accent(ui),lang.choose("Audio input → noise gate → Input FX → recording / monitoring", "声卡输入 → 噪声门 → 输入效果 → 录音 / 监听"));
                     ui.add_space(15.0);
                     ui.colored_label(theme::secondary(ui),lang.choose("Recorded loops → Track FX → track faders → master output", "循环音频 → 轨道效果 → 各轨推子 → 总混音 → 声卡输出"));
                 });
                 for (en,zh) in [
+                    ("Audio → Input noise gate suppresses quiet input before FX. Set the threshold above room noise, then check your softest playing still gets through. OSC and existing loops are not gated.","音频 → 输入噪声门在效果器之前抑制小声音。阈值设在环境底噪之上，再确认最轻的演奏仍可通过。OSC 与已有循环不被门控。"),
                     ("Vocoder track carriers are taken after Track FX and before faders. Lowering a fader does not silence its carrier or erase recorded audio.","声码器轨道载波取自轨道效果之后、推子之前。推低音量不会关闭载波，也不会抹掉录音。"),
                     ("Session selects Input FX order. Legacy groups preserve older projects: mix Oscillator and input, add MyDelay, then Vocoder, Filter and Reverb. Slot A → D processes in slot order.","工程面板可选择输入效果顺序。旧版分组保留旧工程：振荡器与输入混合，加入 MyDelay，再经过声码器、滤波器和混响。槽位 A → D 按槽位顺序处理。"),
                     ("Silent input turns Input Thru OFF: all input processing and recording continue, while only the direct input-to-output branch is muted. Existing loops play normally; finish recording behaves as usual.","静默录入关闭 Input Thru：输入处理与录音正常进行，只切断输入直接到输出的分支。已有循环正常播放，结束录音仍遵循原录放逻辑。"),
@@ -87,16 +121,30 @@ pub fn draw(ctx: &egui::Context, app: &mut MyApp) {
             }
             _=>{
                 ui.heading(format!("RC505 RS {}",env!("CARGO_PKG_VERSION")));
-                ui.label(format!("Data: {}",crate::app_support::paths::appdata_root().unwrap_or_default().display()));
-                ui.label(format!("Downloads: {}",crate::app_support::paths::downloads_dir().display()));
+                ui.label(format!("{}: {}",lang.choose("Data","数据目录"),crate::app_support::paths::appdata_root().unwrap_or_default().display()));
+                ui.label(format!("{}: {}",lang.choose("Downloads","下载目录"),crate::app_support::paths::downloads_dir().display()));
                 ui.horizontal(|ui|{
                     if ui.button(lang.text("Open data folder")).clicked(){if let Some(path)=crate::app_support::paths::appdata_root(){if let Err(error)=std::process::Command::new("explorer.exe").arg(path).spawn(){app.status=error.to_string();}}}
                     if ui.button(lang.text("Open download folder")).clicked(){if let Err(error)=std::process::Command::new("explorer.exe").arg(crate::app_support::paths::downloads_dir()).spawn(){app.status=error.to_string();}}
                 });
                 ui.add_space(12.0);
-                if ui.add_enabled(!app.busy(),egui::Button::new(lang.text("Check for updates"))).clicked(){app.check_update();}
+                if ui.add_enabled(!app.read_only,egui::Checkbox::new(&mut app.check_updates_at_startup,lang.choose("Check for updates at startup","启动时检查更新"))).changed(){
+                    let mut preferences=crate::app_support::launcher_config::load().unwrap_or_default();preferences.check_updates_at_startup=app.check_updates_at_startup;
+                    if let Err(error)=crate::app_support::launcher_config::save(&preferences){app.status=error.to_string();}
+                    app.startup_update.set_enabled(app.check_updates_at_startup,std::env::args().any(|v|v=="--offline"));
+                }
+                use crate::updater::StartupState;
+                match &app.startup_update.state {
+                    StartupState::Waiting|StartupState::Checking=>{ui.label(lang.choose("Checking for updates in the background…","正在后台检查更新…"));},
+                    StartupState::Offline=>{ui.label(lang.choose("Offline mode: startup check skipped.","离线模式：已跳过启动检查。"));},
+                    StartupState::Current=>{ui.label(lang.choose("Startup check: already up to date.","启动检查：已是最新版本。"));},
+                    StartupState::Available(version)=>{ui.label(format!("{} {version}",lang.choose("Available update:","可用更新：")));},
+                    StartupState::Failed(error)=>{ui.label(lang.choose("Startup check failed; manual retry is available.","启动检查失败，可手动重试。")).on_hover_text(error);},
+                    StartupState::Disabled=>{},
+                }
+                if ui.add_enabled(!app.busy()&&!app.startup_update.running(),egui::Button::new(lang.text("Check for updates"))).clicked(){app.check_update();}
                 if let Some(release)=&app.update {
-                    ui.label(format!("Latest release: {}",release.version));
+                    ui.label(format!("{}: {}",lang.choose("Latest release","最新发布版"),release.version));
                     if crate::updater::newer(&release.version)&&ui.add_enabled(!app.busy(),egui::Button::new(lang.text("Download and verify"))).clicked(){app.download_update();}
                 }
                 if app.update_installer.is_some() {

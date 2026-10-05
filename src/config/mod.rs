@@ -9,6 +9,7 @@ pub mod dynamics_profiles;
 pub mod envelope_configs;
 pub mod filter_configs;
 pub mod input_fx_configs;
+pub mod input_noise;
 pub mod mydelay_configs;
 pub mod note_configs;
 pub mod osc_configs;

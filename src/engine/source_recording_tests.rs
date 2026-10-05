@@ -443,7 +443,7 @@ fn source_comp_replay_and_seek_preserve_mixed_record_and_overdub_positions() {
     writer.finish(10000).unwrap();
     assert!(!core.exhausted);
     let source = Source::open(&root).unwrap();
-    assert_eq!(source.metadata.renderer, 7);
+    assert_eq!(source.metadata.renderer, crate::replay::RENDERER_VERSION);
     let mut replay = Machine::new(source.clone()).unwrap();
     for (n, expected) in live.iter().enumerate() {
         assert_eq!(

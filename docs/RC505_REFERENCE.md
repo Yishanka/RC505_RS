@@ -1,6 +1,6 @@
 # RC‑505mkII 对照与实现依据
 
-更新日期：2026-10-04。0.4继续按用户批注完善音源、调制、回放和效果时间对齐；完整范围见[效果清单](RC505_MK2_FX_CATALOG_CN.md)和[算法说明](FX_IMPLEMENTATION_CN.md)。公开文档用于校对行为，无法证明自研DSP与硬件逐采样或听感一致；没有使用Serum的非公开代码或逆向产物。
+更新日期：2026-10-04。本文记录音源、调制、回放和效果时间对齐的实现依据；完整范围见[效果清单](RC505_MK2_FX_CATALOG_CN.md)和[算法说明](FX_IMPLEMENTATION_CN.md)。公开文档用于校对行为，不能证明自研 DSP 与硬件逐采样或听感一致；未使用 Serum 的非公开代码或逆向产物。
 
 ## 已查阅的主要来源
 
@@ -13,6 +13,7 @@
 | 模块 | 本项目当前状态 | 与硬件的差距 / 后续验收依据 |
 |---|---|---|
 | 五轨循环 | 采样时钟、音频持久化、Undo/Redo、One Shot、Reverse、Stop、固定长度与量化 | 完整硬件同步/通道矩阵、Tempo Sync音频伸缩、Assign/MIDI未覆盖 |
+| 输入 NS | 全局输入噪声门，开关与 −80～0 dBFS 阈值，默认关闭 | 参考官方 MIC/INST 输入 NS；硬件只公开 0～100 深度，软件阈值和时间常数为独立设计，见[参数手册第10页](https://static.roland.com/assets/media/pdf/RC-505mk2_Parameter_eng04_W.pdf#page=10) |
 | FX bank/slot | Input / Track 各4×4；Track 按轨启用 | 串并联、Assign、MIDI、详细路由尚未覆盖 |
 | OSC | 基础/元音/采样波形、单音/8/16声部、Legato/Glide、960 PPQ链接乐句、固定AHDSR视窗、双LFO、内部滤波 | 软件音源扩展；不能将复音/采样能力称为OSC BOT的完整硬件覆盖 |
 | Vocoder | 音轨/输入声道载波、Tone/Mod Sens、频谱包络归一化、formant移动 | 输入仅一个立体声设备；Attack毫秒、Bands/Release/Formant/Sibilance属于软件参数；灵敏度和频响需A/B标定 |
@@ -28,12 +29,12 @@
 1. 优先修可测的正确性问题：tick 触发必须是单采样脉冲；Drive=0 应保持线性；门限应跟随包络而非音频符号/过零点。
 2. Roll 的行为改为单片段短周期重复，保留原有 Step 字段并明确旧工程听感会变化。Roll1/2在同一已有FX类型内选择模式，不新增FX种类。
 3. 滤波器可视曲线从 DSP 系数计算，包络曲线由同一状态机模拟，避免画出与算法无关的装饰图。
-4. 按用户补充授权重写Vocoder，延续原先共振峰对比度的思路，并用整组包络归一化替换逐带限幅。离线双频载波测试验证formant移动方向，尚未证明元音可懂度或硬件等效性。
+4. Vocoder 使用共振峰对比度与整组包络归一化，替代早期的逐带限幅。离线双频载波测试验证 formant 移动方向，尚未证明元音可懂度或硬件等效性。
 5. 公开手册描述的是参数用途，不提供专有DSP。没有使用Serum非公开源码，也不将通用合成器算法误称为RC‑505内部算法。
 6. rev.04的TRACK说明明确：Reverse和One Shot不进入叠录；One Shot再次播放键重触发；Stop含Immediate/Fade/Loop，再次Stop立即停止。软件沿用这些可核对语义，但量化UI统一为Off/Beat/Measure/Loop，并非原机所有LOOP SYNC子参数的完整复制。
 7. 实时线程设计参考[PortAudio回调约束](https://portaudio.com/docs/v19-doxydocs/writing_a_callback.html)：避开分配、文件I/O和mutex。CPAL输入/输出时间戳只作诊断；补偿建议来自实际回环，不假设驱动时间戳包含全部硬件延迟。
 8. 静默录入对应官方第12页 **INPUT THRU OFF**：切断输入到输出的直通分支，输入处理与轨道录音继续，已有循环播放保持。合成音源也走软件的同一输入总线。
-9. 新音色、包络和移调算法会改变旧项目/回放的声音。renderer5记录当前确定性语义及PDC应用标记；旧2/3/4回放关闭新增PDC，接受旧版文件不代表保留每种历史DSP的逐位输出。
+9. 新音色、包络和移调算法会改变旧项目/回放的声音。当前写入 renderer 8，记录配置及 PDC 应用标记；旧2/3/4回放关闭PDC，旧2～7回放旁路输入噪声门。接受旧版文件不代表保留每种历史DSP的逐位输出。
 
 ## 硬件听感验证建议
 

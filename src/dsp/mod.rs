@@ -10,6 +10,7 @@ pub mod dynamics_profiles;
 pub mod envelope;
 pub mod filter;
 pub mod filter_sweep;
+pub mod input_noise;
 pub mod master;
 pub mod my_delay;
 pub mod note;

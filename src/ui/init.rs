@@ -24,7 +24,7 @@ pub fn draw_init(ui: &mut egui::Ui, app: &mut MyApp) {
                 });
             });
             ui.add_space(16.0);
-            ui.heading(lang.text("Choose your project"));
+            theme::control_row(ui,|ui|{ui.heading(lang.text("Choose your project"));super::help::update_notice(ui,app);});
             theme::caption(ui, lang.text("↑ ↓ select · Enter opens · N creates"));
             ui.add_space(12.0);
             theme::card().show(ui, |ui| {

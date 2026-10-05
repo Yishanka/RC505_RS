@@ -6,6 +6,8 @@ const DEFAULT_LATENCY_COMP_MS: usize = 85;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LauncherConfig {
+    #[serde(default = "default_follow_output")]
+    pub check_updates_at_startup: bool,
     #[serde(default)]
     pub theme: super::appearance::ThemeColor,
     #[serde(default)]
@@ -42,6 +44,7 @@ impl LauncherConfig {
 impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
+            check_updates_at_startup: true,
             theme: Default::default(),
             calibration_guard: false,
             visualizer_enabled: true,
@@ -99,6 +102,7 @@ mod tests {
         )
         .unwrap();
         assert!(old.follow_system_output);
+        assert!(old.check_updates_at_startup);
         assert_eq!(old.theme, super::super::appearance::ThemeColor::Mint);
         assert!(!old.calibration_guard);
         assert!(old.visualizer_enabled);
@@ -107,12 +111,14 @@ mod tests {
         fixed.theme = super::super::appearance::ThemeColor::Rose;
         fixed.calibration_guard = true;
         fixed.visualizer_enabled = false;
+        fixed.check_updates_at_startup = false;
         let restored: LauncherConfig =
             serde_json::from_str(&serde_json::to_string(&fixed).unwrap()).unwrap();
         assert!(!restored.follow_system_output);
         assert_eq!(restored.theme, super::super::appearance::ThemeColor::Rose);
         assert!(restored.calibration_guard);
         assert!(!restored.visualizer_enabled);
+        assert!(!restored.check_updates_at_startup);
         assert_eq!(restored.output_device, "Old USB device");
     }
 }
