@@ -156,7 +156,7 @@ impl MyApp {
     }
     pub fn focus_panel(&mut self, ctx: &egui::Context, focus: Focus) {
         self.focus = focus;
-        self.focus_request = true;
+        self.focus_request = focus != Focus::Performance;
         if let Some(id) = ctx.memory(|m| m.focused()) {
             ctx.memory_mut(|m| m.surrender_focus(id));
         }

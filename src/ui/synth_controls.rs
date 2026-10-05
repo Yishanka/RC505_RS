@@ -593,7 +593,7 @@ pub fn lfo(ui: &mut egui::Ui, lfo: &mut LfoConfig) {
     theme::caption(ui,lang.choose("LFO runs independently from AHDSR. Volume modulation cannot reopen a released note. Cutoff moves in octaves; pitch depth spans up to ±12 semitones.","音量调制受包络控制；每个音高 LFO 最大为 ±12 半音。"));
 }
 
-fn curve_editor(ui: &mut egui::Ui, lfo: &mut LfoConfig) {
+fn curve_editor(ui: &mut egui::Ui, lfo: &mut LfoConfig) -> egui::Rect {
     let lang = crate::app_support::language::Language::current(ui.ctx());
     let (rect, response) =
         ui.allocate_exact_size(vec2(ui.available_width(), 220.0), egui::Sense::click());
@@ -609,10 +609,17 @@ fn curve_editor(ui: &mut egui::Ui, lfo: &mut LfoConfig) {
     }
     if response.double_clicked() {
         if let Some(p) = response.interact_pointer_pos() {
-            if lfo.points.len() < 32 {
+            let x = ((p.x - plot.left()) / plot.width()).clamp(LFO_POINT_GAP, 1.0 - LFO_POINT_GAP);
+            if plot.contains(p)
+                && lfo.points.len() < LFO_MAX_POINTS
+                && lfo
+                    .points
+                    .iter()
+                    .all(|point| (point.x - x).abs() >= LFO_POINT_GAP)
+            {
                 lfo.shape = LfoShape::Custom;
                 lfo.points.push(CurvePoint {
-                    x: ((p.x - plot.left()) / plot.width()).clamp(0.001, 0.999),
+                    x,
                     y: (1.0 - (p.y - plot.top()) / plot.height()).clamp(0.0, 1.0),
                     curve: 0.0,
                 });
@@ -636,16 +643,26 @@ fn curve_editor(ui: &mut egui::Ui, lfo: &mut LfoConfig) {
             if handle.dragged() {
                 if let Some(pos) = handle.interact_pointer_pos() {
                     if i > 0 && i + 1 < lfo.points.len() {
-                        lfo.points[i].x = ((pos.x - plot.left()) / plot.width())
-                            .clamp(lfo.points[i - 1].x + 0.001, lfo.points[i + 1].x - 0.001);
+                        let minimum = lfo.points[i - 1].x + LFO_POINT_GAP;
+                        let maximum = lfo.points[i + 1].x - LFO_POINT_GAP;
+                        // Extremely close imported points can leave no horizontal
+                        // room after float rounding. Keep this node's identity
+                        // and x position while still allowing a vertical drag.
+                        if minimum <= maximum {
+                            lfo.points[i].x =
+                                ((pos.x - plot.left()) / plot.width()).clamp(minimum, maximum);
+                        }
                     }
                     lfo.points[i].y = (1.0 - (pos.y - plot.top()) / plot.height()).clamp(0.0, 1.0);
                 }
             }
-            if handle.secondary_clicked() && i > 0 && i + 1 < lfo.points.len() {
+            if handle.secondary_clicked()
+                && !ui.input(|input| input.pointer.primary_down())
+                && i > 0
+                && i + 1 < lfo.points.len()
+            {
                 remove = Some(i);
             }
-            ui.painter().circle_filled(pos, 5.0, theme::accent(ui));
             if i + 1 < lfo.points.len() {
                 let next = lfo.points[i + 1];
                 let mid_x = (p.x + next.x) * 0.5;
@@ -669,28 +686,71 @@ fn curve_editor(ui: &mut egui::Ui, lfo: &mut LfoConfig) {
                 if response.double_clicked() {
                     lfo.points[i].curve = 0.0;
                 }
-                ui.painter().circle_filled(mid, 3.5, theme::secondary(ui));
             }
         }
         if let Some(i) = remove {
             lfo.points.remove(i);
         }
     }
-    let points = (0..400)
-        .map(|i| {
-            let t = i as f32 / 399.0;
-            pos2(
-                plot.left() + plot.width() * t,
-                plot.bottom() - plot.height() * crate::dsp::oscillator::lfo_value(lfo, t),
-            )
-        })
-        .collect();
+    let points = if lfo.shape == LfoShape::Custom {
+        let mut path = Vec::with_capacity(lfo.points.len().saturating_sub(1) * 48 + 1);
+        for (segment, pair) in lfo.points.windows(2).enumerate() {
+            let (a, b) = (pair[0], pair[1]);
+            for step in usize::from(segment > 0)..=48 {
+                let t = step as f32 / 48.0;
+                path.push(pos2(
+                    plot.left() + plot.width() * (a.x + (b.x - a.x) * t),
+                    plot.bottom()
+                        - plot.height()
+                            * (a.y + (b.y - a.y) * crate::dsp::envelope::bend_curve(t, a.curve)),
+                ));
+            }
+        }
+        path
+    } else {
+        (0..400)
+            .map(|i| {
+                let t = i as f32 / 399.0;
+                pos2(
+                    plot.left() + plot.width() * t,
+                    plot.bottom() - plot.height() * crate::dsp::oscillator::lfo_value(lfo, t),
+                )
+            })
+            .collect()
+    };
     ui.painter().add(egui::Shape::line(
         points,
         egui::Stroke::new(2.0, theme::accent(ui)),
     ));
+    // Paint once from the final edited values. The old loop painted each handle
+    // before moving it, while the line already used its new position.
+    if lfo.shape == LfoShape::Custom {
+        for (index, point) in lfo.points.iter().enumerate() {
+            let pos = pos2(
+                plot.left() + plot.width() * point.x,
+                plot.bottom() - plot.height() * point.y,
+            );
+            if let Some(next) = lfo.points.get(index + 1) {
+                let mid = pos2(
+                    plot.left() + plot.width() * (point.x + next.x) * 0.5,
+                    plot.bottom()
+                        - plot.height()
+                            * (point.y
+                                + (next.y - point.y)
+                                    * crate::dsp::envelope::bend_curve(0.5, point.curve)),
+                );
+                ui.painter().circle_filled(mid, 3.5, theme::secondary(ui));
+            }
+            ui.painter().circle_filled(pos, 5.0, theme::accent(ui));
+        }
+    }
     theme::caption(ui,lang.choose("Double-click: add point · Drag points: shape · Drag small midpoint: curvature · Right-click interior point: delete","双击加点 · 拖动节点塑形 · 拖动小中点调整曲率 · 右键删除内部节点"));
+    plot
 }
+
+#[cfg(test)]
+#[path = "synth_controls_curve_tests.rs"]
+mod curve_tests;
 
 #[cfg(windows)]
 fn pick_sample() -> Option<std::path::PathBuf> {

@@ -38,6 +38,11 @@ impl MyApp {
         if !self.master_fx_open {
             if let Some(scope) = ui::navigation::focused_scope(ctx) {
                 self.focus = scope;
+                if input.pointer.any_pressed() {
+                    // Pointer-selected controls own their focus already; never
+                    // replay a pending keyboard-entry request over that choice.
+                    self.focus_request = false;
+                }
             }
         }
         let text = ctx.wants_keyboard_input();

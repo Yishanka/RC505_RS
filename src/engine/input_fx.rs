@@ -1,10 +1,5 @@
 use std::time::Instant;
 
-use crate::config::envelope_configs::{
-    ENVELOPE_ATTACK_MAX_MS, ENVELOPE_DECAY_MAX_MS, ENVELOPE_HOLD_MAX_MS, ENVELOPE_RELEASE_MAX_MS,
-    ENVELOPE_RELEASE_MIN_MS, ENVELOPE_START_MAX_PCT, ENVELOPE_SUSTAIN_MAX_PCT,
-    ENVELOPE_TENSION_MAX,
-};
 use crate::config::filter_configs::{
     FILTER_CUTOFF_MAX_HZ, FILTER_CUTOFF_MIN_HZ, FILTER_DRIVE_MAX, FILTER_MIX_MAX, FILTER_Q_MAX_X10,
     FILTER_Q_MIN_X10, FilterType,
@@ -982,45 +977,7 @@ impl InputFxRuntime {
                                 })
                                 .collect(),
                             threshold: (osc.threshold.value as f32 / 100.0).clamp(0.0, 1.0),
-                            envelope: AhdsrParams {
-                                attack_ms: osc.envelope.attack_ms.value.min(ENVELOPE_ATTACK_MAX_MS)
-                                    as f32,
-                                hold_ms: osc.envelope.hold_ms.value.min(ENVELOPE_HOLD_MAX_MS)
-                                    as f32,
-                                decay_ms: osc.envelope.decay_ms.value.min(ENVELOPE_DECAY_MAX_MS)
-                                    as f32,
-                                sustain_level: (osc
-                                    .envelope
-                                    .sustain_pct
-                                    .value
-                                    .min(ENVELOPE_SUSTAIN_MAX_PCT)
-                                    as f32
-                                    / 100.0)
-                                    .clamp(0.0, 1.0),
-                                release_ms: osc
-                                    .envelope
-                                    .release_ms
-                                    .value
-                                    .clamp(ENVELOPE_RELEASE_MIN_MS, ENVELOPE_RELEASE_MAX_MS)
-                                    as f32,
-                                start_level: (osc
-                                    .envelope
-                                    .start_pct
-                                    .value
-                                    .min(ENVELOPE_START_MAX_PCT)
-                                    as f32
-                                    / 100.0)
-                                    .clamp(0.0, 1.0),
-                                tension_attack: tension_to_exponent(
-                                    osc.envelope.tension_a.value.min(ENVELOPE_TENSION_MAX),
-                                ),
-                                tension_decay: tension_to_exponent(
-                                    osc.envelope.tension_d.value.min(ENVELOPE_TENSION_MAX),
-                                ),
-                                tension_release: tension_to_exponent(
-                                    osc.envelope.tension_r.value.min(ENVELOPE_TENSION_MAX),
-                                ),
-                            },
+                            envelope: super::envelope_params::from_config(&osc.envelope),
                             osc_filter: FilterRuntime {
                                 sweep: Default::default(),
                                 filter_type: osc.osc_filter.filter_type.value,
@@ -1043,53 +1000,9 @@ impl InputFxRuntime {
                                 mix: (osc.osc_filter.mix.value.min(FILTER_MIX_MAX) as f32 / 100.0)
                                     .clamp(0.0, 1.0),
                             },
-                            osc_filter_envelope: AhdsrParams {
-                                attack_ms: osc
-                                    .osc_filter_env
-                                    .attack_ms
-                                    .value
-                                    .min(ENVELOPE_ATTACK_MAX_MS)
-                                    as f32,
-                                hold_ms: osc.osc_filter_env.hold_ms.value.min(ENVELOPE_HOLD_MAX_MS)
-                                    as f32,
-                                decay_ms: osc
-                                    .osc_filter_env
-                                    .decay_ms
-                                    .value
-                                    .min(ENVELOPE_DECAY_MAX_MS)
-                                    as f32,
-                                sustain_level: (osc
-                                    .osc_filter_env
-                                    .sustain_pct
-                                    .value
-                                    .min(ENVELOPE_SUSTAIN_MAX_PCT)
-                                    as f32
-                                    / 100.0)
-                                    .clamp(0.0, 1.0),
-                                release_ms: osc
-                                    .osc_filter_env
-                                    .release_ms
-                                    .value
-                                    .clamp(ENVELOPE_RELEASE_MIN_MS, ENVELOPE_RELEASE_MAX_MS)
-                                    as f32,
-                                start_level: (osc
-                                    .osc_filter_env
-                                    .start_pct
-                                    .value
-                                    .min(ENVELOPE_START_MAX_PCT)
-                                    as f32
-                                    / 100.0)
-                                    .clamp(0.0, 1.0),
-                                tension_attack: tension_to_exponent(
-                                    osc.osc_filter_env.tension_a.value.min(ENVELOPE_TENSION_MAX),
-                                ),
-                                tension_decay: tension_to_exponent(
-                                    osc.osc_filter_env.tension_d.value.min(ENVELOPE_TENSION_MAX),
-                                ),
-                                tension_release: tension_to_exponent(
-                                    osc.osc_filter_env.tension_r.value.min(ENVELOPE_TENSION_MAX),
-                                ),
-                            },
+                            osc_filter_envelope: super::envelope_params::from_config(
+                                &osc.osc_filter_env,
+                            ),
                         }),
                         None,
                         None,
@@ -1181,83 +1094,8 @@ impl InputFxRuntime {
                             .enumerate()
                             .map(|(idx, step_len)| *step_len > 0 && delay.note.seq()[idx].is_some())
                             .collect();
-                        let audio_env = AhdsrParams {
-                            attack_ms: delay.audio_env.attack_ms.value.min(ENVELOPE_ATTACK_MAX_MS)
-                                as f32,
-                            hold_ms: delay.audio_env.hold_ms.value.min(ENVELOPE_HOLD_MAX_MS) as f32,
-                            decay_ms: delay.audio_env.decay_ms.value.min(ENVELOPE_DECAY_MAX_MS)
-                                as f32,
-                            sustain_level: (delay
-                                .audio_env
-                                .sustain_pct
-                                .value
-                                .min(ENVELOPE_SUSTAIN_MAX_PCT)
-                                as f32
-                                / 100.0)
-                                .clamp(0.0, 1.0),
-                            release_ms: delay
-                                .audio_env
-                                .release_ms
-                                .value
-                                .clamp(ENVELOPE_RELEASE_MIN_MS, ENVELOPE_RELEASE_MAX_MS)
-                                as f32,
-                            start_level: (delay
-                                .audio_env
-                                .start_pct
-                                .value
-                                .min(ENVELOPE_START_MAX_PCT)
-                                as f32
-                                / 100.0)
-                                .clamp(0.0, 1.0),
-                            tension_attack: tension_to_exponent(
-                                delay.audio_env.tension_a.value.min(ENVELOPE_TENSION_MAX),
-                            ),
-                            tension_decay: tension_to_exponent(
-                                delay.audio_env.tension_d.value.min(ENVELOPE_TENSION_MAX),
-                            ),
-                            tension_release: tension_to_exponent(
-                                delay.audio_env.tension_r.value.min(ENVELOPE_TENSION_MAX),
-                            ),
-                        };
-                        let filter_env = AhdsrParams {
-                            attack_ms: delay.filter_env.attack_ms.value.min(ENVELOPE_ATTACK_MAX_MS)
-                                as f32,
-                            hold_ms: delay.filter_env.hold_ms.value.min(ENVELOPE_HOLD_MAX_MS)
-                                as f32,
-                            decay_ms: delay.filter_env.decay_ms.value.min(ENVELOPE_DECAY_MAX_MS)
-                                as f32,
-                            sustain_level: (delay
-                                .filter_env
-                                .sustain_pct
-                                .value
-                                .min(ENVELOPE_SUSTAIN_MAX_PCT)
-                                as f32
-                                / 100.0)
-                                .clamp(0.0, 1.0),
-                            release_ms: delay
-                                .filter_env
-                                .release_ms
-                                .value
-                                .clamp(ENVELOPE_RELEASE_MIN_MS, ENVELOPE_RELEASE_MAX_MS)
-                                as f32,
-                            start_level: (delay
-                                .filter_env
-                                .start_pct
-                                .value
-                                .min(ENVELOPE_START_MAX_PCT)
-                                as f32
-                                / 100.0)
-                                .clamp(0.0, 1.0),
-                            tension_attack: tension_to_exponent(
-                                delay.filter_env.tension_a.value.min(ENVELOPE_TENSION_MAX),
-                            ),
-                            tension_decay: tension_to_exponent(
-                                delay.filter_env.tension_d.value.min(ENVELOPE_TENSION_MAX),
-                            ),
-                            tension_release: tension_to_exponent(
-                                delay.filter_env.tension_r.value.min(ENVELOPE_TENSION_MAX),
-                            ),
-                        };
+                        let audio_env = super::envelope_params::from_config(&delay.audio_env);
+                        let filter_env = super::envelope_params::from_config(&delay.filter_env);
                         let filter = FilterRuntime {
                             sweep: Default::default(),
                             filter_type: delay.filter.filter_type.value,
@@ -1424,11 +1262,6 @@ impl FxBankState {
             }),
         }
     }
-}
-
-fn tension_to_exponent(value: usize) -> f32 {
-    let t = value.min(ENVELOPE_TENSION_MAX) as f32;
-    2.0_f32.powf((t - 100.0) / 50.0)
 }
 
 #[cfg(test)]
@@ -1675,7 +1508,7 @@ mod tests {
         if let Some(InputFx::Oscillator(osc)) = &mut config.banks[0].slots[0].fx {
             osc.threshold.value = 0;
             osc.osc_filter.mix.value = 0;
-            osc.envelope.attack_ms.value = 1;
+            osc.envelope.attack_ms.value = 1.0;
         }
         let mut engine = InputFxEngine::new(8000.0);
         engine.swap_runtime(InputFxRuntime::from_config(&config));
@@ -1721,7 +1554,7 @@ mod tests {
             panic!()
         };
         osc.threshold.value = 0;
-        osc.envelope.attack_ms.value = 10;
+        osc.envelope.attack_ms.value = 10.0;
         osc.osc_filter.mix.value = 0;
         osc.note.push();
         let mut engine = InputFxEngine::new(48000.0);

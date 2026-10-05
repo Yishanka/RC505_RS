@@ -23,10 +23,11 @@ pub fn workspace(ui: &mut egui::Ui, app: &mut MyApp) {
         egui::ScrollArea::vertical()
             .id_source("expanded")
             .show(ui, |ui| {
-                nav::begin(
+                nav::begin_scoped(
                     ui,
                     Focus::Editor,
                     app.focus == Focus::Editor && app.focus_request,
+                    editor_focus_context(app),
                 );
                 if app.focus == Focus::Editor {
                     app.focus_request = false;
@@ -257,6 +258,11 @@ fn fixed_panel(
         },
     ));
     frame.show(ui, |ui| {
+        let context = if focus == Focus::Left {
+            egui::Id::new(("left-page", app.left_page as u8))
+        } else {
+            editor_focus_context(app)
+        };
         let request = app.focus == focus && app.focus_request;
         if request {
             app.focus_request = false;
@@ -266,24 +272,57 @@ fn fixed_panel(
         } else {
             198.0
         };
-        egui::ScrollArea::vertical()
+        let _panel = egui::ScrollArea::vertical()
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
-            .id_source(if focus == Focus::Left {
-                "left-controls"
-            } else {
-                "right-controls"
-            })
+            .id_source(("quick-controls", focus as u8, context))
             .max_height(height)
             .min_scrolled_height(height)
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                nav::begin(ui, focus, request);
+                nav::begin_scoped(ui, focus, request, context);
                 draw(ui, app);
                 // Scroll the quick panel itself when keyboard focus moves to
                 // an off-screen parameter, not the outer performance surface.
                 nav::end(ui);
             });
+        #[cfg(debug_assertions)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                egui::Id::new(("quick-panel-scroll", focus as u8)),
+                (
+                    _panel.id,
+                    _panel.state.offset.y,
+                    _panel.inner_rect,
+                    _panel.content_size,
+                ),
+            )
+        });
     });
+}
+fn editor_focus_context(app: &MyApp) -> egui::Id {
+    let target = app.editor.target.map(|target| match target {
+        FxTarget::Input { bank, slot } => (
+            0,
+            bank,
+            slot,
+            app.config.input_fx.slot_kind(bank, slot).ui_tag(),
+        ),
+        FxTarget::Track { bank, slot } => (
+            1,
+            bank,
+            slot,
+            app.config.track_fx.slot_kind(bank, slot).ui_tag(),
+        ),
+    });
+    egui::Id::new((
+        "fx-controls",
+        target,
+        if app.editor.expanded {
+            app.editor.page as u8
+        } else {
+            0
+        },
+    ))
 }
 fn transport(ui: &mut egui::Ui, app: &mut MyApp) {
     use theme::Icon;

@@ -207,11 +207,11 @@ fn sample_generation_replay_and_seek_keep_the_same_release_versions() {
                 NoteEvent::new(384, 96, NoteOct::from_pitch_index(55)),
             ],
         );
-        osc.envelope.attack_ms.value = 0;
-        osc.envelope.hold_ms.value = 0;
-        osc.envelope.decay_ms.value = 0;
+        osc.envelope.attack_ms.value = 0.0;
+        osc.envelope.hold_ms.value = 0.0;
+        osc.envelope.decay_ms.value = 0.0;
         osc.envelope.sustain_pct.value = 100;
-        osc.envelope.release_ms.value = 300;
+        osc.envelope.release_ms.value = 300.0;
         osc.osc_filter.mix.value = 0;
     }
     let mut core = RenderCore::new(8000);

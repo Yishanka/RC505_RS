@@ -40,11 +40,11 @@ fn configuration(
             15360,
             &[NoteEvent::new(0, 15360, NoteOct::from_pitch_index(57))],
         );
-        o.envelope.attack_ms.value = 0;
-        o.envelope.hold_ms.value = 0;
-        o.envelope.decay_ms.value = 0;
+        o.envelope.attack_ms.value = 0.0;
+        o.envelope.hold_ms.value = 0.0;
+        o.envelope.decay_ms.value = 0.0;
         o.envelope.sustain_pct.value = 100;
-        o.envelope.release_ms.value = 1;
+        o.envelope.release_ms.value = 1.0;
         o.osc_filter.mix.value = 0;
     }
     if osc_after_pitch.is_some() {

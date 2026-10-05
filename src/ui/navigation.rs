@@ -10,6 +10,8 @@ struct Entry {
 #[derive(Clone)]
 struct Group {
     focus: Focus,
+    memory_key: Id,
+    remembered: Option<Id>,
     previous: Vec<Entry>,
     current: Vec<Entry>,
     first: bool,
@@ -26,8 +28,13 @@ fn key(group: Focus) -> Id {
     })
 }
 pub fn begin(ui: &Ui, focus: Focus, first: bool) {
+    begin_scoped(ui, focus, first, ui.id());
+}
+pub fn begin_scoped(ui: &Ui, focus: Focus, first: bool, context: Id) {
     let focused = ui.memory(|m| m.focused());
+    let memory_key = key(focus).with(("last-control", context));
     ui.ctx().data_mut(|d| {
+        let remembered = d.get_temp::<Id>(memory_key);
         let previous = d.get_temp::<Vec<Entry>>(key(focus)).unwrap_or_default();
         let step = d.get_temp::<isize>(key(focus).with("step"));
         d.remove::<isize>(key(focus).with("step"));
@@ -35,6 +42,8 @@ pub fn begin(ui: &Ui, focus: Focus, first: bool) {
             Id::new("nav-group"),
             Group {
                 focus,
+                memory_key,
+                remembered,
                 previous,
                 current: vec![],
                 first,
@@ -244,13 +253,35 @@ pub fn end(ui: &Ui) {
     };
     let mut target = None;
     if group.first {
-        target = group.current.first();
+        target = group
+            .current
+            .iter()
+            .find(|e| Some(e.id) == group.focused)
+            .or_else(|| {
+                group
+                    .current
+                    .iter()
+                    .find(|e| Some(e.id) == group.remembered)
+            })
+            .or_else(|| {
+                group
+                    .current
+                    .iter()
+                    .find(|e| e.hit_rect.is_positive() && e.rect.intersects(ui.clip_rect()))
+            })
+            .or_else(|| group.current.first());
     } else if let Some(step) = group.step {
         if !group.current.is_empty() {
             let index = group
                 .current
                 .iter()
-                .position(|v| Some(v.id) == group.focused);
+                .position(|v| Some(v.id) == group.focused)
+                .or_else(|| {
+                    group
+                        .current
+                        .iter()
+                        .position(|v| Some(v.id) == group.remembered)
+                });
             let next = match index {
                 Some(i) => (i as isize + step).rem_euclid(group.current.len() as isize) as usize,
                 None if step < 0 => group.current.len() - 1,
@@ -261,7 +292,9 @@ pub fn end(ui: &Ui) {
     }
     if let Some(target) = target {
         ui.memory_mut(|m| m.request_focus(target.id));
-        ui.scroll_to_rect(target.rect, Some(egui::Align::Center));
+        // Only an explicit keyboard navigation request reveals a control. Use
+        // minimal scrolling so re-entry does not recenter an already visible one.
+        ui.scroll_to_rect(target.rect, None);
     } else if let Some(id) = group.focused {
         if group.previous.iter().any(|item| item.id == id)
             && !group.current.iter().any(|item| item.id == id)
@@ -273,6 +306,7 @@ pub fn end(ui: &Ui) {
     // Text fields still receive the events; the app leaves their arrow keys alone.
     if let Some(id) = ui.memory(|m| m.focused()) {
         if group.current.iter().any(|item| item.id == id) {
+            ui.ctx().data_mut(|d| d.insert_temp(group.memory_key, id));
             ui.memory_mut(|m| {
                 let popup = m.any_popup_open();
                 m.set_focus_lock_filter(

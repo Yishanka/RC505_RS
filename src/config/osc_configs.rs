@@ -190,6 +190,8 @@ pub struct CurvePoint {
     pub y: f32,
     pub curve: f32,
 }
+pub const LFO_MAX_POINTS: usize = 32;
+pub const LFO_POINT_GAP: f32 = 0.001;
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct LfoConfig {
@@ -239,7 +241,7 @@ impl LfoConfig {
         self.rate_hz = finite(self.rate_hz, 1.0).clamp(0.01, 40.0);
         self.beats = finite(self.beats, 1.0).clamp(0.0625, 32.0);
         self.depth = finite(self.depth, 0.5).clamp(0.0, 1.0);
-        self.points.truncate(32);
+        self.points.truncate(LFO_MAX_POINTS);
         self.points
             .retain(|p| p.x.is_finite() && p.y.is_finite() && p.curve.is_finite());
         for p in &mut self.points {
@@ -248,12 +250,21 @@ impl LfoConfig {
             p.curve = p.curve.clamp(-1.0, 1.0);
         }
         self.points.sort_by(|a, b| a.x.total_cmp(&b.x));
-        self.points.dedup_by(|a, b| (a.x - b.x).abs() < 0.001);
         if self.points.len() < 2 {
             self.points = Self::default().points;
         }
         self.points[0].x = 0.0;
         self.points.last_mut().unwrap().x = 1.0;
+        // Keep every valid point. Deduplicating at the same epsilon used by
+        // dragging removed points after f32 subtraction rounded below 0.001,
+        // transferring egui's active index to a different node. Imported
+        // coincident points are spaced in stable order instead of merged.
+        let last = self.points.len() - 1;
+        for i in 1..last {
+            let minimum = self.points[i - 1].x + LFO_POINT_GAP;
+            let maximum = 1.0 - (last - i) as f32 * LFO_POINT_GAP;
+            self.points[i].x = self.points[i].x.clamp(minimum.min(maximum), maximum);
+        }
     }
 }
 fn finite(v: f32, fallback: f32) -> f32 {

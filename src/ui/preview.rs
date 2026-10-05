@@ -189,10 +189,16 @@ pub fn configure(app: &mut MyApp, mode: &str) {
                 },
             ];
         }
-        osc.envelope.attack_ms.value = 80;
-        osc.envelope.decay_ms.value = 350;
+        osc.envelope.attack_ms.value = 80.0;
+        osc.envelope.decay_ms.value = 350.0;
         osc.envelope.sustain_pct.value = 40;
-        osc.envelope.release_ms.value = 300;
+        osc.envelope.release_ms.value = 300.0;
+        if mode.starts_with("envelope-fractional") {
+            osc.envelope.attack_ms.value = 40.1;
+            osc.envelope.hold_ms.value = 50.2;
+            osc.envelope.decay_ms.value = 200.3;
+            osc.envelope.release_ms.value = 250.4;
+        }
     }
     app.editor.select(FxTarget::Input { bank: 0, slot: 0 });
     app.editor.expanded = !mode.starts_with("performance")

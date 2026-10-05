@@ -36,6 +36,9 @@ struct Geometry {
     attack: egui::Pos2,
     release: egui::Pos2,
 }
+fn drag_time(value: f32, min: f32, max: f32) -> f32 {
+    (value.clamp(min, max) * 10.0).round() / 10.0
+}
 pub(super) fn draw(ui: &mut egui::Ui, c: &mut EnvelopeConfigs) {
     let lang = crate::app_support::language::Language::current(ui.ctx());
     let view_id = ui.id().with("envelope_fixed_view");
@@ -95,7 +98,7 @@ pub(super) fn draw(ui: &mut egui::Ui, c: &mut EnvelopeConfigs) {
     let a = c.attack_ms.value as f32;
     let h = c.hold_ms.value as f32;
     let d = c.decay_ms.value as f32;
-    let r = c.release_ms.value.max(1) as f32;
+    let r = c.release_ms.value.max(ENVELOPE_RELEASE_MIN_MS);
     let sustain_hold = 300.0;
     let scale = view.span_ms;
     let sustain = c.sustain_pct.value as f32 / 100.0;
@@ -206,17 +209,16 @@ pub(super) fn draw(ui: &mut egui::Ui, c: &mut EnvelopeConfigs) {
                     ((plot.bottom() - p.y) / plot.height() * 100.0).clamp(0.0, 100.0) as usize;
                 match index {
                     0 => c.start_pct.value = level,
-                    1 => c.attack_ms.value = (ms as usize).min(ENVELOPE_ATTACK_MAX_MS),
-                    2 => c.hold_ms.value = ((ms - a).max(0.0) as usize).min(ENVELOPE_HOLD_MAX_MS),
+                    1 => c.attack_ms.value = drag_time(ms, 0.0, ENVELOPE_ATTACK_MAX_MS),
+                    2 => c.hold_ms.value = drag_time(ms - a, 0.0, ENVELOPE_HOLD_MAX_MS),
                     3 => {
-                        c.decay_ms.value =
-                            ((ms - a - h).max(0.0) as usize).min(ENVELOPE_DECAY_MAX_MS);
+                        c.decay_ms.value = drag_time(ms - a - h, 0.0, ENVELOPE_DECAY_MAX_MS);
                         c.sustain_pct.value = level;
                     }
                     4 => c.sustain_pct.value = level,
                     5 => {
                         c.release_ms.value =
-                            ((ms - off).max(1.0) as usize).min(ENVELOPE_RELEASE_MAX_MS)
+                            drag_time(ms - off, ENVELOPE_RELEASE_MIN_MS, ENVELOPE_RELEASE_MAX_MS)
                     }
                     _ => {}
                 }
@@ -325,8 +327,8 @@ mod tests {
         let ctx = egui::Context::default();
         let mut config = EnvelopeConfigs::new();
         let first = frame(&ctx, &mut config, vec![]);
-        config.release_ms.value = 5000;
-        config.decay_ms.value = 10000;
+        config.release_ms.value = 5000.0;
+        config.decay_ms.value = 10000.0;
         let next = frame(&ctx, &mut config, vec![]);
         assert_eq!(first.view, next.view);
         assert_eq!(first.plot, next.plot);
@@ -337,8 +339,8 @@ mod tests {
             offset_ms: 300.0,
         };
         ctx.data_mut(|data| data.insert_temp(next.id, fixed));
-        config.attack_ms.value = 300;
-        config.release_ms.value = 20;
+        config.attack_ms.value = 300.0;
+        config.release_ms.value = 20.0;
         let changed = frame(&ctx, &mut config, vec![]);
         assert_eq!(changed.view, fixed);
         assert_eq!(changed.plot, next.plot);
@@ -347,7 +349,7 @@ mod tests {
     fn dragging_then_releasing_keeps_the_same_time_scale() {
         let ctx = egui::Context::default();
         let mut config = EnvelopeConfigs::new();
-        config.attack_ms.value = 50;
+        config.attack_ms.value = 50.0;
         let before = frame(&ctx, &mut config, vec![]);
         let start = before.attack;
         let end = pos2(before.plot.left() + before.plot.width() * 0.2, start.y);
@@ -363,5 +365,61 @@ mod tests {
         assert_eq!(before.view, after.view);
         assert_eq!(before.plot, after.plot);
         assert!((after.attack.x - end.x).abs() < 2.0);
+    }
+    #[test]
+    fn fractional_envelope_canvas_keeps_tenths_for_attack_and_release() {
+        let ctx = egui::Context::default();
+        let mut config = EnvelopeConfigs::new();
+        let initial = frame(&ctx, &mut config, vec![]);
+        ctx.data_mut(|d| {
+            d.insert_temp(
+                initial.id,
+                Viewport {
+                    span_ms: 100.0,
+                    offset_ms: 0.0,
+                },
+            )
+        });
+        let geometry = frame(&ctx, &mut config, vec![]);
+        let start = geometry.attack;
+        let target = pos2(
+            geometry.plot.left() + geometry.plot.width() * 0.013,
+            start.y,
+        );
+        frame(
+            &ctx,
+            &mut config,
+            vec![egui::Event::PointerMoved(start), pointer(start, true)],
+        );
+        frame(&ctx, &mut config, vec![egui::Event::PointerMoved(target)]);
+        frame(&ctx, &mut config, vec![pointer(target, false)]);
+        assert!((config.attack_ms.value - 1.3).abs() < 0.00001);
+        config.attack_ms.value = 0.0;
+        config.hold_ms.value = 0.0;
+        config.decay_ms.value = 0.0;
+        config.release_ms.value = 5.0;
+        ctx.data_mut(|d| {
+            d.insert_temp(
+                initial.id,
+                Viewport {
+                    span_ms: 100.0,
+                    offset_ms: 295.0,
+                },
+            )
+        });
+        let geometry = frame(&ctx, &mut config, vec![]);
+        let start = geometry.release;
+        let target = pos2(
+            geometry.plot.left() + geometry.plot.width() * 0.067,
+            start.y,
+        );
+        frame(
+            &ctx,
+            &mut config,
+            vec![egui::Event::PointerMoved(start), pointer(start, true)],
+        );
+        frame(&ctx, &mut config, vec![egui::Event::PointerMoved(target)]);
+        frame(&ctx, &mut config, vec![pointer(target, false)]);
+        assert!((config.release_ms.value - 1.7).abs() < 0.00001);
     }
 }

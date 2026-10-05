@@ -279,7 +279,7 @@ fn osc_bot_wave_and_envelope_changes_replay_and_seek_sample_exactly() {
     if let Some(InputFx::Oscillator(o)) = &mut c.input_fx.banks[0].slots[0].fx {
         *o = instrument(Waveform::Saw);
         o.envelope.sustain_pct.value = 100;
-        o.envelope.decay_ms.value = 0;
+        o.envelope.decay_ms.value = 0.0;
     }
     let mut core = RenderCore::new(8000);
     core.configure(&mut Parameters::from_config(&c, 8000));

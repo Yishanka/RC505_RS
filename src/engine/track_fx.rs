@@ -4,11 +4,6 @@ use crate::config::delay_configs::{
     TRACK_DELAY_DAMP_MAX_HZ, TRACK_DELAY_DAMP_MIN_HZ, TRACK_DELAY_FEEDBACK_MAX_PCT,
     TRACK_DELAY_MIX_MAX_PCT, TRACK_DELAY_TIME_MAX_MS, TRACK_DELAY_TIME_MIN_MS,
 };
-use crate::config::envelope_configs::{
-    ENVELOPE_ATTACK_MAX_MS, ENVELOPE_DECAY_MAX_MS, ENVELOPE_HOLD_MAX_MS, ENVELOPE_RELEASE_MAX_MS,
-    ENVELOPE_RELEASE_MIN_MS, ENVELOPE_START_MAX_PCT, ENVELOPE_SUSTAIN_MAX_PCT,
-    ENVELOPE_TENSION_MAX,
-};
 use crate::config::filter_configs::{
     FILTER_CUTOFF_MAX_HZ, FILTER_CUTOFF_MIN_HZ, FILTER_DRIVE_MAX, FILTER_MIX_MAX, FILTER_Q_MAX_X10,
     FILTER_Q_MIN_X10, FilterType,
@@ -696,40 +691,7 @@ impl TrackFxRuntime {
                                 .clamp(0.0, 1.0),
                             mix: (filter.filter.mix.value.min(FILTER_MIX_MAX) as f32 / 100.0)
                                 .clamp(0.0, 1.0),
-                            envelope: AhdsrParams {
-                                attack_ms: filter.env.attack_ms.value.min(ENVELOPE_ATTACK_MAX_MS)
-                                    as f32,
-                                hold_ms: filter.env.hold_ms.value.min(ENVELOPE_HOLD_MAX_MS) as f32,
-                                decay_ms: filter.env.decay_ms.value.min(ENVELOPE_DECAY_MAX_MS)
-                                    as f32,
-                                sustain_level: (filter
-                                    .env
-                                    .sustain_pct
-                                    .value
-                                    .min(ENVELOPE_SUSTAIN_MAX_PCT)
-                                    as f32
-                                    / 100.0)
-                                    .clamp(0.0, 1.0),
-                                release_ms: filter
-                                    .env
-                                    .release_ms
-                                    .value
-                                    .clamp(ENVELOPE_RELEASE_MIN_MS, ENVELOPE_RELEASE_MAX_MS)
-                                    as f32,
-                                start_level:
-                                    (filter.env.start_pct.value.min(ENVELOPE_START_MAX_PCT) as f32
-                                        / 100.0)
-                                        .clamp(0.0, 1.0),
-                                tension_attack: tension_to_exponent(
-                                    filter.env.tension_a.value.min(ENVELOPE_TENSION_MAX),
-                                ),
-                                tension_decay: tension_to_exponent(
-                                    filter.env.tension_d.value.min(ENVELOPE_TENSION_MAX),
-                                ),
-                                tension_release: tension_to_exponent(
-                                    filter.env.tension_r.value.min(ENVELOPE_TENSION_MAX),
-                                ),
-                            },
+                            envelope: super::envelope_params::from_config(&filter.env),
                             seq: filter.seq.seq().to_vec(),
                             trigger_seq: filter
                                 .seq
@@ -817,11 +779,6 @@ impl TrackFxBankState {
     }
 }
 
-fn tension_to_exponent(value: usize) -> f32 {
-    let t = value.min(ENVELOPE_TENSION_MAX) as f32;
-    2.0_f32.powf((t - 100.0) / 50.0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -887,9 +844,9 @@ mod tests {
         c.tracks[0].enabled[0][1] = true;
         if let Some(TrackFx::Filter(p)) = c.slot_fx_mut(0, 1) {
             p.seq.set_seq(vec![true, false, true, false]);
-            p.env.attack_ms.value = 0;
-            p.env.decay_ms.value = 0;
-            p.env.hold_ms.value = 0;
+            p.env.attack_ms.value = 0.0;
+            p.env.decay_ms.value = 0.0;
+            p.env.hold_ms.value = 0.0;
             p.env.sustain_pct.value = 100;
             p.filter.cutoff_hz.value = 1600;
         }
@@ -1176,7 +1133,7 @@ mod tests {
         config.tracks[0].enabled[0][0] = true;
         if let Some(TrackFx::Filter(filter)) = &mut config.banks[0].slots[0].fx {
             filter.filter.cutoff_hz.value = 2000;
-            filter.env.attack_ms.value = 0;
+            filter.env.attack_ms.value = 0.0;
             filter
                 .seq
                 .set_seq([vec![false; 12], vec![true; 12]].concat());

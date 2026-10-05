@@ -3,6 +3,7 @@ pub mod audition;
 pub mod clock;
 pub mod core;
 mod device_config;
+pub(crate) mod envelope_params;
 pub mod history;
 pub mod input_fx;
 pub mod latency;

@@ -272,7 +272,7 @@ pub fn draw_lane(
         response.request_focus();
     }
     let plot = Rect::from_min_max(rect.min + vec2(68.0, 18.0), rect.max - vec2(12.0, 28.0));
-    let painter = ui.painter();
+    let painter = ui.painter().clone();
     painter.rect_filled(rect, 6.0, theme::BACKGROUND);
     #[cfg(test)]
     {
@@ -313,56 +313,10 @@ pub fn draw_lane(
             );
         }
     }
-    let mut handles = Vec::new();
-    for (i, pair) in lane.points.windows(2).enumerate() {
-        let a = pair[0];
-        let b = pair[1];
-        let mut line = Vec::new();
-        if lane.interpolation == Interpolation::Step {
-            line.extend([
-                position(a),
-                position(Point { tick: b.tick, ..a }),
-                position(b),
-            ]);
-        } else {
-            for j in 0..=24 {
-                let t = j as f32 / 24.0;
-                let v = if lane.interpolation == Interpolation::Curve {
-                    crate::dsp::envelope::bend_curve(t, a.curve)
-                } else {
-                    t
-                };
-                line.push(position(Point {
-                    tick: a.tick + ((b.tick - a.tick) as f32 * t) as u32,
-                    value: a.value + (b.value - a.value) * v,
-                    curve: 0.0,
-                }));
-            }
-        }
-        painter.add(egui::Shape::line(line, Stroke::new(2.0, theme::accent(ui))));
-        if lane.interpolation == Interpolation::Curve {
-            let handle = position(Point {
-                tick: (a.tick + b.tick) / 2,
-                value: a.value
-                    + (b.value - a.value) * crate::dsp::envelope::bend_curve(0.5, a.curve),
-                curve: 0.0,
-            });
-            handles.push((i, handle));
-            painter.circle_stroke(handle, 4.0, Stroke::new(1.5, theme::accent(ui)));
-        }
-    }
+    // Hit-test the geometry from the start of this frame. Paint only after
+    // pointer/keyboard/value edits, so handles and curves share the same state.
+    let handles = curve_handles(lane, plot);
     let positions: Vec<_> = lane.points.iter().copied().map(position).collect();
-    for (i, pos) in positions.iter().enumerate() {
-        painter.circle_filled(
-            *pos,
-            if i == state.selected { 6.0 } else { 4.5 },
-            if i == state.selected {
-                Color32::WHITE
-            } else {
-                theme::accent(ui)
-            },
-        );
-    }
     let pointer = response.interact_pointer_pos();
     if response.drag_started() {
         let origin = ui.input(|i| i.pointer.press_origin()).or(pointer);
@@ -422,6 +376,13 @@ pub fn draw_lane(
         if let Some(pos) = pointer.filter(|p| plot.contains(*p)) {
             if let Some(index) = positions.iter().position(|p| p.distance(pos) < 10.0) {
                 state.selected = index;
+            } else if let Some((index, _)) = handles
+                .iter()
+                .find(|(_, handle)| handle.distance(pos) < 10.0)
+            {
+                // A curvature handle is not blank canvas. A click that never
+                // reaches the drag threshold must not create a point on it.
+                state.selected = *index;
             } else {
                 let tick = (((pos.x - plot.left()) / plot.width() * lane.length as f32
                     / state.snap as f32)
@@ -544,6 +505,93 @@ pub fn draw_lane(
     if !history && state.drag.is_none() {
         state.remember(before, lane);
     }
+    paint_curve(&painter, lane, plot, state.selected, theme::accent(ui));
+}
+
+fn point_position(plot: Rect, length: u32, point: Point) -> egui::Pos2 {
+    pos2(
+        plot.left() + point.tick as f32 / length.max(1) as f32 * plot.width(),
+        plot.bottom() - point.value * plot.height(),
+    )
+}
+fn curve_handles(lane: &ParameterLane, plot: Rect) -> Vec<(usize, egui::Pos2)> {
+    if lane.interpolation != Interpolation::Curve {
+        return Vec::new();
+    }
+    lane.points
+        .windows(2)
+        .enumerate()
+        .map(|(index, pair)| {
+            let (a, b) = (pair[0], pair[1]);
+            (
+                index,
+                point_position(
+                    plot,
+                    lane.length,
+                    Point {
+                        tick: (a.tick + b.tick) / 2,
+                        value: a.value
+                            + (b.value - a.value) * crate::dsp::envelope::bend_curve(0.5, a.curve),
+                        curve: 0.0,
+                    },
+                ),
+            )
+        })
+        .collect()
+}
+fn paint_curve(
+    painter: &egui::Painter,
+    lane: &ParameterLane,
+    plot: Rect,
+    selected: usize,
+    color: Color32,
+) {
+    let position = |point| point_position(plot, lane.length, point);
+    for pair in lane.points.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let line = if lane.interpolation == Interpolation::Step {
+            vec![
+                position(a),
+                position(Point { tick: b.tick, ..a }),
+                position(b),
+            ]
+        } else {
+            (0..=48)
+                .map(|j| {
+                    let t = j as f32 / 48.0;
+                    let shape = if lane.interpolation == Interpolation::Curve {
+                        crate::dsp::envelope::bend_curve(t, a.curve)
+                    } else {
+                        t
+                    };
+                    // Keep the display's x coordinate continuous, even when a segment
+                    // is only one PPQ tick wide.
+                    pos2(
+                        plot.left()
+                            + (a.tick as f32 + (b.tick - a.tick) as f32 * t)
+                                / lane.length.max(1) as f32
+                                * plot.width(),
+                        plot.bottom() - (a.value + (b.value - a.value) * shape) * plot.height(),
+                    )
+                })
+                .collect()
+        };
+        painter.add(egui::Shape::line(line, Stroke::new(2.0, color)));
+    }
+    for (_, handle) in curve_handles(lane, plot) {
+        painter.circle_stroke(handle, 4.0, Stroke::new(1.5, color));
+    }
+    for (index, point) in lane.points.iter().copied().enumerate() {
+        painter.circle_filled(
+            position(point),
+            if index == selected { 6.0 } else { 4.5 },
+            if index == selected {
+                Color32::WHITE
+            } else {
+                color
+            },
+        );
+    }
 }
 
 #[cfg(test)]
@@ -555,7 +603,7 @@ mod tests {
         lane: &mut ParameterLane,
         state: &mut EditorState,
         events: Vec<egui::Event>,
-    ) {
+    ) -> egui::FullOutput {
         let modifiers = events
             .iter()
             .find_map(|e| match e {
@@ -564,7 +612,7 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_default();
-        let _ = ctx.run(
+        ctx.run(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1300.0, 1000.0))),
                 events,
@@ -575,7 +623,7 @@ mod tests {
                 egui::CentralPanel::default()
                     .show(ctx, |ui| draw_lane(ui, lane, Family::Filter, state));
             },
-        );
+        )
     }
     fn click(
         ctx: &egui::Context,
@@ -634,6 +682,152 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             }],
         );
+    }
+    #[test]
+    fn curve_midpoint_click_is_selection_and_drag_paints_only_current_geometry() {
+        let ctx = egui::Context::default();
+        let mut lane = ParameterLane::create(Target::FilterCutoff);
+        lane.interpolation = Interpolation::Curve;
+        let mut state = EditorState::default();
+        frame(&ctx, &mut lane, &mut state, vec![]);
+        frame(&ctx, &mut lane, &mut state, vec![]);
+        let plot = state.plot.unwrap();
+        let handle = curve_handles(&lane, plot)[0].1;
+        let before = lane.clone();
+        click(
+            &ctx,
+            &mut lane,
+            &mut state,
+            handle,
+            egui::PointerButton::Primary,
+        );
+        assert_eq!(
+            lane, before,
+            "A curve handle click cannot create a duplicate node"
+        );
+        frame(
+            &ctx,
+            &mut lane,
+            &mut state,
+            vec![
+                egui::Event::PointerMoved(handle),
+                egui::Event::PointerButton {
+                    pos: handle,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let to = handle - vec2(0.0, plot.height() * 0.15);
+        let output = frame(
+            &ctx,
+            &mut lane,
+            &mut state,
+            vec![egui::Event::PointerMoved(to)],
+        );
+        assert_eq!(lane.points.len(), 3);
+        assert!(lane.points[0].curve.abs() > 0.01);
+        let current = curve_handles(&lane, plot)[0].1;
+        let paths = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Path(path) if path.stroke.width == 2.0 && path.points.len() == 49 => {
+                    Some(path)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths.len(),
+            lane.points.len() - 1,
+            "One current line per segment, without a stale copy"
+        );
+        assert!(
+            paths[0].points[24].distance(current) < 0.01,
+            "The line must use the new curvature in this same frame"
+        );
+        let handles = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Circle(circle)
+                    if circle.radius == 4.0 && circle.stroke.width == 1.5 =>
+                {
+                    Some(circle.center)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(handles.len(), lane.points.len() - 1);
+        assert!(handles.iter().any(|p| p.distance(current) < 0.01));
+        assert!(!handles.iter().any(|p| p.distance(handle) < 0.01));
+    }
+    #[test]
+    fn dragging_an_automation_node_paints_line_and_handle_at_the_same_updated_position() {
+        let ctx = egui::Context::default();
+        let mut lane = ParameterLane::create(Target::FilterCutoff);
+        lane.interpolation = Interpolation::Curve;
+        let mut state = EditorState::default();
+        frame(&ctx, &mut lane, &mut state, vec![]);
+        frame(&ctx, &mut lane, &mut state, vec![]);
+        let plot = state.plot.unwrap();
+        let old = point_position(plot, lane.length, lane.points[1]);
+        frame(
+            &ctx,
+            &mut lane,
+            &mut state,
+            vec![
+                egui::Event::PointerMoved(old),
+                egui::Event::PointerButton {
+                    pos: old,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let to = pos2(
+            plot.left() + plot.width() * 0.625,
+            plot.bottom() - plot.height() * 0.35,
+        );
+        let output = frame(
+            &ctx,
+            &mut lane,
+            &mut state,
+            vec![egui::Event::PointerMoved(to)],
+        );
+        let current = point_position(plot, lane.length, lane.points[1]);
+        assert!(current.distance(to) < 0.01);
+        let lines = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Path(path) if path.stroke.width == 2.0 && path.points.len() == 49 => {
+                    Some(path)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].points.last().unwrap().distance(current) < 0.01);
+        assert!(lines[1].points[0].distance(current) < 0.01);
+        let circles = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Circle(circle)
+                    if circle.radius == 6.0 && plot.contains(circle.center) =>
+                {
+                    Some(circle.center)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(circles.len(), 1);
+        assert!(circles[0].distance(current) < 0.01);
+        assert!(circles[0].distance(old) > 10.0);
     }
     #[test]
     fn mouse_points_curve_handles_and_undo_keep_a_bounded_loop() {

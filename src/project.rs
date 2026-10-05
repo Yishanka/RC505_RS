@@ -342,11 +342,11 @@ pub struct NoteOctData {
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnvelopeData {
-    pub attack_ms: usize,
-    pub hold_ms: usize,
-    pub decay_ms: usize,
+    pub attack_ms: f32,
+    pub hold_ms: f32,
+    pub decay_ms: f32,
     pub sustain_pct: usize,
-    pub release_ms: usize,
+    pub release_ms: f32,
     #[serde(default)]
     pub start_pct: usize,
     #[serde(default = "default_tension_value")]
@@ -422,14 +422,44 @@ pub struct VocoderData {
     pub mix: usize,
 }
 
+impl EnvelopeData {
+    fn from_config(c: &crate::config::envelope_configs::EnvelopeConfigs) -> Self {
+        Self {
+            attack_ms: c.attack_ms.bounded(0.0, ENVELOPE_ATTACK_MAX_MS),
+            hold_ms: c.hold_ms.bounded(0.0, ENVELOPE_HOLD_MAX_MS),
+            decay_ms: c.decay_ms.bounded(0.0, ENVELOPE_DECAY_MAX_MS),
+            release_ms: c
+                .release_ms
+                .bounded(ENVELOPE_RELEASE_MIN_MS, ENVELOPE_RELEASE_MAX_MS),
+            sustain_pct: c.sustain_pct.value,
+            start_pct: c.start_pct.value,
+            tension_a: c.tension_a.value,
+            tension_d: c.tension_d.value,
+            tension_r: c.tension_r.value,
+        }
+    }
+    fn apply_to(&self, c: &mut crate::config::envelope_configs::EnvelopeConfigs) {
+        c.attack_ms.value = self.attack_ms;
+        c.hold_ms.value = self.hold_ms;
+        c.decay_ms.value = self.decay_ms;
+        c.release_ms.value = self.release_ms;
+        c.sanitize_times();
+        c.sustain_pct.value = self.sustain_pct.min(ENVELOPE_SUSTAIN_MAX_PCT);
+        c.start_pct.value = self.start_pct.min(ENVELOPE_START_MAX_PCT);
+        c.tension_a.value = self.tension_a.min(ENVELOPE_TENSION_MAX);
+        c.tension_d.value = self.tension_d.min(ENVELOPE_TENSION_MAX);
+        c.tension_r.value = self.tension_r.min(ENVELOPE_TENSION_MAX);
+    }
+}
+
 impl Default for EnvelopeData {
     fn default() -> Self {
         Self {
-            attack_ms: 20,
-            hold_ms: 40,
-            decay_ms: 180,
+            attack_ms: 20.0,
+            hold_ms: 40.0,
+            decay_ms: 180.0,
             sustain_pct: 70,
-            release_ms: 120,
+            release_ms: 120.0,
             start_pct: 0,
             tension_a: default_tension_value(),
             tension_d: default_tension_value(),
@@ -757,17 +787,7 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                             step: osc.note.step.value.clone(),
                             note_seq: seq,
                             note_step_len_seq: osc.note.step_len_seq().to_vec(),
-                            envelope: EnvelopeData {
-                                attack_ms: osc.envelope.attack_ms.value,
-                                hold_ms: osc.envelope.hold_ms.value,
-                                decay_ms: osc.envelope.decay_ms.value,
-                                sustain_pct: osc.envelope.sustain_pct.value,
-                                release_ms: osc.envelope.release_ms.value,
-                                start_pct: osc.envelope.start_pct.value,
-                                tension_a: osc.envelope.tension_a.value,
-                                tension_d: osc.envelope.tension_d.value,
-                                tension_r: osc.envelope.tension_r.value,
-                            },
+                            envelope: EnvelopeData::from_config(&osc.envelope),
                             osc_filter: FilterData {
                                 sweep: Default::default(),
                                 filter_type: filter_type_to_string(
@@ -779,17 +799,7 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                                 drive: osc.osc_filter.drive.value,
                                 mix: osc.osc_filter.mix.value,
                             },
-                            osc_filter_envelope: EnvelopeData {
-                                attack_ms: osc.osc_filter_env.attack_ms.value,
-                                hold_ms: osc.osc_filter_env.hold_ms.value,
-                                decay_ms: osc.osc_filter_env.decay_ms.value,
-                                sustain_pct: osc.osc_filter_env.sustain_pct.value,
-                                release_ms: osc.osc_filter_env.release_ms.value,
-                                start_pct: osc.osc_filter_env.start_pct.value,
-                                tension_a: osc.osc_filter_env.tension_a.value,
-                                tension_d: osc.osc_filter_env.tension_d.value,
-                                tension_r: osc.osc_filter_env.tension_r.value,
-                            },
+                            osc_filter_envelope: EnvelopeData::from_config(&osc.osc_filter_env),
                         });
                     }
                     InputFx::Filter(filter) => {
@@ -849,28 +859,8 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                                 drive: delay.filter.drive.value,
                                 mix: delay.filter.mix.value,
                             },
-                            audio_env: EnvelopeData {
-                                attack_ms: delay.audio_env.attack_ms.value,
-                                hold_ms: delay.audio_env.hold_ms.value,
-                                decay_ms: delay.audio_env.decay_ms.value,
-                                sustain_pct: delay.audio_env.sustain_pct.value,
-                                release_ms: delay.audio_env.release_ms.value,
-                                start_pct: delay.audio_env.start_pct.value,
-                                tension_a: delay.audio_env.tension_a.value,
-                                tension_d: delay.audio_env.tension_d.value,
-                                tension_r: delay.audio_env.tension_r.value,
-                            },
-                            filter_env: EnvelopeData {
-                                attack_ms: delay.filter_env.attack_ms.value,
-                                hold_ms: delay.filter_env.hold_ms.value,
-                                decay_ms: delay.filter_env.decay_ms.value,
-                                sustain_pct: delay.filter_env.sustain_pct.value,
-                                release_ms: delay.filter_env.release_ms.value,
-                                start_pct: delay.filter_env.start_pct.value,
-                                tension_a: delay.filter_env.tension_a.value,
-                                tension_d: delay.filter_env.tension_d.value,
-                                tension_r: delay.filter_env.tension_r.value,
-                            },
+                            audio_env: EnvelopeData::from_config(&delay.audio_env),
+                            filter_env: EnvelopeData::from_config(&delay.filter_env),
                         });
                     }
                     InputFx::Vocoder(vocoder) => {
@@ -953,17 +943,7 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                             seq_step: filter.seq.step.value.clone(),
                             seq: filter.seq.seq().to_vec(),
                             seq_step_len_seq: filter.seq.step_len_seq().to_vec(),
-                            env: EnvelopeData {
-                                attack_ms: filter.env.attack_ms.value,
-                                hold_ms: filter.env.hold_ms.value,
-                                decay_ms: filter.env.decay_ms.value,
-                                sustain_pct: filter.env.sustain_pct.value,
-                                release_ms: filter.env.release_ms.value,
-                                start_pct: filter.env.start_pct.value,
-                                tension_a: filter.env.tension_a.value,
-                                tension_d: filter.env.tension_d.value,
-                                tension_r: filter.env.tension_r.value,
-                            },
+                            env: EnvelopeData::from_config(&filter.env),
                         });
                     }
                 }
@@ -1175,26 +1155,7 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                                         clip: note.clip(),
                                     }
                                 });
-                            osc.envelope.attack_ms.value =
-                                osc_data.envelope.attack_ms.min(ENVELOPE_ATTACK_MAX_MS);
-                            osc.envelope.hold_ms.value =
-                                osc_data.envelope.hold_ms.min(ENVELOPE_HOLD_MAX_MS);
-                            osc.envelope.decay_ms.value =
-                                osc_data.envelope.decay_ms.min(ENVELOPE_DECAY_MAX_MS);
-                            osc.envelope.sustain_pct.value =
-                                osc_data.envelope.sustain_pct.min(ENVELOPE_SUSTAIN_MAX_PCT);
-                            osc.envelope.release_ms.value = osc_data
-                                .envelope
-                                .release_ms
-                                .clamp(ENVELOPE_RELEASE_MIN_MS, ENVELOPE_RELEASE_MAX_MS);
-                            osc.envelope.start_pct.value =
-                                osc_data.envelope.start_pct.min(ENVELOPE_START_MAX_PCT);
-                            osc.envelope.tension_a.value =
-                                osc_data.envelope.tension_a.min(ENVELOPE_TENSION_MAX);
-                            osc.envelope.tension_d.value =
-                                osc_data.envelope.tension_d.min(ENVELOPE_TENSION_MAX);
-                            osc.envelope.tension_r.value =
-                                osc_data.envelope.tension_r.min(ENVELOPE_TENSION_MAX);
+                            osc_data.envelope.apply_to(&mut osc.envelope);
                             if let Some(t) = string_to_filter_type(&osc_data.osc_filter.filter_type)
                             {
                                 osc.osc_filter.filter_type.value = t;
@@ -1205,42 +1166,9 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                                 osc_data.osc_filter.resonance_x10.clamp(1, 100);
                             osc.osc_filter.drive.value = osc_data.osc_filter.drive.min(100);
                             osc.osc_filter.mix.value = osc_data.osc_filter.mix.min(100);
-                            osc.osc_filter_env.attack_ms.value = osc_data
+                            osc_data
                                 .osc_filter_envelope
-                                .attack_ms
-                                .min(ENVELOPE_ATTACK_MAX_MS);
-                            osc.osc_filter_env.hold_ms.value = osc_data
-                                .osc_filter_envelope
-                                .hold_ms
-                                .min(ENVELOPE_HOLD_MAX_MS);
-                            osc.osc_filter_env.decay_ms.value = osc_data
-                                .osc_filter_envelope
-                                .decay_ms
-                                .min(ENVELOPE_DECAY_MAX_MS);
-                            osc.osc_filter_env.sustain_pct.value = osc_data
-                                .osc_filter_envelope
-                                .sustain_pct
-                                .min(ENVELOPE_SUSTAIN_MAX_PCT);
-                            osc.osc_filter_env.release_ms.value = osc_data
-                                .osc_filter_envelope
-                                .release_ms
-                                .clamp(ENVELOPE_RELEASE_MIN_MS, ENVELOPE_RELEASE_MAX_MS);
-                            osc.osc_filter_env.start_pct.value = osc_data
-                                .osc_filter_envelope
-                                .start_pct
-                                .min(ENVELOPE_START_MAX_PCT);
-                            osc.osc_filter_env.tension_a.value = osc_data
-                                .osc_filter_envelope
-                                .tension_a
-                                .min(ENVELOPE_TENSION_MAX);
-                            osc.osc_filter_env.tension_d.value = osc_data
-                                .osc_filter_envelope
-                                .tension_d
-                                .min(ENVELOPE_TENSION_MAX);
-                            osc.osc_filter_env.tension_r.value = osc_data
-                                .osc_filter_envelope
-                                .tension_r
-                                .min(ENVELOPE_TENSION_MAX);
+                                .apply_to(&mut osc.osc_filter_env);
                         }
                     }
                 }
@@ -1317,50 +1245,8 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                                 delay_data.filter.resonance_x10.clamp(1, 100);
                             delay.filter.drive.value = delay_data.filter.drive.min(100);
                             delay.filter.mix.value = delay_data.filter.mix.min(100);
-                            delay.audio_env.attack_ms.value =
-                                delay_data.audio_env.attack_ms.min(ENVELOPE_ATTACK_MAX_MS);
-                            delay.audio_env.hold_ms.value =
-                                delay_data.audio_env.hold_ms.min(ENVELOPE_HOLD_MAX_MS);
-                            delay.audio_env.decay_ms.value =
-                                delay_data.audio_env.decay_ms.min(ENVELOPE_DECAY_MAX_MS);
-                            delay.audio_env.sustain_pct.value = delay_data
-                                .audio_env
-                                .sustain_pct
-                                .min(ENVELOPE_SUSTAIN_MAX_PCT);
-                            delay.audio_env.release_ms.value = delay_data
-                                .audio_env
-                                .release_ms
-                                .clamp(ENVELOPE_RELEASE_MIN_MS, ENVELOPE_RELEASE_MAX_MS);
-                            delay.audio_env.start_pct.value =
-                                delay_data.audio_env.start_pct.min(ENVELOPE_START_MAX_PCT);
-                            delay.audio_env.tension_a.value =
-                                delay_data.audio_env.tension_a.min(ENVELOPE_TENSION_MAX);
-                            delay.audio_env.tension_d.value =
-                                delay_data.audio_env.tension_d.min(ENVELOPE_TENSION_MAX);
-                            delay.audio_env.tension_r.value =
-                                delay_data.audio_env.tension_r.min(ENVELOPE_TENSION_MAX);
-                            delay.filter_env.attack_ms.value =
-                                delay_data.filter_env.attack_ms.min(ENVELOPE_ATTACK_MAX_MS);
-                            delay.filter_env.hold_ms.value =
-                                delay_data.filter_env.hold_ms.min(ENVELOPE_HOLD_MAX_MS);
-                            delay.filter_env.decay_ms.value =
-                                delay_data.filter_env.decay_ms.min(ENVELOPE_DECAY_MAX_MS);
-                            delay.filter_env.sustain_pct.value = delay_data
-                                .filter_env
-                                .sustain_pct
-                                .min(ENVELOPE_SUSTAIN_MAX_PCT);
-                            delay.filter_env.release_ms.value = delay_data
-                                .filter_env
-                                .release_ms
-                                .clamp(ENVELOPE_RELEASE_MIN_MS, ENVELOPE_RELEASE_MAX_MS);
-                            delay.filter_env.start_pct.value =
-                                delay_data.filter_env.start_pct.min(ENVELOPE_START_MAX_PCT);
-                            delay.filter_env.tension_a.value =
-                                delay_data.filter_env.tension_a.min(ENVELOPE_TENSION_MAX);
-                            delay.filter_env.tension_d.value =
-                                delay_data.filter_env.tension_d.min(ENVELOPE_TENSION_MAX);
-                            delay.filter_env.tension_r.value =
-                                delay_data.filter_env.tension_r.min(ENVELOPE_TENSION_MAX);
+                            delay_data.audio_env.apply_to(&mut delay.audio_env);
+                            delay_data.filter_env.apply_to(&mut delay.filter_env);
                         }
                     }
                     if let Some(InputFx::MyDelay(delay)) = slot.fx.take() {
@@ -1550,26 +1436,7 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                                 filter_data.seq_step_len_seq.clone(),
                             );
 
-                            filter_cfg.env.attack_ms.value =
-                                filter_data.env.attack_ms.min(ENVELOPE_ATTACK_MAX_MS);
-                            filter_cfg.env.hold_ms.value =
-                                filter_data.env.hold_ms.min(ENVELOPE_HOLD_MAX_MS);
-                            filter_cfg.env.decay_ms.value =
-                                filter_data.env.decay_ms.min(ENVELOPE_DECAY_MAX_MS);
-                            filter_cfg.env.sustain_pct.value =
-                                filter_data.env.sustain_pct.min(ENVELOPE_SUSTAIN_MAX_PCT);
-                            filter_cfg.env.release_ms.value = filter_data
-                                .env
-                                .release_ms
-                                .clamp(ENVELOPE_RELEASE_MIN_MS, ENVELOPE_RELEASE_MAX_MS);
-                            filter_cfg.env.start_pct.value =
-                                filter_data.env.start_pct.min(ENVELOPE_START_MAX_PCT);
-                            filter_cfg.env.tension_a.value =
-                                filter_data.env.tension_a.min(ENVELOPE_TENSION_MAX);
-                            filter_cfg.env.tension_d.value =
-                                filter_data.env.tension_d.min(ENVELOPE_TENSION_MAX);
-                            filter_cfg.env.tension_r.value =
-                                filter_data.env.tension_r.min(ENVELOPE_TENSION_MAX);
+                            filter_data.env.apply_to(&mut filter_cfg.env);
                         }
                     }
                 }

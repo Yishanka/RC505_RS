@@ -363,40 +363,46 @@ pub fn filter(ui: &mut egui::Ui, config: &mut FilterConfigs, full: bool) {
     }
 }
 
+fn envelope_time(ui: &mut egui::Ui, time: &mut EnvelopeTime, min: f32, max: f32) -> egui::Response {
+    let lang = crate::app_support::language::Language::current(ui.ctx());
+    float_with_keys(
+        ui,
+        &mut time.value,
+        min,
+        max,
+        0.1,
+        1.0,
+        lang.text(time.label),
+        true,
+    )
+}
+
 pub fn envelope(ui: &mut egui::Ui, config: &mut EnvelopeConfigs) {
     let lang = crate::app_support::language::Language::current(ui.ctx());
+    config.sanitize_times();
     // Curve and precise controls edit the very same values. Zero-duration segments
     // remain selectable through the labels/knobs even when their nodes coincide.
     envelope_curve(ui, config);
     ui.columns(2, |cols| {
-        number(
+        envelope_time(
             &mut cols[0],
             &mut config.attack_ms,
-            0,
+            0.0,
             ENVELOPE_ATTACK_MAX_MS,
-            true,
         );
-        number(
-            &mut cols[0],
-            &mut config.hold_ms,
-            0,
-            ENVELOPE_HOLD_MAX_MS,
-            true,
-        );
-        number(
+        envelope_time(&mut cols[0], &mut config.hold_ms, 0.0, ENVELOPE_HOLD_MAX_MS);
+        envelope_time(
             &mut cols[0],
             &mut config.decay_ms,
-            0,
+            0.0,
             ENVELOPE_DECAY_MAX_MS,
-            true,
         );
         number(&mut cols[0], &mut config.sustain_pct, 0, 100, false);
-        number(
+        envelope_time(
             &mut cols[0],
             &mut config.release_ms,
-            1,
+            ENVELOPE_RELEASE_MIN_MS,
             ENVELOPE_RELEASE_MAX_MS,
-            true,
         );
         number(&mut cols[1], &mut config.start_pct, 0, 100, false);
         for (value, en, cn) in [
@@ -453,3 +459,7 @@ fn envelope_curve(ui: &mut egui::Ui, c: &mut EnvelopeConfigs) {
 fn tension(value: usize) -> f32 {
     2.0_f32.powf((value as f32 - 100.0) / 50.0)
 }
+
+#[cfg(test)]
+#[path = "envelope_control_tests.rs"]
+mod envelope_control_tests;

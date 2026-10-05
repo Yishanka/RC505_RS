@@ -539,6 +539,239 @@ fn fader_panel_transition_regression(ctx: &egui::Context, app: &mut MyApp, time:
     app.close_editor(ctx);
 }
 
+fn compact_mouse_scroll_and_focus_regression(ctx: &egui::Context, app: &mut MyApp, time: &mut f64) {
+    ctx.data_mut(|data| {
+        data.insert_temp(egui::Id::new("regression-size"), egui::vec2(960.0, 720.0))
+    });
+    super::preview::configure(app, "audio-fx-panning");
+    app.editor.expanded = false;
+    app.focus_panel(ctx, Focus::Performance);
+    let panel = || {
+        ctx.data(|data| {
+            data.get_temp::<(egui::Id, f32, egui::Rect, egui::Vec2)>(egui::Id::new((
+                "quick-panel-scroll",
+                Focus::Right as u8,
+            )))
+        })
+        .unwrap()
+    };
+    for _ in 0..20 {
+        frame(ctx, app, time, vec![]);
+    }
+    let before = panel();
+    let bar = egui::pos2(before.2.right() + 6.0, before.2.center().y);
+    frame(ctx, app, time, vec![egui::Event::PointerMoved(bar)]);
+    for _ in 0..20 {
+        frame(ctx, app, time, vec![]);
+    }
+    frame(
+        ctx,
+        app,
+        time,
+        vec![egui::Event::PointerButton {
+            pos: bar,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    let end = bar + egui::vec2(0.0, 20.0);
+    frame(ctx, app, time, vec![egui::Event::PointerMoved(end)]);
+    frame(
+        ctx,
+        app,
+        time,
+        vec![egui::Event::PointerButton {
+            pos: end,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    let dragged = panel();
+    assert!(
+        dragged.1 > before.1 + 40.0,
+        "Mouse scrollbar must scroll the quick panel: before={before:?}, after={dragged:?}"
+    );
+    for _ in 0..25 {
+        frame(ctx, app, time, vec![]);
+    }
+    assert!(
+        app.focus == Focus::Performance,
+        "Scrolling alone must not select the panel"
+    );
+    assert!(
+        (panel().1 - dragged.1).abs() < 0.1,
+        "Mouse scrollbar must not snap back to top: {dragged:?} -> {:?}",
+        panel()
+    );
+    press(ctx, app, time, Key::F8, Modifiers::NONE);
+    for _ in 0..8 {
+        press(ctx, app, time, Key::ArrowDown, Modifiers::NONE);
+    }
+    for _ in 0..25 {
+        frame(ctx, app, time, vec![]);
+    }
+    let selected = ctx.memory(|m| m.focused()).unwrap();
+    let scrolled = panel();
+    assert!(scrolled.1 > 30.0);
+    press(ctx, app, time, Key::Escape, Modifiers::NONE);
+    for _ in 0..25 {
+        frame(ctx, app, time, vec![]);
+    }
+    assert!(
+        (panel().1 - scrolled.1).abs() < 0.1,
+        "Leaving the panel must retain its viewport"
+    );
+    press(ctx, app, time, Key::F8, Modifiers::NONE);
+    assert_eq!(
+        ctx.memory(|m| m.focused()),
+        Some(selected),
+        "Re-entering the same panel must restore its last parameter"
+    );
+    let time_id = ctx
+        .data(|data| {
+            data.get_temp::<egui::Id>(egui::Id::new((
+                "parameter",
+                app.language.choose("Time (ms)", "时间（毫秒）"),
+            )))
+        })
+        .unwrap();
+    ctx.memory_mut(|memory| memory.request_focus(time_id));
+    frame(ctx, app, time, vec![]);
+    press(ctx, app, time, Key::Enter, Modifiers::NONE);
+    assert!(super::navigation::text_focused(ctx));
+    let bar = egui::pos2(panel().2.right() + 6.0, panel().2.center().y);
+    frame(
+        ctx,
+        app,
+        time,
+        vec![
+            egui::Event::PointerMoved(bar),
+            egui::Event::PointerButton {
+                pos: bar,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            },
+        ],
+    );
+    let end = bar + egui::vec2(0.0, 20.0);
+    frame(ctx, app, time, vec![egui::Event::PointerMoved(end)]);
+    frame(
+        ctx,
+        app,
+        time,
+        vec![egui::Event::PointerButton {
+            pos: end,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    let offset = panel().1;
+    for _ in 0..25 {
+        frame(ctx, app, time, vec![]);
+    }
+    assert!(
+        (panel().1 - offset).abs() < 0.1,
+        "Leaving a numeric entry by scrollbar must not scroll back to its caret"
+    );
+    // Pointer scrolling after leaving a keyboard panel, and after a page/type
+    // change, must not inherit a stale request to focus/reveal the first control.
+    super::preview::configure(app, "performance");
+    app.left_page = crate::app::LeftPage::Audio;
+    for scope in [Focus::Right, Focus::Left] {
+        app.focus_panel(ctx, Focus::Performance);
+        assert!(
+            !app.focus_request,
+            "Returning to performance must clear a pending panel-entry request"
+        );
+        for _ in 0..20 {
+            frame(ctx, app, time, vec![]);
+        }
+        let info = || {
+            ctx.data(|data| {
+                data.get_temp::<(egui::Id, f32, egui::Rect, egui::Vec2)>(egui::Id::new((
+                    "quick-panel-scroll",
+                    scope as u8,
+                )))
+            })
+            .unwrap()
+        };
+        let scroll = info();
+        let bar = egui::pos2(scroll.2.right() + 6.0, scroll.2.center().y);
+        frame(ctx, app, time, vec![egui::Event::PointerMoved(bar)]);
+        for _ in 0..12 {
+            frame(ctx, app, time, vec![]);
+        }
+        frame(
+            ctx,
+            app,
+            time,
+            vec![egui::Event::PointerButton {
+                pos: bar,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            }],
+        );
+        let end = bar + egui::vec2(0.0, 15.0);
+        frame(ctx, app, time, vec![egui::Event::PointerMoved(end)]);
+        frame(
+            ctx,
+            app,
+            time,
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            }],
+        );
+        let offset = info().1;
+        assert!(
+            offset > 30.0,
+            "Scrollbar must move the viewport for scope {}",
+            scope as u8
+        );
+        for _ in 0..20 {
+            frame(ctx, app, time, vec![]);
+        }
+        assert!(
+            app.focus == Focus::Performance,
+            "Mouse-only scrolling must not enter a keyboard scope"
+        );
+        assert!(
+            (info().1 - offset).abs() < 0.1,
+            "Mouse scrollbar must retain the offset for scope {}: {offset} -> {}",
+            scope as u8,
+            info().1
+        );
+        // Wheel input also stays local to the hovered panel and must not select it.
+        let hover = info().2.center();
+        frame(
+            ctx,
+            app,
+            time,
+            vec![
+                egui::Event::PointerMoved(hover),
+                egui::Event::Scroll(egui::vec2(0.0, -45.0)),
+            ],
+        );
+        for _ in 0..20 {
+            frame(ctx, app, time, vec![]);
+        }
+        assert!(
+            info().1 >= offset - 0.1,
+            "Wheel scrolling must not jump back to the beginning"
+        );
+        assert!(app.focus == Focus::Performance);
+    }
+    app.focus_panel(ctx, Focus::Performance);
+    ctx.data_mut(|data| data.remove::<egui::Vec2>(egui::Id::new("regression-size")));
+}
+
 fn compact_parameter_navigation_regression(ctx: &egui::Context, app: &mut MyApp, time: &mut f64) {
     use crate::{config::InputFx, engine::core::Action};
     ctx.data_mut(|data| {
@@ -1012,7 +1245,7 @@ fn sample_persistence_regression() {
     presets::save(&mut config, target, &name).unwrap();
     if let Some(InputFx::Oscillator(o)) = &mut config.input_fx.banks[0].slots[0].fx {
         o.sample_start = 0.25;
-        o.envelope.attack_ms.value = 317;
+        o.envelope.attack_ms.value = 317.0;
     }
     project::save_project_data(&entry, &project::data_from_config(&config)).unwrap();
     let path = crate::app_support::paths::projects_dir().join(&entry.file);
@@ -1028,7 +1261,7 @@ fn sample_persistence_regression() {
     assert_eq!(loaded_osc.sample.as_ref().unwrap().frames, source.frames);
     assert_eq!(loaded_osc.sample_start, 0.25);
     assert_eq!(
-        loaded_osc.envelope.attack_ms, 317,
+        loaded_osc.envelope.attack_ms, 317.0,
         "Reference loading must not replace current sound controls"
     );
     let reference = loaded_osc.sample_ref.as_ref().unwrap().clone();
@@ -1200,6 +1433,13 @@ pub fn run() {
                 press(&ctx, &mut app, &mut time, key, Modifiers::NONE);
                 assert!(app.editor.expanded, "A focus key must not leave the editor");
             }
+            // F8 now restores the previous control, which may be a parameter.
+            // Test the picker explicitly instead of assuming entry resets focus.
+            let picker = ctx
+                .data(|data| data.get_temp::<egui::Id>(egui::Id::new("fx-kind-picker")))
+                .unwrap();
+            ctx.memory_mut(|memory| memory.request_focus(picker));
+            frame(&ctx, &mut app, &mut time, vec![]);
             press(&ctx, &mut app, &mut time, Key::Enter, Modifiers::NONE);
             assert!(
                 ctx.memory(|m| m.any_popup_open()),
@@ -1339,6 +1579,7 @@ pub fn run() {
     mouse_fader_keyboard_regression(&ctx, &mut app, &mut time);
     editor_performance_regression(&ctx, &mut app, &mut time);
     compact_parameter_navigation_regression(&ctx, &mut app, &mut time);
+    compact_mouse_scroll_and_focus_regression(&ctx, &mut app, &mut time);
     fader_panel_transition_regression(&ctx, &mut app, &mut time);
     phrase_keyboard_regression(&ctx, &mut app, &mut time);
     sample_persistence_regression();
