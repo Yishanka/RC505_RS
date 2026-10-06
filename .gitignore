@@ -6,3 +6,4 @@
 /dist/
 archived/
 /.vs/
+__pycache__/

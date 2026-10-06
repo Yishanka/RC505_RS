@@ -4,17 +4,50 @@
 
 ## 1. 安装、数据与工程选择
 
-从 [Releases](https://github.com/Yishanka/RC505_RS/releases/latest) 下载安装包或便携 ZIP。程序目录、数据目录、下载目录分别可选；数据默认在程序旁的 `data` 中。升级保留数据。
+### 下载哪个文件
 
-启动后在后台检查新版，发现更新时提示，不会自动下载或安装。**F12 → 更新** 可手动检查，也可关闭启动检查。无网络时仍可正常使用。
+打开[最新发布页](https://github.com/Yishanka/RC505_RS/releases/latest)，确认仓库是 **Yishanka / RC505_RS**，滚动到更新说明底部并展开 **Assets（资源）**。下载其中的 **`RC505-RS-版本号-windows-x64-setup.exe`**，等待下载完成。**安装只需要这一个 EXE**，不必另下程序、源码、便携包或更新清单。
 
-安装版可通过 Windows「设置 → 应用 → 已安装的应用 → RC505 RS → 卸载」删除。**默认保留工程、音色、轨道音频与回放**；需要一并删除时，在卸载界面单独选择。便携版没有 Windows 卸载条目，删除程序文件即可；数据目录可独立保留。
+`Source code (zip)` 和 `Source code (tar.gz)` 是需要自行编译的源码。`…windows-x64-portable.zip` 是免安装的另一种选择：须完整解压后运行其中的 `rc505_rs.exe`，不创建 Windows 卸载项；默认在同目录的 `data` 和 `downloads` 保存数据与下载文件。初次使用可直接按下面的安装包流程操作。
 
-程序启动停在工程选择页，只预选上次工程。单击列表选择，双击或 **Open project / Enter** 打开；上下或左右方向键切换。`N` 或 **+ New** 新建。**Rename** 改显示名称，不改变工程身份。**Manage → Move selected to Trash** 移入回收站；**Restore last deleted** 恢复最近删除的工程及资产。
+### 遇到下载或 Windows 提示
+
+安装包尚无代码签名，可能显示「不常下载」或「未识别应用」的信誉提示。**先确认下载来源是上面的官方发布页；仅对这种信誉提示，且自己确认信任来源时继续**：
+
+- **Edge 下载列表**：文件旁 `…` → **保留 / Keep → 显示更多 / Show more → 仍然保留 / Keep anyway**。[Microsoft 操作说明](https://learn.microsoft.com/en-us/troubleshoot/microsoft-edge/development/download-failures#check-security-and-smartscreen-settings)
+- **Windows「已保护你的电脑」**：**更多信息 / More info → 仍要运行 / Run anyway**，如系统提供这些按钮。[Microsoft SmartScreen 说明](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/publish-first-app#step-6-handle-smartscreen-for-new-apps)
+
+若是病毒／恶意软件检测、Smart App Control 或组织策略拦截，或没有继续按钮，请停止并报告完整提示；不要关闭安全保护来安装。Smart App Control 不提供单个应用的放行按钮。[Microsoft 问答](https://support.microsoft.com/en-us/windows/security/threat-malware-protection/smart-app-control-frequently-asked-questions)。可选 SHA-256 校验方法见[安装说明](INSTALL_UPDATE_CN.md#2-下载和启动时的安全提示)。
+
+### 一步步完成安装
+
+向导目前为英文，以下列出对应中文含义：
+
+1. 找到下载完成的 `setup.exe`，**双击运行**；若出现欢迎页，点 **Next（下一步）**。
+2. 在 **Select Destination Location（选择安装位置）** 选择程序目录，必要时点 **Browse…（浏览）**，然后点 **Next**。
+3. 在 **Data and download folders（数据与下载目录）**，分别确认 **Project data folder（工程数据目录）** 和 **Installer download folder（安装包下载目录）**，再点 **Next**。数据默认在程序旁的 `data`，也可放在其他可写目录；下载目录只存后续更新包，与浏览器这次下载的位置是两回事。
+4. 在 **Import existing data (optional)（可选：导入已有数据）**，首次安装或普通升级保持 **Copy existing RC505 RS projects and settings** 不勾选，直接点 **Next**。要从另一个数据目录复制工程时才勾选，并在下一页选择原数据根目录；导入不删除源文件。
+5. 按需勾选 **Create a desktop shortcut（创建桌面快捷方式）**，继续到 **Ready to Install（准备安装）**，核对三个目录后点 **Install（安装）**。
+6. 完成页保留 **Open RC505 RS（打开软件）** 勾选，点 **Finish（完成）**。
+7. 软件打开 **Choose your project / 选择工程** 页面，安装完成。顶部可切换中文/英文。以后从开始菜单的 **RC505 RS** 或桌面快捷方式打开即可。
+
+### 工程选择与文件管理
+
+程序启动停在工程选择页，只预选上次工程。单击列表选择，双击或 **打开工程 / Open project / Enter** 打开；上下或左右方向键切换。`N` 或 **新建 / New** 新建。**重命名 / Rename** 改显示名称，不改变工程身份。
+
+**删除工程 / Delete project** 会先请求确认；确认后永久删除该工程及其音频，不能从回收站恢复。独立的全局回放、导出 WAV 和共享音色保留。**数据管理 / 回收站 / Storage / recycle bin** 可查看音频占用、清理未引用快照、删除已保存音频，以及查看、恢复或永久清理已有回收站项目；普通「删除」不会再向回收站添加文件。操作在后台进行，失败会显示原因。
 
 已有工程打开前先验证 JSON、WAV 格式和 SHA-256，失败不会清空当前引擎后再尝试。工程以停止状态打开；换采样率时先在后台做 windowed-sinc 转换，不把旧音频直接按新速率播放。
 
-可选 Audio setup 启动器只负责设备准备和打开主程序，工程管理统一在主程序内。发布包使用 Windows 系统音频后端。自行编译方式见 [README](../README_CN.md#源码与自行编译)。
+可选 **Audio setup（音频设置）** 启动器只负责设备准备和打开主程序，工程管理统一在主程序内。发布包使用 Windows 系统音频后端。自行编译方式见 [README](../README_CN.md#源码与自行编译)。
+
+### 更新与卸载
+
+**更新旧版无需先卸载。** 启动时默认在后台检查新版，仅显示提示，不自动下载或安装。手动操作为 **F12 → 更新 / Updates → 检查更新 / Check for updates → 下载并校验 / Download and verify**。下载完成后停止演奏、节拍器和独立试听，结束回放录制并处理草稿，再点击 **保存快照，退出并安装更新 / Save snapshot, close and install update**；有打开的工程时先保存快照，之后退出、安装并重新打开工程选择页。同页可关闭「启动时检查更新」，也可查看或打开数据、下载目录。无网络时仍可正常使用。
+
+也可保存并关闭软件和 Audio setup，手动运行新版 setup EXE，沿用原来的三个目录并跳过导入。详细步骤见[软件更新](INSTALL_UPDATE_CN.md#5-软件更新)。
+
+安装版可通过 Windows「设置 → 应用 → 已安装的应用 → RC505 RS → 卸载」删除。**默认保留工程、音色、轨道音频与回放**；需要一并删除时，在卸载界面单独选择。便携版没有 Windows 卸载条目，删除程序文件即可；数据目录可独立保留。
 
 ## 2. 第一次录制
 

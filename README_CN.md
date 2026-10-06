@@ -8,11 +8,23 @@
 
 ![演奏台](docs/images/performance.png)
 
-## 安装与开始演奏
+## 从下载到打开软件
 
-在 Releases 下载 **setup EXE 安装包**，分别选择程序、数据和下载目录。数据默认放在程序旁的 `data` 中，也可选其他位置。另提供便携 ZIP 包。更新保留已保存的工程、音频、音色和回放；通过 Windows「已安装的应用」卸载时，默认保留数据，删除应用数据需单独选择。
+1. 打开[最新发布页](https://github.com/Yishanka/RC505_RS/releases/latest)，向下找到并展开 **Assets（资源）**。
+2. 下载 **`RC505-RS-版本-windows-x64-setup.exe`**。首次安装只需这一个 EXE；不必下载便携包、源码或更新清单。**Source code (zip / tar.gz)** 是需要自行编译的源码；`…portable.zip` 是另一种免安装使用方式。
+3. 下载完成后，双击这个 `setup.exe`。若浏览器或 Windows 显示信誉提示，先按下方说明核对来源；安装向导目前为英文。
+4. 在 **Select Destination Location（选择安装位置）** 选择程序目录，点击 **Next（下一步）**。在 **Data and download folders（数据与下载目录）** 分别选择工程数据目录、更新安装包下载目录；数据默认在程序旁的 `data` 中，各目录都可自行选择。
+5. 到 **Import existing data (optional)（可选：导入已有数据）**，首次使用或普通更新直接保持不勾选并点 **Next**。只有需要从另一个数据目录复制工程时，才勾选导入并选择原数据目录。
+6. 按需勾选 **Create a desktop shortcut（创建桌面快捷方式）**，继续到 **Install（安装）**。完成后保留 **Open RC505 RS（打开软件）** 勾选，点击 **Finish（完成）**。
+7. 看到工程选择页即安装完成。以后从开始菜单的 **RC505 RS** 或桌面快捷方式打开；顶部可切换中文/英文。选择工程后点「打开工程」，或点「新建」开始。
 
-启动后会在后台检查新版，有更新时提示；下载与安装由使用者决定。**F12 → 更新** 可手动检查，也可关闭启动检查。
+安装包尚无代码签名，可能出现信誉提示。**只有确认文件来自上面的 `Yishanka/RC505_RS` 官方发布页，且提示仅为下载不常见／应用未识别时**，才选择继续：Edge 下载列表中点文件旁的 `…` → **保留 / Keep** → **显示更多 / Show more** → **仍然保留 / Keep anyway**；Windows「已保护你的电脑」中点 **更多信息 / More info** → **仍要运行 / Run anyway**。这些按钮可能因系统策略而不提供。[Edge 官方说明](https://learn.microsoft.com/en-us/troubleshoot/microsoft-edge/development/download-failures#check-security-and-smartscreen-settings)、[Windows 官方说明](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/publish-first-app#step-6-handle-smartscreen-for-new-apps)
+
+若提示病毒、恶意软件，或被 **Smart App Control / 组织策略** 阻止且没有继续按钮，请停止安装并向项目报告具体提示；不要关闭安全保护来安装。[Smart App Control 不提供单个应用放行入口](https://support.microsoft.com/en-us/windows/security/threat-malware-protection/smart-app-control-frequently-asked-questions)。完整按钮对照、可选校验与便携方式见[安装说明](docs/INSTALL_UPDATE_CN.md)。
+
+**已有版本无需先卸载。** 软件内按 **F12 → 更新 → 检查更新 → 下载并校验**；停止演奏、处理回放草稿后，点击 **保存快照，退出并安装更新**。也可关闭软件，直接运行新版安装包并沿用原来的三个目录，导入选项保持不勾选。启动时默认只检查新版，可在同一更新页关闭检查；更新保留已保存的数据，Windows 卸载默认也保留数据。
+
+## 开始演奏
 
 1. 新建或打开工程，在左侧「音频」选择输入设备。输出默认跟随 Windows；也可指定固定声卡。
 2. 设置 BPM，按 `1` 录音，再按一次结束并循环；播放时再按进入叠录。其他轨道用 `2–5`。

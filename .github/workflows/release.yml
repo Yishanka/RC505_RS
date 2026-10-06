@@ -25,6 +25,8 @@ jobs:
       - name: Check and test
         shell: pwsh
         run: |
+          python scripts/test_release_tools.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Write-Output "::notice title=Rust toolchain::$(rustc --version)"
           cargo check --all-targets --locked 2>&1 | Tee-Object check.log
           if ($LASTEXITCODE -ne 0) {
@@ -63,12 +65,19 @@ jobs:
         shell: pwsh
         run: |
           $assets = @(Get-ChildItem -LiteralPath dist -File | ForEach-Object FullName)
-          gh release create $env:RELEASE_TAG @assets --verify-tag --title "RC505 RS $env:RELEASE_TAG" --notes-file docs/RELEASE_NOTES_CN.md
+          python scripts/release_notes.py ($env:RELEASE_TAG.Substring(1)) var/release-notes.md
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ($env:RELEASE_TAG -in @('v0.2.2','v0.2.3')) {
-            gh release edit v0.2.1 --prerelease --notes-file docs/RELEASE_0.2.1_STATUS.md
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+          gh release create $env:RELEASE_TAG @assets --verify-tag --latest --title "RC505 RS $env:RELEASE_TAG" --notes-file var/release-notes.md
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Curate historical release pages
+        if: github.repository == 'Yishanka/RC505_RS' && github.ref == 'refs/tags/v0.4.8'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          python scripts/curate_releases.py --execute
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Save build cache
         if: always() && steps.build-cache.outputs.cache-hit != 'true'

@@ -9,18 +9,20 @@
 #ifdef InstallerSmokeTest
 AppId=RC505-RS-Installer-Smoke
 Uninstallable=no
+DefaultDirName={src}\program
+UsePreviousAppDir=no
 #else
 AppId={{D70BC68C-93D0-4FA4-A660-7552396837B5}
 Uninstallable=yes
 CreateUninstallRegKey=yes
 UninstallDisplayName=RC505 RS
+DefaultDirName={localappdata}\Programs\RC505 RS
 #endif
 AppName=RC505 RS
 AppVersion={#AppVersion}
 AppPublisher=Yishanka
 AppPublisherURL=https://github.com/Yishanka/RC505_RS
 AppUpdatesURL=https://github.com/Yishanka/RC505_RS/releases
-DefaultDirName={localappdata}\Programs\RC505 RS
 DefaultGroupName=RC505 RS
 DisableDirPage=no
 PrivilegesRequired=lowest
@@ -63,7 +65,9 @@ Name: "{autodesktop}\RC505 RS"; Filename: "{app}\rc505_rs.exe"; WorkingDir: "{ap
 #endif
 
 [Run]
+#ifndef InstallerSmokeTest
 Filename: "{app}\rc505_rs.exe"; Description: "Open RC505 RS"; Flags: nowait postinstall skipifsilent
+#endif
 
 [Code]
 var
@@ -71,23 +75,117 @@ var
   ImportPage: TInputDirWizardPage;
   ImportChoicePage: TInputOptionWizardPage;
   FollowProgramFolder: Boolean;
-  SuggestedDataDir: String;
+  UpdatingDataPath: Boolean;
   DeleteDataOnUninstall: Boolean;
   ConfirmedUninstallDataDir: String;
+
+function PreviousPath(Name: String): String;
+begin
+#ifdef InstallerSmokeTest
+  { The smoke identity has no uninstall registration. A fixture INI replaces
+    only the previous-data storage, never the production path selection. }
+  Result := GetIniString('Paths', Name, '', ExpandConstant('{src}\previous-paths.ini'));
+#else
+  Result := GetPreviousData(Name, '');
+#endif
+end;
+
+function DefaultDownloadDir: String;
+begin
+#ifdef InstallerSmokeTest
+  Result := ExpandConstant('{src}\downloads');
+#else
+  Result := ExpandConstant('{userdocs}\RC505 RS Installers');
+#endif
+end;
+
+procedure DataPathChanged(Sender: TObject);
+begin
+  { Typing or Browse makes this an explicit choice, even if it happens to
+    match an earlier suggested path. Internal updates must not disable follow. }
+  if not UpdatingDataPath then FollowProgramFolder := False;
+end;
+
+procedure SetDataPath(Value: String);
+begin
+  UpdatingDataPath := True;
+  try
+    PathsPage.Values[0] := Value;
+  finally
+    UpdatingDataPath := False;
+  end;
+end;
+
+procedure InitializePathValues(DataArgument, SavedData, DownloadArgument, SavedDownload: String);
+begin
+  if DataArgument <> '' then SetDataPath(DataArgument)
+  else SetDataPath(SavedData);
+  FollowProgramFolder := (DataArgument = '') and (SavedData = '');
+  PathsPage.Values[1] := DownloadArgument;
+  if PathsPage.Values[1] = '' then PathsPage.Values[1] := SavedDownload;
+  if PathsPage.Values[1] = '' then PathsPage.Values[1] := DefaultDownloadDir;
+  { Leave automatic data paths empty until the destination page is ready.
+    The app constant cannot be expanded during InitializeWizard. }
+end;
+
+procedure SyncDataPathWithProgram;
+begin
+  if FollowProgramFolder and (WizardDirValue <> '') then
+    SetDataPath(AddBackslash(WizardDirValue) + 'data');
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if CurPageID = PathsPage.ID then SyncDataPathWithProgram;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  { Inno calls NextButtonClick during silent installation as well. }
+  if CurPageID = wpSelectDir then SyncDataPathWithProgram;
+  Result := True;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  SyncDataPathWithProgram;
+  Result := '';
+  if (Trim(PathsPage.Values[0]) = '') or (Trim(PathsPage.Values[1]) = '') then begin
+    Result := 'Choose both a project data folder and an installer download folder.';
+    Exit;
+  end;
+  SetDataPath(ExpandFileName(PathsPage.Values[0]));
+  PathsPage.Values[1] := ExpandFileName(PathsPage.Values[1]);
+end;
+
+function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo,
+  MemoTypeInfo, MemoComponentsInfo, MemoGroupInfo, MemoTasksInfo: String): String;
+begin
+  SyncDataPathWithProgram;
+  Result := MemoDirInfo + NewLine + NewLine +
+    'Project data folder:' + NewLine + Space + PathsPage.Values[0] + NewLine + NewLine +
+    'Installer download folder:' + NewLine + Space + PathsPage.Values[1] + NewLine + NewLine;
+  if ImportChoicePage.Values[0] then
+    Result := Result + 'Copy existing data from (originals are kept):' + NewLine + Space + ImportPage.Values[0]
+  else Result := Result + 'Import existing data: Skip (keep current data)';
+  if MemoGroupInfo <> '' then Result := Result + NewLine + NewLine + MemoGroupInfo;
+  if MemoTasksInfo <> '' then Result := Result + NewLine + NewLine + MemoTasksInfo;
+end;
+
+#ifdef InstallerSmokeTest
+#include "installer-path-tests.iss"
+#endif
 
 procedure InitializeWizard;
 begin
   PathsPage := CreateInputDirPage(wpSelectDir, 'Data and download folders',
-    'Keep your music separate from application updates.',
-    'Updates preserve your data. Uninstall also preserves it unless you explicitly choose to delete application data. Downloaded installers stay in the second folder.', False, '');
+    'Choose where your music and downloaded installers are stored.',
+    'Data starts in the program folder. You can choose another drive with more space. Updates preserve your data; a folder you choose here stays selected when you go Back.', False, '');
   PathsPage.Add('Project data folder:');
   PathsPage.Add('Installer download folder:');
-  PathsPage.Values[0] := ExpandConstant('{param:DATADIR|}') ;
-  FollowProgramFolder := (PathsPage.Values[0] = '') and (GetPreviousData('DataDir', '') = '');
-  if PathsPage.Values[0] = '' then PathsPage.Values[0] := GetPreviousData('DataDir', ExpandConstant('{app}\data'));
-  SuggestedDataDir := PathsPage.Values[0];
-  PathsPage.Values[1] := ExpandConstant('{param:DOWNLOADDIR|}');
-  if PathsPage.Values[1] = '' then PathsPage.Values[1] := GetPreviousData('DownloadDir', ExpandConstant('{userdocs}\RC505 RS Installers'));
+  PathsPage.Edits[0].OnChange := @DataPathChanged;
+  InitializePathValues(ExpandConstant('{param:DATADIR|}'), PreviousPath('DataDir'),
+    ExpandConstant('{param:DOWNLOADDIR|}'), PreviousPath('DownloadDir'));
   ImportChoicePage := CreateInputOptionPage(PathsPage.ID, 'Import existing data (optional)',
     'Would you like to copy projects from a previous installation?',
     'Leave this option unchecked for a new installation or a normal update. Existing data in your chosen data folder is preserved.', False, False);
@@ -99,6 +197,9 @@ begin
   ImportPage.Add('Existing data folder:');
   ImportPage.Values[0] := ExpandConstant('{param:IMPORTDIR|}');
   if ImportPage.Values[0] = '' then ImportPage.Values[0] := ExpandConstant('{userappdata}\rc505_rs');
+#ifdef InstallerSmokeTest
+  RunInstallerPathTests;
+#endif
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
@@ -106,19 +207,13 @@ begin
   Result := (PageID = ImportPage.ID) and not ImportChoicePage.Values[0];
 end;
 
-procedure CurPageChanged(CurPageID: Integer);
-begin
-  if (CurPageID = PathsPage.ID) and FollowProgramFolder and (PathsPage.Values[0] = SuggestedDataDir) then begin
-    SuggestedDataDir := AddBackslash(WizardDirValue) + 'data';
-    PathsPage.Values[0] := SuggestedDataDir;
-  end;
-end;
-
+#ifndef InstallerSmokeTest
 procedure RegisterPreviousData(PreviousDataKey: Integer);
 begin
   SetPreviousData(PreviousDataKey, 'DataDir', PathsPage.Values[0]);
   SetPreviousData(PreviousDataKey, 'DownloadDir', PathsPage.Values[1]);
 end;
+#endif
 
 function JsonPath(Value: String): String;
 begin
@@ -139,6 +234,10 @@ begin
     if not SaveStringToFile(ExpandConstant('{app}\install-settings.json'), Utf8Encode(Settings), False) then RaiseException('Cannot save installation settings.');
     Settings := '{"product":"RC505 RS","schema":1,"data_dir":"' + JsonPath(ExpandFileName(PathsPage.Values[0])) + '"}';
     if not SaveStringToFile(AddBackslash(PathsPage.Values[0]) + '.rc505-rs-data.json', Utf8Encode(Settings), False) then RaiseException('Cannot mark the application data directory.');
+#ifdef InstallerSmokeTest
+    SetIniString('Paths', 'DataDir', PathsPage.Values[0], ExpandConstant('{src}\previous-paths.ini'));
+    SetIniString('Paths', 'DownloadDir', PathsPage.Values[1], ExpandConstant('{src}\previous-paths.ini'));
+#endif
     if ImportChoicePage.Values[0] then begin
       Parameters := '--migrate-data="' + ImportPage.Values[0] + '" --data-dir="' + PathsPage.Values[0] + '"';
       if not Exec(ExpandConstant('{app}\rc505_rs.exe'), Parameters, ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then RaiseException('Cannot start data import.');

@@ -8,11 +8,23 @@ A five-track loop station for Windows, with keyboard performance controls and vi
 
 ![Performance workspace](docs/images/performance.png)
 
-## Install and play
+## Download, install and open
 
-Download the **setup EXE** from Releases. The installer lets you choose application, data and download folders separately. Data defaults to `data` beside the application. A portable ZIP is also available. Updates preserve saved projects, audio, sound presets and replays. Uninstalling from Windows **Installed apps** keeps data by default; deleting application data is a separate, optional choice.
+1. Open the [latest release](https://github.com/Yishanka/RC505_RS/releases/latest), scroll down and expand **Assets**.
+2. Download **`RC505-RS-version-windows-x64-setup.exe`**. This single EXE contains the installer; you do not need the other assets. **Source code (zip / tar.gz)** requires compilation. The separate `…portable.zip` package is an alternative that runs without installation.
+3. Once the download finishes, double-click the setup EXE. If a browser or Windows reputation warning appears, check the source as described below before continuing. The installer uses English.
+4. In **Select Destination Location**, choose the application folder and click **Next**. In **Data and download folders**, choose **Project data folder** and **Installer download folder**. Data defaults to `data` beside the application; all three locations can be chosen separately.
+5. On **Import existing data (optional)**, leave the option unchecked and click **Next** for a new installation or a normal update. Select it only when copying existing data from another data folder.
+6. Choose whether to **Create a desktop shortcut**, continue to **Install**, then leave **Open RC505 RS** checked and click **Finish**.
+7. Installation is complete when the project browser appears. Later, open **RC505 RS** from the Start menu or desktop shortcut. Select **Open project** or **New**; the language switch is at the top.
 
-On launch, the app checks for a newer release in the background. It prompts when one is available; downloading and installing remain manual. **F12 → Updates** provides update controls and the startup-check preference.
+The installer is unsigned, so a reputation warning may appear. **Continue only after confirming that the file came from the official `Yishanka/RC505_RS` release linked above, and the warning is only about an uncommon download or an unrecognized application.** In Edge, use the download item's `…` menu, then **Keep → Show more → Keep anyway**. For Windows **“Windows protected your PC”**, select **More info → Run anyway**, if available. [Microsoft Edge guidance](https://learn.microsoft.com/en-us/troubleshoot/microsoft-edge/development/download-failures#check-security-and-smartscreen-settings), [Windows guidance](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/publish-first-app#step-6-handle-smartscreen-for-new-apps).
+
+If antivirus reports malware, or Smart App Control or an organization policy blocks execution without a continue option, stop and report the exact message to the project. Do not disable protection to install. [Smart App Control does not offer an individual-app exception](https://support.microsoft.com/en-us/windows/security/threat-malware-protection/smart-app-control-frequently-asked-questions). See the [installation guide](docs/INSTALL_UPDATE_CN.md) for optional checksum verification and portable usage.
+
+**You do not need to uninstall an older version.** In the app, select **F12 → Updates → Check for updates → Download and verify**. Stop performance and resolve any replay draft, then select **Save snapshot, close and install update**. Alternatively, save and close the app, run the new setup EXE, keep the existing three folders, and leave data import unchecked. Startup update checks are optional; downloading and installing remain manual. Updates preserve saved data, and Windows uninstallation keeps it by default.
+
+## Start playing
 
 1. Create or open a project, then choose your input in **Audio**. Output follows the Windows default device unless you choose a fixed device.
 2. Set the tempo. Press **1–5** to record, finish a loop, play or overdub. **Shift+1–5** or **F1–F5** stops the corresponding track; **Space** starts/stops all tracks.
