@@ -514,6 +514,9 @@ impl RenderCore {
         if enabled {
             self.separate_recording_sources = false;
             self.allow_input_noise = false;
+            self.input.set_automation_precision(false);
+            self.external_input.set_automation_precision(false);
+            self.track_fx.set_automation_precision(false);
         }
     }
     pub fn set_renderer_version(&mut self, version: u32) {
@@ -521,6 +524,9 @@ impl RenderCore {
         self.allow_pdc = version >= 5;
         self.separate_recording_sources = version >= 7;
         self.allow_input_noise = version >= 8;
+        self.input.set_automation_precision(version >= 10);
+        self.external_input.set_automation_precision(version >= 10);
+        self.track_fx.set_automation_precision(version >= 10);
         if !self.allow_pdc {
             self.pdc.plan = super::pdc::LatencyPlan::default();
             self.pdc.reset();

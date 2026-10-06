@@ -1,6 +1,7 @@
 //! One optional, bounded musical parameter lane per effect slot.
 use serde::{Deserialize, Serialize};
 pub const PPQ: u32 = 960;
+pub const MIN_LENGTH: u32 = PPQ / 16;
 pub const MAX_LENGTH: u32 = PPQ * 4 * 8;
 pub const MAX_POINTS: usize = 64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,7 +125,7 @@ impl ParameterLane {
     }
     pub fn sanitized(&self) -> Self {
         let mut lane = self.clone();
-        lane.length = lane.length.clamp(PPQ, MAX_LENGTH);
+        lane.length = lane.length.clamp(MIN_LENGTH, MAX_LENGTH);
         lane.points.truncate(MAX_POINTS);
         for point in &mut lane.points {
             point.tick = point.tick.min(lane.length);
@@ -168,6 +169,29 @@ impl ParameterLane {
         }
         lane
     }
+    /// Change the period without merging closely spaced, valid editing nodes.
+    /// A tick is the smallest stored time unit, regardless of the visual grid.
+    pub fn rescale_length(&mut self, length: u32) {
+        *self = self.sanitized();
+        let count = self.points.len();
+        let length = length.clamp(MIN_LENGTH.max(count.saturating_sub(1) as u32), MAX_LENGTH);
+        let old_length = self.length;
+        let mut previous = 0;
+        for (index, point) in self.points.iter_mut().enumerate() {
+            let tick = if index == 0 {
+                0
+            } else if index + 1 == count {
+                length
+            } else {
+                let scaled =
+                    (point.tick as u64 * length as u64 + old_length as u64 / 2) / old_length as u64;
+                (scaled as u32).clamp(previous + 1, length - (count - 1 - index) as u32)
+            };
+            point.tick = tick;
+            previous = tick;
+        }
+        self.length = length;
+    }
 }
 pub fn input_family(fx: Option<&super::InputFx>) -> Option<Family> {
     match fx {
@@ -202,6 +226,45 @@ mod tests {
         presets::{self, FxTarget},
         project,
     };
+    #[test]
+    fn short_period_rescaling_preserves_dense_nodes_and_exact_saved_ticks() {
+        let mut lane = ParameterLane::create(Target::FilterCutoff);
+        lane.enabled = true;
+        lane.interpolation = Interpolation::Curve;
+        lane.points = (0..MAX_POINTS)
+            .map(|i| Point {
+                tick: (i as u32 * (lane.length - 1)) / (MAX_POINTS as u32 - 1),
+                value: i as f32 / MAX_POINTS as f32,
+                curve: i as f32 / MAX_POINTS as f32 - 0.5,
+            })
+            .collect();
+        lane.points.last_mut().unwrap().tick = lane.length;
+        let original_values: Vec<_> = lane.points.iter().map(|p| (p.value, p.curve)).collect();
+        lane.rescale_length(MIN_LENGTH);
+        assert_eq!(lane.length, MAX_POINTS as u32 - 1);
+        assert_eq!(lane.points.len(), MAX_POINTS);
+        assert!(lane.points.windows(2).all(|p| p[0].tick < p[1].tick));
+        assert_eq!(lane.points.first().unwrap().tick, 0);
+        assert_eq!(lane.points.last().unwrap().tick, lane.length);
+        assert_eq!(
+            lane.points
+                .iter()
+                .map(|p| (p.value, p.curve))
+                .collect::<Vec<_>>(),
+            original_values
+        );
+        assert_eq!(lane, lane.sanitized());
+        let restored: ParameterLane =
+            serde_json::from_slice(&serde_json::to_vec(&lane).unwrap()).unwrap();
+        assert_eq!(restored, lane);
+        let mut simple = ParameterLane::create(Target::DelayWet);
+        simple.rescale_length(96); // 0.1 beat, independent of any UI grid.
+        assert_eq!(simple.length, 96);
+        assert_eq!(
+            simple.points.iter().map(|p| p.tick).collect::<Vec<_>>(),
+            vec![0, 48, 96]
+        );
+    }
     #[test]
     fn lanes_roundtrip_with_patches_and_disable_safely_on_incompatible_type() {
         let mut config = AppConfig::new(120, 0, 5);

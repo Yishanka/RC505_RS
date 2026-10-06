@@ -260,7 +260,7 @@ fn source_comp_shadow_never_captures_or_commits_phrase_state() {
     let capture = Arc::new(SampleCapture::new(20));
     if let Some(InputFx::Oscillator(o)) = &mut c.input_fx.banks[0].slots[1].fx {
         o.capture = Some(capture.clone());
-        o.threshold.value = 0;
+        o.gate_threshold.value = 0;
     }
     let mut core = RenderCore::new(sr);
     core.configure(&mut Parameters::from_config(&c, sr));

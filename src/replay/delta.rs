@@ -228,6 +228,14 @@ impl State {
                 return Ok(None);
             }
             EventKind::Config(data) => (value(data, &event.sample_assets)?, false),
+            EventKind::ConfigRaw(raw) => {
+                let config: Value = serde_json::from_str(raw.get())
+                    .context("Invalid replay configuration baseline")?;
+                (
+                    serde_json::json!({"config":config,"sample_assets":&event.sample_assets}),
+                    false,
+                )
+            }
             EventKind::ConfigDelta(delta) => {
                 ensure!(
                     event.sample_assets.is_empty(),
@@ -357,7 +365,10 @@ mod tests {
             source
                 .events
                 .iter()
-                .filter(|event| matches!(event.kind, EventKind::Config(_)))
+                .filter(|event| matches!(
+                    event.kind,
+                    EventKind::Config(_) | EventKind::ConfigRaw(_)
+                ))
                 .count(),
             1,
             "Source must keep sparse events instead of expanding every configuration"
@@ -375,7 +386,7 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|e| matches!(e.kind, EventKind::Config(_)))
+                .filter(|e| matches!(e.kind, EventKind::Config(_) | EventKind::ConfigRaw(_)))
                 .count(),
             1
         );

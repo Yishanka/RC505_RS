@@ -205,14 +205,6 @@ fn default_fader_speed() -> f32 {
 pub struct TrackFilterData {
     #[serde(default)]
     pub filter: FilterData,
-    #[serde(default)]
-    pub seq_step: String,
-    #[serde(default)]
-    pub seq: Vec<bool>,
-    #[serde(default)]
-    pub seq_step_len_seq: Vec<usize>,
-    #[serde(default)]
-    pub env: EnvelopeData,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -301,7 +293,13 @@ pub struct OscData {
     pub capture_ms: usize,
     pub waveform: String,
     pub level: usize,
-    pub threshold: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_threshold: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_threshold: Option<usize>,
+    // Read-only migration field from the shared note/capture control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<usize>,
     pub note_current: String,
     pub octave_current: usize,
     pub step: String,
@@ -359,8 +357,6 @@ pub struct EnvelopeData {
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct FilterData {
-    #[serde(default)]
-    pub sweep: crate::config::filter_configs::FilterSweepConfig,
     pub filter_type: String,
     pub cutoff_hz: usize,
     pub resonance_x10: usize,
@@ -471,7 +467,6 @@ impl Default for EnvelopeData {
 impl Default for FilterData {
     fn default() -> Self {
         Self {
-            sweep: Default::default(),
             filter_type: "LPF".to_string(),
             cutoff_hz: 1000,
             resonance_x10: 7,
@@ -781,7 +776,9 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                             capture_ms: osc.capture_ms,
                             waveform: waveform_to_string(osc.waveform.value).to_string(),
                             level: osc.level.value,
-                            threshold: osc.threshold.value,
+                            gate_threshold: Some(osc.gate_threshold.value.min(100)),
+                            capture_threshold: Some(osc.capture_threshold.value.min(100)),
+                            threshold: None,
                             note_current: note_to_string(osc.note.note.value).to_string(),
                             octave_current: osc.note.octave.value,
                             step: osc.note.step.value.clone(),
@@ -789,7 +786,6 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                             note_step_len_seq: osc.note.step_len_seq().to_vec(),
                             envelope: EnvelopeData::from_config(&osc.envelope),
                             osc_filter: FilterData {
-                                sweep: Default::default(),
                                 filter_type: filter_type_to_string(
                                     osc.osc_filter.filter_type.value,
                                 )
@@ -805,7 +801,6 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                     InputFx::Filter(filter) => {
                         slot_data.kind = "Filter".to_string();
                         slot_data.filter = Some(FilterData {
-                            sweep: filter.sweep.sanitized(),
                             filter_type: filter_type_to_string(filter.filter_type.value)
                                 .to_string(),
                             cutoff_hz: filter.cutoff_hz.value,
@@ -851,7 +846,6 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                             note_seq: seq,
                             note_step_len_seq: delay.note.step_len_seq().to_vec(),
                             filter: FilterData {
-                                sweep: Default::default(),
                                 filter_type: filter_type_to_string(delay.filter.filter_type.value)
                                     .to_string(),
                                 cutoff_hz: delay.filter.cutoff_hz.value,
@@ -932,7 +926,6 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                         slot_data.kind = "Filter".to_string();
                         slot_data.filter = Some(TrackFilterData {
                             filter: FilterData {
-                                sweep: filter.filter.sweep.sanitized(),
                                 filter_type: filter_type_to_string(filter.filter.filter_type.value)
                                     .to_string(),
                                 cutoff_hz: filter.filter.cutoff_hz.value,
@@ -940,10 +933,6 @@ pub fn data_from_config(config: &AppConfig) -> ProjectData {
                                 drive: filter.filter.drive.value,
                                 mix: filter.filter.mix.value,
                             },
-                            seq_step: filter.seq.step.value.clone(),
-                            seq: filter.seq.seq().to_vec(),
-                            seq_step_len_seq: filter.seq.step_len_seq().to_vec(),
-                            env: EnvelopeData::from_config(&filter.env),
                         });
                     }
                 }
@@ -1121,7 +1110,13 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                             osc.capture_ms = osc_data.capture_ms.clamp(20, 2000);
                             osc.sanitize_source();
                             osc.level.value = osc_data.level.min(100);
-                            osc.threshold.value = osc_data.threshold.min(100);
+                            let legacy_threshold = osc_data.threshold.unwrap_or(10);
+                            osc.gate_threshold.value =
+                                osc_data.gate_threshold.unwrap_or(legacy_threshold).min(100);
+                            osc.capture_threshold.value = osc_data
+                                .capture_threshold
+                                .unwrap_or(legacy_threshold)
+                                .min(100);
                             if let Some(n) = string_to_note(&osc_data.note_current) {
                                 osc.note.note.value = n;
                             }
@@ -1183,7 +1178,6 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                             filter.resonance_x10.value = filter_data.resonance_x10.clamp(1, 100);
                             filter.drive.value = filter_data.drive.min(100);
                             filter.mix.value = filter_data.mix.min(100);
-                            filter.sweep = filter_data.sweep.sanitized();
                         }
                     }
                 }
@@ -1256,7 +1250,8 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                             "Legacy MyDelay was migrated to OSC; capture or import a sample first."
                                 .into();
                         osc.level = delay.level;
-                        osc.threshold = delay.threshold;
+                        osc.gate_threshold.value = delay.threshold.value;
+                        osc.capture_threshold.value = delay.threshold.value;
                         osc.note = delay.note;
                         osc.envelope = delay.audio_env;
                         osc.osc_filter = delay.filter;
@@ -1426,17 +1421,6 @@ pub fn apply_data_to_config(config: &mut AppConfig, data: ProjectData) {
                                 filter_data.filter.drive.min(FILTER_DRIVE_MAX);
                             filter_cfg.filter.mix.value =
                                 filter_data.filter.mix.min(FILTER_MIX_MAX);
-                            filter_cfg.filter.sweep = filter_data.filter.sweep.sanitized();
-
-                            if !filter_data.seq_step.is_empty() {
-                                filter_cfg.seq.step.value = filter_data.seq_step.clone();
-                            }
-                            filter_cfg.seq.set_seq_with_steps(
-                                filter_data.seq.clone(),
-                                filter_data.seq_step_len_seq.clone(),
-                            );
-
-                            filter_data.env.apply_to(&mut filter_cfg.env);
                         }
                     }
                 }
@@ -1903,62 +1887,62 @@ fn string_to_note(s: &str) -> Option<Note> {
 mod tests {
     use super::*;
     #[test]
-    fn filter_sweep_legacy_defaults_and_both_racks_roundtrip() {
-        use crate::config::filter_configs::FilterSweepConfig;
-        let old: FilterData = serde_json::from_str(
-            r#"{"filter_type":"LPF","cutoff_hz":1200,"resonance_x10":7,"drive":0,"mix":100}"#,
-        )
-        .unwrap();
-        assert_eq!(old.sweep, FilterSweepConfig::default());
-        let sweep = FilterSweepConfig {
-            depth: 0.73,
-            rate_hz: 2.37,
-            sync: true,
-            beats: 0.75,
-            stepped: true,
-            step_hz: 19.0,
-            step_sync: true,
-            step_beats: 0.125,
-        };
+    fn legacy_filter_modulators_are_ignored_while_static_values_and_lanes_survive() {
+        use crate::config::automation::{ParameterLane, Target};
         let mut source = AppConfig::new(137, 0, 5);
         source.input_fx.set_slot_kind(0, 0, FxKind::Filter);
         source.track_fx.set_slot_kind(0, 0, TrackFxKind::Filter);
         if let Some(InputFx::Filter(f)) = &mut source.input_fx.banks[0].slots[0].fx {
-            f.sweep = sweep;
+            f.cutoff_hz.value = 1200;
+            f.resonance_x10.value = 18;
         }
         if let Some(TrackFx::Filter(f)) = source.track_fx.slot_fx_mut(0, 0) {
-            f.filter.sweep = sweep;
+            f.filter.cutoff_hz.value = 2300;
+            f.filter.mix.value = 75;
         }
-        let json = serde_json::to_vec(&data_from_config(&source)).unwrap();
+        let mut lane = ParameterLane::create(Target::FilterCutoff);
+        lane.enabled = true;
+        source.track_fx.banks[0].slots[0].parameter_lane = lane.clone();
+        let mut old = serde_json::to_value(data_from_config(&source)).unwrap();
+        old["input_fx"]["banks"][0]["slots"][0]["filter"]["sweep"] =
+            serde_json::json!({"depth":1.0,"sync":true,"stepped":true,"beats":0.25});
+        let track = &mut old["track_fx"]["banks"][0]["slots"][0]["filter"];
+        track["filter"]["sweep"] = serde_json::json!({"depth":1.0,"rate_hz":13.0});
+        track["seq_step"] = serde_json::json!("1/16");
+        track["seq"] = serde_json::json!([false, false, true]);
+        track["seq_step_len_seq"] = serde_json::json!([1, 1, 1]);
+        track["env"] = serde_json::json!({"attack_ms":1000.0,"sustain_pct":0});
         let mut restored = AppConfig::new(120, 0, 5);
-        apply_data_to_config(&mut restored, serde_json::from_slice(&json).unwrap());
-        let Some(InputFx::Filter(f)) = &restored.input_fx.banks[0].slots[0].fx else {
-            panic!()
-        };
-        assert_eq!(f.sweep, sweep);
-        let Some(TrackFx::Filter(f)) = restored.track_fx.slot_fx_mut(0, 0) else {
-            panic!()
-        };
-        assert_eq!(f.filter.sweep, sweep);
-        let bad = FilterSweepConfig {
-            depth: f32::NAN,
-            rate_hz: f32::INFINITY,
-            beats: -1.0,
-            step_hz: 9999.0,
-            step_beats: 0.0,
-            ..Default::default()
+        apply_data_to_config(&mut restored, serde_json::from_value(old).unwrap());
+        let current = data_from_config(&restored);
+        let json = serde_json::to_value(&current).unwrap();
+        let input = &json["input_fx"]["banks"][0]["slots"][0]["filter"];
+        assert_eq!(input["cutoff_hz"], 1200);
+        assert_eq!(input["resonance_x10"], 18);
+        assert!(input.get("sweep").is_none());
+        let track = &json["track_fx"]["banks"][0]["slots"][0]["filter"];
+        assert_eq!(track["filter"]["cutoff_hz"], 2300);
+        assert_eq!(track["filter"]["mix"], 75);
+        for removed in ["seq_step", "seq", "seq_step_len_seq", "env"] {
+            assert!(
+                track.get(removed).is_none(),
+                "{removed} must not be rewritten"
+            );
         }
-        .sanitized();
-        assert_eq!(
-            (
-                bad.depth,
-                bad.rate_hz,
-                bad.beats,
-                bad.step_hz,
-                bad.step_beats
-            ),
-            (0.0, 0.5, 0.0625, 100.0, 0.015625)
-        );
+        assert!(track["filter"].get("sweep").is_none());
+        assert_eq!(current.track_fx.banks[0].slots[0].parameter_lane, lane);
+        let text = crate::presets::encode(
+            &restored,
+            crate::presets::FxTarget::Track { bank: 0, slot: 0 },
+        )
+        .unwrap();
+        crate::presets::decode(
+            &mut source,
+            crate::presets::FxTarget::Track { bank: 1, slot: 2 },
+            &text,
+        )
+        .unwrap();
+        assert_eq!(source.track_fx.banks[1].slots[2].parameter_lane, lane);
     }
     #[test]
     fn old_project_defaults_and_new_faders_roundtrip() {

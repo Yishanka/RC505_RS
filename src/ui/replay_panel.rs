@@ -601,10 +601,18 @@ pub fn parameter_details(ui: &mut egui::Ui, app: &MyApp) {
                         "波形",
                         lang.text(&v.waveform.value.to_string()).into(),
                     );
+                    row("OSC level", "OSC 电平", format!("{} %", v.level.value));
+                    if v.input_gate {
+                        row(
+                            "Note gate threshold",
+                            "音符门控阈值",
+                            format!("{} %", v.gate_threshold.value),
+                        );
+                    }
                     row(
-                        "Level / threshold",
-                        "电平 / 阈值",
-                        format!("{} / {}", v.level.value, v.threshold.value),
+                        "Capture trigger threshold",
+                        "捕获触发阈值",
+                        format!("{} %", v.capture_threshold.value),
                     );
                     row(
                         "Sequence notes",

@@ -12,9 +12,7 @@ use crate::config::track_fx_configs::{
     TRACK_FX_BANK_COUNT, TRACK_FX_SLOT_COUNT, TrackFx, TrackFxConfigs,
 };
 use crate::dsp::delay::{DelayDspState, DelayParams, process_sample as process_delay_sample};
-use crate::dsp::envelope::{AhdsrParams, AhdsrState};
 use crate::dsp::filter::{FilterDspState, FilterParams, process_sample as process_filter_sample};
-use crate::dsp::note::{StepTrigger, seq_bool_at_time};
 use crate::dsp::roll::{RollDspState, RollParams, process_frame as process_roll_frame};
 
 const DEFAULT_BPM: usize = 120;
@@ -64,18 +62,7 @@ impl RollRuntime {
     }
 }
 
-#[derive(Clone)]
-pub struct TrackFilterRuntime {
-    pub sweep: crate::config::filter_configs::FilterSweepConfig,
-    pub filter_type: FilterType,
-    pub cutoff_hz: f32,
-    pub q: f32,
-    pub drive: f32,
-    pub mix: f32,
-    pub envelope: AhdsrParams,
-    pub seq: Vec<bool>,
-    pub trigger_seq: Vec<bool>,
-}
+pub type TrackFilterRuntime = super::input_fx::FilterRuntime;
 
 #[derive(Clone)]
 pub struct TrackFxSlotRuntime {
@@ -136,6 +123,7 @@ pub struct TrackFxState {
 }
 
 pub struct TrackFxEngine {
+    fine_automation: bool,
     pdc_enabled: bool,
     raw_carriers: [Option<(f32, f32)>; 5],
     live_input: (f32, f32),
@@ -150,9 +138,6 @@ pub struct TrackFxEngine {
 
 #[derive(Clone, Copy)]
 pub struct TrackFilterDspState {
-    pub sweep: crate::dsp::filter_sweep::FilterSweepState,
-    pub trigger: StepTrigger,
-    pub env: AhdsrState,
     pub filter_l: FilterDspState,
     pub filter_r: FilterDspState,
 }
@@ -160,9 +145,6 @@ pub struct TrackFilterDspState {
 impl TrackFilterDspState {
     pub fn new() -> Self {
         Self {
-            sweep: Default::default(),
-            trigger: StepTrigger::default(),
-            env: AhdsrState::new(),
             filter_l: FilterDspState::new(),
             filter_r: FilterDspState::new(),
         }
@@ -170,9 +152,13 @@ impl TrackFilterDspState {
 }
 
 impl TrackFxEngine {
+    pub fn set_automation_precision(&mut self, fine: bool) {
+        self.fine_automation = fine;
+    }
     pub fn new(sample_rate: f32, track_count: usize) -> Self {
         let sr = sample_rate.max(1.0);
         Self {
+            fine_automation: true,
             pdc_enabled: false,
             raw_carriers: [None; 5],
             live_input: (0.0, 0.0),
@@ -206,15 +192,6 @@ impl TrackFxEngine {
         self.pdc_enabled = enabled;
     }
     pub fn set_clock(&mut self, bpm: usize, active: bool) {
-        if active != self.clock_active && !self.pdc_enabled {
-            for track in &mut self.state.tracks {
-                for bank in &mut track.banks {
-                    for slot in &mut bank.slots {
-                        slot.filter.trigger = StepTrigger::default();
-                    }
-                }
-            }
-        }
         self.bpm = bpm;
         self.clock_active = active;
     }
@@ -416,8 +393,12 @@ impl TrackFxEngine {
                 continue;
             }
             let point = point.unwrap();
-            let lane =
-                crate::dsp::automation::sample(&slot.parameter_lane, point, self.sample_rate);
+            let lane = crate::dsp::automation::sample_with_precision(
+                &slot.parameter_lane,
+                point,
+                self.sample_rate,
+                self.fine_automation,
+            );
             if let Some(roll) = slot.roll {
                 (out_l, out_r) = process_roll_frame(
                     &mut bank_state.slots[idx].roll,
@@ -446,7 +427,6 @@ impl TrackFxEngine {
                         .audio
                         .observe_bypass(audio, (out_l, out_r));
                 }
-                bank_state.slots[idx].filter.trigger = StepTrigger::default();
                 continue;
             }
 
@@ -538,46 +518,10 @@ impl TrackFxEngine {
             }
 
             if let Some(filter) = slot.filter.as_ref() {
-                let gate_on = if !point.active || filter.seq.is_empty() {
-                    true
-                } else {
-                    seq_bool_at_time(
-                        &filter.seq,
-                        point.bpm,
-                        point.local as f64 / self.sample_rate as f64,
-                    )
-                };
-                let retrigger = bank_state.slots[idx].filter.trigger.next(
-                    &filter.trigger_seq,
-                    point.bpm,
-                    point.local as f64 / self.sample_rate as f64,
-                    point.active,
-                );
-                let dt = 1.0 / self.sample_rate.max(1.0);
-                let cutoff_env = bank_state.slots[idx]
-                    .filter
-                    .env
-                    .next(gate_on, retrigger, filter.envelope, dt)
-                    .clamp(0.0, 1.0);
-                let cutoff_min = FILTER_CUTOFF_MIN_HZ as f32;
-                let cutoff_max = crate::dsp::automation::Value::get(
+                let cutoff_hz = crate::dsp::automation::Value::get(
                     lane,
                     crate::config::automation::Target::FilterCutoff,
                     filter.cutoff_hz,
-                )
-                .max(cutoff_min);
-                let cutoff_hz = cutoff_min + (cutoff_max - cutoff_min) * cutoff_env;
-                let cutoff_hz = bank_state.slots[idx].filter.sweep.cutoff(
-                    filter.sweep,
-                    cutoff_hz,
-                    if filter.sweep.sync {
-                        point.elapsed
-                    } else {
-                        point.stream
-                    },
-                    point.bpm,
-                    point.active,
-                    self.sample_rate,
                 );
                 let filter_params = FilterParams {
                     filter_type: filter.filter_type,
@@ -672,7 +616,6 @@ impl TrackFxRuntime {
                         None,
                         None,
                         Some(TrackFilterRuntime {
-                            sweep: filter.filter.sweep.sanitized(),
                             filter_type: filter.filter.filter_type.value,
                             cutoff_hz: filter
                                 .filter
@@ -691,18 +634,6 @@ impl TrackFxRuntime {
                                 .clamp(0.0, 1.0),
                             mix: (filter.filter.mix.value.min(FILTER_MIX_MAX) as f32 / 100.0)
                                 .clamp(0.0, 1.0),
-                            envelope: super::envelope_params::from_config(&filter.env),
-                            seq: filter.seq.seq().to_vec(),
-                            trigger_seq: filter
-                                .seq
-                                .step_len_seq()
-                                .iter()
-                                .enumerate()
-                                .map(|(idx, step_len)| {
-                                    *step_len > 0
-                                        && filter.seq.seq().get(idx).copied().unwrap_or(false)
-                                })
-                                .collect(),
                         }),
                     ),
                     None | Some(TrackFx::Audio(_) | TrackFx::Vocoder(_)) => (None, None, None),
@@ -783,6 +714,61 @@ impl TrackFxBankState {
 mod tests {
     use super::*;
     #[test]
+    fn equal_final_filter_curve_has_equal_audio_after_different_edit_and_codec_paths() {
+        use crate::{
+            config::{
+                AppConfig, FxKind, InputFx,
+                automation::{Interpolation, ParameterLane, Target},
+            },
+            engine::input_fx::{InputFxEngine, InputFxRuntime},
+            project,
+        };
+        let mut direct = AppConfig::new(131, 0, 5);
+        direct.input_fx.set_slot_kind(0, 0, FxKind::Filter);
+        direct.input_fx.banks[0].slots[0].is_enabled = true;
+        let mut final_lane = ParameterLane::create(Target::FilterCutoff);
+        final_lane.enabled = true;
+        final_lane.interpolation = Interpolation::Curve;
+        final_lane.points[0].curve = -0.7;
+        final_lane.points[1].curve = 0.5;
+        direct.input_fx.banks[0].slots[0].parameter_lane = final_lane.clone();
+        let mut edited = AppConfig::new(131, 0, 5);
+        edited.input_fx.set_slot_kind(0, 0, FxKind::Filter);
+        edited.input_fx.banks[0].slots[0].is_enabled = true;
+        edited.input_fx.banks[0].slots[0].parameter_lane = ParameterLane::create(Target::FilterQ);
+        edited.input_fx.banks[0].slots[0].parameter_lane.enabled = true;
+        let _discarded = InputFxRuntime::from_config(&edited.input_fx);
+        edited.input_fx.banks[0].slots[0].parameter_lane = final_lane;
+        let json = serde_json::to_vec(&project::data_from_config(&edited)).unwrap();
+        project::apply_data_to_config(&mut edited, serde_json::from_slice(&json).unwrap());
+        let mut a = InputFxEngine::new(8000.0);
+        a.set_clock(true, 131);
+        a.swap_runtime(InputFxRuntime::from_config(&direct.input_fx));
+        let mut b = InputFxEngine::new(8000.0);
+        b.set_clock(true, 131);
+        b.swap_runtime(InputFxRuntime::from_config(&edited.input_fx));
+        let allocations = crate::test_alloc::count(|| {
+            for frame in 0..12000 {
+                let x = (frame as f32 * 0.31).sin() * 0.1;
+                let time = frame as f64 / 8000.0;
+                let a = a.process_frame(time, x, -x, &[]);
+                let b = b.process_frame(time, x, -x, &[]);
+                assert_eq!(
+                    [a.0.to_bits(), a.1.to_bits()],
+                    [b.0.to_bits(), b.1.to_bits()]
+                );
+            }
+        });
+        assert_eq!(allocations, 0);
+        let Some(InputFx::Filter(f)) = &edited.input_fx.banks[0].slots[0].fx else {
+            panic!()
+        };
+        assert_eq!(
+            f.cutoff_hz.value, 1000,
+            "Automation must not rewrite static base values"
+        );
+    }
+    #[test]
     fn pdc_later_modulation_matches_processing_then_delaying_even_across_clock_edges() {
         use crate::config::{TrackFxKind, audio_fx::AudioFxKind as K};
         let sr = 8000.0;
@@ -835,53 +821,55 @@ mod tests {
         }
     }
     #[test]
-    fn pdc_track_filter_gate_uses_delayed_loop_cursor_including_wraps() {
-        use crate::config::{TrackFxKind, audio_fx::AudioFxKind};
+    fn pdc_track_filter_lane_uses_source_transport_time_not_wrapping_loop_cursor() {
+        use crate::config::{
+            TrackFxKind,
+            audio_fx::AudioFxKind,
+            automation::{Interpolation, ParameterLane, Target},
+        };
         let sr = 8000.0;
         let latency = crate::dsp::pitch_shift::latency_frames(sr);
         let mut c = TrackFxConfigs::new(1);
         c.set_slot_kind(0, 1, TrackFxKind::Filter);
         c.tracks[0].enabled[0][1] = true;
-        if let Some(TrackFx::Filter(p)) = c.slot_fx_mut(0, 1) {
-            p.seq.set_seq(vec![true, false, true, false]);
-            p.env.attack_ms.value = 0.0;
-            p.env.decay_ms.value = 0.0;
-            p.env.hold_ms.value = 0.0;
-            p.env.sustain_pct.value = 100;
-            p.filter.cutoff_hz.value = 1600;
-        }
+        let mut lane = ParameterLane::create(Target::FilterCutoff);
+        lane.enabled = true;
+        lane.interpolation = Interpolation::Curve;
+        lane.points[0].curve = -0.8;
+        c.banks[0].slots[1].parameter_lane = lane;
         let mut reference = TrackFxEngine::new(sr, 1);
         reference.set_pdc(true);
-        reference.set_clock(120, true);
         reference.exchange_runtime(&mut TrackFxRuntime::from_config(&c));
         c.set_slot_kind(0, 0, TrackFxKind::Audio(AudioFxKind::Transpose));
         c.tracks[0].enabled[0][0] = true;
         let mut delayed = TrackFxEngine::new(sr, 1);
         delayed.set_pdc(true);
-        delayed.set_clock(120, true);
         delayed.exchange_runtime(&mut TrackFxRuntime::from_config(&c));
         let mut samples = Vec::with_capacity(10000);
-        for n in 0..10000 {
-            let pos = (n + 311) % 997;
-            let time = pos as f64 / sr as f64;
-            let x = (pos as f32 * 0.317).sin() * 0.2;
-            let active = (120..7500).contains(&n);
-            reference.set_clock(120, active);
-            delayed.set_clock(120, active);
-            reference.set_transport_elapsed(n as f64 / sr as f64);
-            delayed.set_transport_elapsed(n as f64 / sr as f64);
-            samples.push(reference.process_frame(0, time, x, x));
-            let got = delayed.process_frame(0, time, x, x);
-            let expected = if n >= latency {
-                samples[n - latency]
-            } else {
-                (0.0, 0.0)
-            };
-            assert!(
-                (got.0 - expected.0).abs() < 0.0005,
-                "frame{n}: {got:?}/{expected:?}"
-            );
-        }
+        let allocations = crate::test_alloc::count(|| {
+            for n in 0..10000 {
+                let pos = (n + 311) % 997;
+                let time = pos as f64 / sr as f64;
+                let x = (pos as f32 * 0.317).sin() * 0.2;
+                let active = (120..7500).contains(&n);
+                reference.set_clock(120, active);
+                delayed.set_clock(120, active);
+                reference.set_transport_elapsed(n as f64 / sr as f64);
+                delayed.set_transport_elapsed(n as f64 / sr as f64);
+                samples.push(reference.process_frame(0, time, x, x));
+                let got = delayed.process_frame(0, time, x, x);
+                let expected = if n >= latency {
+                    samples[n - latency]
+                } else {
+                    (0.0, 0.0)
+                };
+                assert!(
+                    (got.0 - expected.0).abs() < 0.0005,
+                    "sample {n}: {got:?}/{expected:?}"
+                );
+            }
+        });
+        assert_eq!(allocations, 0);
     }
     #[test]
     fn track_vocoder_uses_explicit_pre_fx_carrier_and_keeps_stereo() {
@@ -1015,7 +1003,6 @@ mod tests {
                     Some(TrackFx::Filter(p)) => {
                         p.filter.mix.value = 100;
                         p.filter.resonance_x10.value = 20;
-                        p.seq.set_seq(vec![true; 48]);
                     }
                     Some(TrackFx::Delay(p)) => {
                         p.feedback_repeats.value = 0;
@@ -1127,38 +1114,70 @@ mod tests {
         }
     }
     #[test]
-    fn sample_clock_activates_track_filter_sequence() {
-        let mut config = TrackFxConfigs::new(1);
-        config.set_slot_kind(0, 0, crate::config::TrackFxKind::Filter);
-        config.tracks[0].enabled[0][0] = true;
-        if let Some(TrackFx::Filter(filter)) = &mut config.banks[0].slots[0].fx {
-            filter.filter.cutoff_hz.value = 2000;
-            filter.env.attack_ms.value = 0.0;
-            filter
-                .seq
-                .set_seq([vec![false; 12], vec![true; 12]].concat());
-        }
-        let mut engine = TrackFxEngine::new(8000.0, 1);
-        engine.swap_runtime(TrackFxRuntime::from_config(&config));
-        engine.set_clock(120, true);
-        let mut off = 0.0;
-        let mut on = 0.0;
-        for frame in 0..8000 {
-            let input = (std::f32::consts::TAU * 800.0 * frame as f32 / 8000.0).sin() * 0.1;
-            let output = engine
-                .process_frame(0, frame as f64 / 8000.0, input, input)
-                .0;
-            if (2000..4000).contains(&frame) {
-                off += output * output;
+    fn static_track_filter_matches_input_filter_before_start_and_across_transport_changes() {
+        use crate::{
+            config::{AppConfig, FxKind, InputFx, TrackFxKind},
+            engine::input_fx::{InputFxEngine, InputFxRuntime},
+        };
+        for sr in [8000.0, 48000.0] {
+            for kind in [
+                FilterType::Lpf,
+                FilterType::Hpf,
+                FilterType::Bpf,
+                FilterType::Notch,
+            ] {
+                let mut c = AppConfig::new(137, 0, 5);
+                c.input_fx.set_slot_kind(0, 0, FxKind::Filter);
+                c.input_fx.banks[0].slots[0].is_enabled = true;
+                c.track_fx.set_slot_kind(0, 0, TrackFxKind::Filter);
+                c.track_fx.tracks[0].enabled[0][0] = true;
+                let Some(InputFx::Filter(input)) = &mut c.input_fx.banks[0].slots[0].fx else {
+                    panic!()
+                };
+                input.filter_type.value = kind;
+                input.cutoff_hz.value = 1800;
+                input.resonance_x10.value = 19;
+                input.drive.value = 23;
+                input.mix.value = 81;
+                let Some(TrackFx::Filter(track)) = c.track_fx.slot_fx_mut(0, 0) else {
+                    panic!()
+                };
+                track.filter.filter_type.value = kind;
+                track.filter.cutoff_hz.value = 1800;
+                track.filter.resonance_x10.value = 19;
+                track.filter.drive.value = 23;
+                track.filter.mix.value = 81;
+                let mut input = InputFxEngine::new(sr);
+                input.swap_runtime(InputFxRuntime::from_config(&c.input_fx));
+                let mut track = TrackFxEngine::new(sr, 1);
+                track.exchange_runtime(&mut TrackFxRuntime::from_config(&c.track_fx));
+                let mut energy = 0.0;
+                let allocations = crate::test_alloc::count(|| {
+                    for n in 0..6000 {
+                        let active = (701..3800).contains(&n);
+                        input.set_clock(active, 137);
+                        track.set_clock(137, active);
+                        let dry = (
+                            (n as f32 * 0.137).sin() * 0.12,
+                            (n as f32 * 0.083).cos() * 0.1,
+                        );
+                        let a = input.process_frame(n as f64 / sr as f64, dry.0, dry.1, &[]);
+                        track.set_transport_elapsed(n as f64 / sr as f64);
+                        let b = track.process_frame(0, (n % 797) as f64 / sr as f64, dry.0, dry.1);
+                        assert_eq!(
+                            [a.0.to_bits(), a.1.to_bits()],
+                            [b.0.to_bits(), b.1.to_bits()],
+                            "{kind} at {sr} / sample {n}"
+                        );
+                        if n < 600 {
+                            energy += b.0.abs() + b.1.abs();
+                        }
+                    }
+                });
+                assert_eq!(allocations, 0);
+                assert!(energy > 1.0, "Static filter must sound without transport");
             }
-            if frame >= 6000 {
-                on += output * output;
-            }
         }
-        assert!(
-            on > off * 100.0,
-            "Sequence gate must actually modulate the filter: {off} / {on}"
-        );
     }
     use crate::config::TrackFxKind;
     #[test]

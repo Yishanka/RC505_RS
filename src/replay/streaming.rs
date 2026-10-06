@@ -147,7 +147,7 @@ impl Machine {
                     self.core.action(*action, &mut OfflinePages);
                     self.last_action = Some((self.frame, *action));
                 }
-                EventKind::Config(_) | EventKind::ConfigDelta(_) => {
+                EventKind::Config(_) | EventKind::ConfigRaw(_) | EventKind::ConfigDelta(_) => {
                     let data = self
                         .config_state
                         .apply(event, &mut self.assets)?
@@ -601,6 +601,153 @@ mod tests {
         fixture_at(8000)
     }
     #[test]
+    fn retired_filter_and_osc_fields_remain_patchable_in_legacy_wire_baselines() {
+        use crate::config::{FxKind, InputFx, TrackFxKind};
+        let root = PathBuf::from("var").join(format!("stream-replay-test-{}", session::id()));
+        let mut config = AppConfig::new(120, 0, 5);
+        config.input_fx.set_slot_kind(0, 0, FxKind::Filter);
+        config.input_fx.banks[0].slots[0].is_enabled = true;
+        config.input_fx.set_slot_kind(0, 1, FxKind::Oscillator);
+        config.track_fx.set_slot_kind(0, 0, TrackFxKind::Filter);
+        config.track_fx.tracks[0].enabled[0][0] = true;
+        if let Some(InputFx::Filter(filter)) = &mut config.input_fx.banks[0].slots[0].fx {
+            filter.cutoff_hz.value = 1200;
+        }
+        let data = crate::project::data_from_config(&config);
+        let mut core = RenderCore::new(8000);
+        core.set_renderer_version(9);
+        core.configure(&mut Parameters::from_config(&config, 8000));
+        let mut initial = AudioSnapshot::empty(8000);
+        for n in 0..317 {
+            initial.tracks[0].write(n, [(n as f32 * 0.13).sin() * 0.03; 2], &mut OfflinePages);
+        }
+        core.restore(&mut initial);
+        core.snapshot(&mut initial, &mut OfflinePages);
+        let mut writer = Writer::begin(
+            root.clone(),
+            "legacy-filter.json".into(),
+            0,
+            initial,
+            data.clone(),
+        )
+        .unwrap();
+        let mut live = Vec::new();
+        for n in 0..1600u64 {
+            if n == 0 {
+                core.action(Action::All, &mut OfflinePages);
+            }
+            if n == 500 {
+                config.track_levels[0] = 0.6;
+                core.configure(&mut Parameters::from_config(&config, 8000));
+            }
+            if n == 700 {
+                if let Some(InputFx::Filter(filter)) = &mut config.input_fx.banks[0].slots[0].fx {
+                    filter.cutoff_hz.value = 2300;
+                }
+                core.configure(&mut Parameters::from_config(&config, 8000));
+            }
+            let dry = [(n as f32 * 0.193).sin() * 0.04; 2];
+            writer.audio(n, &[dry]).unwrap();
+            live.push(core.process(dry, &mut OfflinePages));
+        }
+        writer.finish(1600).unwrap();
+        let mut old = serde_json::to_value(data).unwrap();
+        old["input_fx"]["banks"][0]["slots"][0]["filter"]["sweep"] =
+            serde_json::json!({"depth":0.7,"sync":true});
+        old["track_fx"]["banks"][0]["slots"][0]["filter"]["env"] =
+            serde_json::json!({"attack_ms":0.0,"sustain_pct":0});
+        old["track_fx"]["banks"][0]["slots"][0]["filter"]["seq"] =
+            serde_json::json!([false, true, false]);
+        let osc = old["input_fx"]["banks"][0]["slots"][1]["osc"]
+            .as_object_mut()
+            .unwrap();
+        osc.remove("gate_threshold");
+        osc.remove("capture_threshold");
+        osc.insert("threshold".into(), serde_json::json!(10));
+        let manifest_path = root.join("initial/manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["config"] = old.clone();
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let events = [
+            serde_json::json!({"frame":0,"sequence":0,"kind":{"Config":old}}),
+            serde_json::json!({"frame":0,"sequence":1,"kind":{"Action":"All"}}),
+            serde_json::json!({"frame":300,"sequence":2,"kind":{"ConfigDelta":{"r":2,"ops":[
+                {"p":["config","input_fx","banks",0,"slots",0,"filter","sweep","depth"],"v":1.0},
+                {"p":["config","track_fx","banks",0,"slots",0,"filter","env","attack_ms"],"v":999.0},
+                {"p":["config","track_fx","banks",0,"slots",0,"filter","seq",1],"v":false},
+                {"p":["config","input_fx","banks",0,"slots",1,"osc","threshold"],"v":90}]}}}),
+            serde_json::json!({"frame":500,"sequence":3,"kind":{"ConfigDelta":{"r":3,"ops":[{"p":["config","track_levels",0],"v":0.6}]}}}),
+            serde_json::json!({"frame":700,"sequence":4,"kind":{"ConfigDelta":{"r":4,"ops":[
+                {"p":["config","input_fx","banks",0,"slots",0,"filter","sweep"],"v":{"depth":0.25,"sync":false}},
+                {"p":["config","track_fx","banks",0,"slots",0,"filter","env"],"v":{"attack_ms":17.0,"sustain_pct":20}},
+                {"p":["config","track_fx","banks",0,"slots",0,"filter","seq"],"v":[true]},
+                {"p":["config","input_fx","banks",0,"slots",0,"filter","cutoff_hz"],"v":2300}]}}}),
+            serde_json::json!({"frame":1000,"sequence":5,"kind":{"ConfigDelta":{"r":5,"ops":[
+                {"p":["config","input_fx","banks",0,"slots",0,"filter","sweep","depth"],"v":0.9},
+                {"p":["config","input_fx","banks",0,"slots",1,"osc","threshold"],"v":77}]}}}),
+        ];
+        let log = events
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        fs::write(root.join("events.jsonl"), log.as_bytes()).unwrap();
+        let mut metadata = info(&root).unwrap();
+        metadata.renderer = 9;
+        metadata.initial_sha256 = session::checksum(&manifest_path).unwrap();
+        metadata.events_sha256 = session::checksum(&root.join("events.jsonl")).unwrap();
+        fs::write(
+            root.join("replay.json"),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+        let source = Source::open(&root).unwrap();
+        assert!(matches!(source.events[0].kind, EventKind::ConfigRaw(_)));
+        let mut machine = Machine::new(source.clone()).unwrap();
+        for (n, expected) in live.iter().enumerate() {
+            assert_eq!(
+                machine.next().unwrap().unwrap().map(f32::to_bits),
+                expected.map(f32::to_bits),
+                "Retired fields changed modern DSP at {n}"
+            );
+        }
+        for target in [0, 299, 300, 499, 500, 699, 700, 999, 1000] {
+            let mut seek = Machine::new(source.clone()).unwrap();
+            seek.advance_to(target, || false).unwrap();
+            for expected in &live[target as usize..target as usize + 32] {
+                assert_eq!(
+                    seek.next().unwrap().unwrap().map(f32::to_bits),
+                    expected.map(f32::to_bits)
+                );
+            }
+        }
+        let wav = root.join("explicit.wav");
+        super::super::render(&root, &wav, &AtomicU64::new(0)).unwrap();
+        let rendered: Vec<f32> = hound::WavReader::open(wav)
+            .unwrap()
+            .into_samples()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rendered.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            live.iter()
+                .flatten()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("events.jsonl")).unwrap(),
+            log,
+            "Reading must not rewrite legacy logs"
+        );
+        drop(machine);
+        drop(source);
+        drop(core);
+        cleanup(&root);
+    }
+    #[test]
     fn parameter_lanes_and_updated_distortion_dynamics_reproduce_live_seek_and_export() {
         use crate::config::{
             FxKind, InputFx, TrackFx, TrackFxKind,
@@ -783,7 +930,7 @@ mod tests {
         cleanup(&root);
     }
     #[test]
-    fn free_filter_sweep_and_mono_enhance_replay_through_transport_changes_and_seek() {
+    fn filter_automation_and_mono_enhance_replay_through_transport_changes_and_seek() {
         use crate::config::{FxKind, InputFx, audio_fx::AudioFxKind, track_options::InputRouting};
         let root = PathBuf::from("var").join(format!("stream-replay-test-{}", session::id()));
         let origin = 123456;
@@ -797,10 +944,14 @@ mod tests {
             slot.is_enabled = true;
         }
         if let Some(InputFx::Filter(filter)) = &mut config.input_fx.banks[0].slots[0].fx {
-            filter.sweep.depth = 0.8;
-            filter.sweep.rate_hz = 2.3;
             filter.cutoff_hz.value = 4000;
         }
+        use crate::config::automation::{Interpolation, ParameterLane, Target};
+        let mut lane = ParameterLane::create(Target::FilterCutoff);
+        lane.enabled = true;
+        lane.interpolation = Interpolation::Curve;
+        lane.points[0].curve = -0.6;
+        config.input_fx.banks[0].slots[0].parameter_lane = lane;
         let mut core = RenderCore::new(8000);
         core.configure(&mut Parameters::from_config(&config, 8000));
         core.clock.frame = origin;
@@ -808,7 +959,7 @@ mod tests {
         core.snapshot(&mut initial, &mut OfflinePages);
         let mut writer = Writer::begin(
             root.clone(),
-            "enhance-sweep.json".into(),
+            "enhance-automation.json".into(),
             origin,
             initial,
             crate::project::data_from_config(&config),
@@ -827,11 +978,13 @@ mod tests {
                     .unwrap();
             }
             if matches!(frame, 2000 | 3500 | 4750) {
-                if let Some(InputFx::Filter(filter)) = &mut config.input_fx.banks[0].slots[0].fx {
-                    filter.sweep.rate_hz = 5.7;
-                    filter.sweep.stepped = frame >= 3500;
-                    filter.sweep.step_hz = 17.0;
-                }
+                let lane = &mut config.input_fx.banks[0].slots[0].parameter_lane;
+                lane.points[1].value = 0.3;
+                lane.interpolation = if frame >= 3500 {
+                    Interpolation::Step
+                } else {
+                    Interpolation::Linear
+                };
                 if let Some(InputFx::Audio(enhance)) = &mut config.input_fx.banks[0].slots[1].fx {
                     enhance.enhance_amount = 0.8;
                     enhance.enhance_low_cut_hz = if frame == 3500 { 900.0 } else { 0.0 };
@@ -860,7 +1013,7 @@ mod tests {
             assert_eq!(
                 replay.next().unwrap().unwrap().map(f32::to_bits),
                 expected.map(f32::to_bits),
-                "free sweep/enhance frame {frame}"
+                "filter automation/enhance frame {frame}"
             );
         }
         for target in [0, 999, 1000, 2000, 3499, 3500, 4001, 4500, 4750] {

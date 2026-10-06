@@ -92,8 +92,8 @@ const TRANSLATIONS: &[(&str, &str)] = &[
         "请先在钢琴卷帘中添加音符",
     ),
     (
-        "Record track audio before auditioning its step filter",
-        "请先录入轨道音频，再试听步进滤波",
+        "Select an oscillator to audition notes",
+        "请选择振荡器试听音符",
     ),
     (
         "Record track audio before previewing this sound",
@@ -143,6 +143,8 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("Compensation (ms)", "延迟补偿 (ms)"),
     ("Level", "电平"),
     ("Threshold", "阈值"),
+    ("Note gate threshold (%)", "音符门控阈值（%）"),
+    ("Capture trigger threshold (%)", "捕获触发阈值（%）"),
     ("Direct level (%)", "原声音量 (%)"),
     ("Effect level (%)", "效果音量 (%)"),
     ("Direct level(%)", "原声音量 (%)"),
@@ -205,7 +207,6 @@ const TRANSLATIONS: &[(&str, &str)] = &[
         "Carrier thru (dry carrier channel)",
         "载波直通（载波通道干声）",
     ),
-    ("Step gate sequencer", "步进门控序列"),
     ("Append step", "添加步进"),
     ("Remove last", "移除末步"),
     (

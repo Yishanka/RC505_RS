@@ -33,6 +33,10 @@ use crate::dsp::vocoder::{VocoderDspState, VocoderParams, process_frame as proce
 
 const DEFAULT_BPM: usize = 120;
 
+#[cfg(test)]
+#[path = "osc_threshold_tests.rs"]
+mod osc_threshold_tests;
+
 #[derive(Clone)]
 pub struct OscillatorRuntime {
     pub dry_level: f32,
@@ -43,7 +47,8 @@ pub struct OscillatorRuntime {
     pub note_seq: Vec<Option<NoteOct>>,
     pub note_on_seq: Vec<bool>,
     pub note_trigger_seq: Vec<bool>,
-    pub threshold: f32,
+    pub gate_threshold: f32,
+    pub capture_threshold: f32,
     pub envelope: AhdsrParams,
     pub osc_filter: FilterRuntime,
     pub osc_filter_envelope: AhdsrParams,
@@ -51,7 +56,6 @@ pub struct OscillatorRuntime {
 
 #[derive(Clone, Copy)]
 pub struct FilterRuntime {
-    pub sweep: crate::config::filter_configs::FilterSweepConfig,
     pub filter_type: FilterType,
     pub cutoff_hz: f32,
     pub q: f32,
@@ -142,7 +146,6 @@ pub struct FxSlotState {
     pub trigger: StepTrigger,
     pub osc: OscillatorFxDspState,
     pub poly_osc: crate::dsp::oscillator::PolyOscState,
-    pub filter_sweep: crate::dsp::filter_sweep::FilterSweepState,
     pub filter_l: FilterDspState,
     pub filter_r: FilterDspState,
     pub reverb: ReverbDspState,
@@ -185,6 +188,7 @@ pub struct InputFxState {
 }
 
 pub struct InputFxEngine {
+    fine_automation: bool,
     external_only: bool,
     control_clock: super::pdc::ClockHistory,
     pdc_enabled: bool,
@@ -201,6 +205,9 @@ pub struct InputFxEngine {
 }
 
 impl InputFxEngine {
+    pub fn set_automation_precision(&mut self, fine: bool) {
+        self.fine_automation = fine;
+    }
     /// A private recording analysis chain: process dry controls and downstream
     /// effects normally, but never advance phrases, capture PCM, or emit OSC.
     pub fn set_external_only(&mut self, enabled: bool) {
@@ -222,6 +229,7 @@ impl InputFxEngine {
     }
     pub fn new(sample_rate: f32) -> Self {
         Self {
+            fine_automation: true,
             external_only: false,
             control_clock: super::pdc::ClockHistory::new(sample_rate),
             pdc_enabled: false,
@@ -485,7 +493,7 @@ impl InputFxEngine {
                     &osc.poly,
                     (input_l + input_r) * 0.5,
                     self.sample_rate,
-                    osc.threshold,
+                    osc.capture_threshold,
                 );
             }
             if !slot.enabled {
@@ -528,7 +536,7 @@ impl InputFxEngine {
             let params = OscillatorFxParams {
                 waveform: osc.waveform,
                 level: osc.level,
-                threshold: osc.threshold,
+                gate_threshold: osc.gate_threshold,
                 input_level,
                 sample_rate: self.sample_rate,
                 note,
@@ -750,23 +758,16 @@ impl InputFxEngine {
             }) else {
                 continue;
             };
-            let lane =
-                crate::dsp::automation::sample(&slot.parameter_lane, point, self.sample_rate);
-            let cutoff_hz = state_bank.slots[idx].filter_sweep.cutoff(
-                filter.sweep,
-                crate::dsp::automation::Value::get(
-                    lane,
-                    crate::config::automation::Target::FilterCutoff,
-                    filter.cutoff_hz,
-                ),
-                if filter.sweep.sync {
-                    point.elapsed
-                } else {
-                    point.stream
-                },
-                point.bpm,
-                point.active,
+            let lane = crate::dsp::automation::sample_with_precision(
+                &slot.parameter_lane,
+                point,
                 self.sample_rate,
+                self.fine_automation,
+            );
+            let cutoff_hz = crate::dsp::automation::Value::get(
+                lane,
+                crate::config::automation::Target::FilterCutoff,
+                filter.cutoff_hz,
             );
             let q = crate::dsp::automation::Value::get(
                 lane,
@@ -818,7 +819,12 @@ impl InputFxEngine {
                     0
                 })
                 .and_then(|point| {
-                    crate::dsp::automation::sample(&slot.parameter_lane, point, self.sample_rate)
+                    crate::dsp::automation::sample_with_precision(
+                        &slot.parameter_lane,
+                        point,
+                        self.sample_rate,
+                        self.fine_automation,
+                    )
                 });
             let (wet_l, wet_r) = process_reverb_frame(
                 &mut state_bank.slots[idx].reverb,
@@ -878,10 +884,11 @@ impl InputFxEngine {
                         point.elapsed as f64 / self.sample_rate as f64,
                         point.active,
                         (out_l, out_r),
-                        crate::dsp::automation::sample(
+                        crate::dsp::automation::sample_with_precision(
                             &slot.parameter_lane,
                             point,
                             self.sample_rate,
+                            self.fine_automation,
                         ),
                     );
                     (out_l, out_r) = if slot.enabled {
@@ -976,10 +983,11 @@ impl InputFxRuntime {
                                     *step_len > 0 && osc.note.seq()[idx].is_some()
                                 })
                                 .collect(),
-                            threshold: (osc.threshold.value as f32 / 100.0).clamp(0.0, 1.0),
+                            gate_threshold: (osc.gate_threshold.value.min(100) as f32 / 100.0),
+                            capture_threshold: (osc.capture_threshold.value.min(100) as f32
+                                / 100.0),
                             envelope: super::envelope_params::from_config(&osc.envelope),
                             osc_filter: FilterRuntime {
-                                sweep: Default::default(),
                                 filter_type: osc.osc_filter.filter_type.value,
                                 cutoff_hz: osc
                                     .osc_filter
@@ -1012,7 +1020,6 @@ impl InputFxRuntime {
                     Some(InputFx::Filter(filter)) => (
                         None,
                         Some(FilterRuntime {
-                            sweep: filter.sweep.sanitized(),
                             filter_type: filter.filter_type.value,
                             cutoff_hz: filter
                                 .cutoff_hz
@@ -1097,7 +1104,6 @@ impl InputFxRuntime {
                         let audio_env = super::envelope_params::from_config(&delay.audio_env);
                         let filter_env = super::envelope_params::from_config(&delay.filter_env);
                         let filter = FilterRuntime {
-                            sweep: Default::default(),
                             filter_type: delay.filter.filter_type.value,
                             cutoff_hz: delay
                                 .filter
@@ -1253,7 +1259,6 @@ impl FxBankState {
                 trigger: StepTrigger::default(),
                 osc: OscillatorFxDspState::new(),
                 poly_osc: crate::dsp::oscillator::PolyOscState::new(),
-                filter_sweep: Default::default(),
                 filter_l: FilterDspState::new(),
                 filter_r: FilterDspState::new(),
                 reverb: ReverbDspState::new(),
@@ -1324,40 +1329,45 @@ mod tests {
         }
     }
     #[test]
-    fn filter_sweep_follows_delayed_source_clock_for_sync_and_free_rate() {
-        use crate::config::{FxKind, audio_fx::AudioFxKind, track_options::InputRouting};
+    fn filter_parameter_lane_follows_the_delayed_source_clock_without_hidden_modulation() {
+        use crate::config::{
+            FxKind,
+            audio_fx::AudioFxKind,
+            automation::{Interpolation, ParameterLane, Target},
+            track_options::InputRouting,
+        };
         let sr = 8000.0;
         let latency = crate::dsp::pitch_shift::latency_frames(sr);
-        for synced in [false, true] {
+        for fine in [false, true] {
             let mut c = InputFxConfigs::new();
             c.set_slot_kind(0, 1, FxKind::Filter);
             c.banks[0].slots[1].is_enabled = true;
-            if let Some(InputFx::Filter(f)) = &mut c.banks[0].slots[1].fx {
-                f.cutoff_hz.value = 800;
-                f.sweep.depth = 0.8;
-                f.sweep.sync = synced;
-                f.sweep.rate_hz = 7.0;
-                f.sweep.beats = 0.25;
-                f.sweep.stepped = true;
-                f.sweep.step_hz = 31.0;
-            }
+            let mut lane = ParameterLane::create(Target::FilterCutoff);
+            lane.enabled = true;
+            lane.interpolation = Interpolation::Curve;
+            lane.points[0].curve = -0.7;
+            lane.points[1].curve = 0.8;
+            c.banks[0].slots[1].parameter_lane = lane;
             let mut direct = InputFxEngine::new(sr);
             direct.set_routing(InputRouting::Serial);
             direct.set_pdc(true, [0; 5]);
-            direct.set_clock(synced, 137);
+            direct.set_automation_precision(fine);
             direct.swap_runtime(InputFxRuntime::from_config(&c));
             c.set_slot_kind(0, 0, FxKind::Audio(AudioFxKind::Transpose));
             c.banks[0].slots[0].is_enabled = true;
             let mut delayed = InputFxEngine::new(sr);
             delayed.set_routing(InputRouting::Serial);
             delayed.set_pdc(true, [0; 5]);
-            delayed.set_clock(synced, 137);
+            delayed.set_automation_precision(fine);
             delayed.swap_runtime(InputFxRuntime::from_config(&c));
             let mut reference = Vec::with_capacity(8000);
             let allocations = crate::test_alloc::count(|| {
                 for n in 0..8000 {
+                    let active = (117..6500).contains(&n);
+                    direct.set_clock(active, 137);
+                    delayed.set_clock(active, 137);
                     let x = (n as f32 * 0.53).sin() * 0.03 + (n as f32 * 0.11).sin() * 0.02;
-                    let time = if synced { n as f64 / sr as f64 } else { 0.0 };
+                    let time = n as f64 / sr as f64;
                     reference.push(direct.process_frame(time, x, -x, &[]));
                     let got = delayed.process_frame(time, x, -x, &[]);
                     let expected = if n >= latency {
@@ -1367,7 +1377,7 @@ mod tests {
                     };
                     assert!(
                         (got.0 - expected.0).abs() < 0.0003 && (got.1 - expected.1).abs() < 0.0003,
-                        "sync={synced},n={n}: {got:?}/{expected:?}"
+                        "fine={fine}, sample={n}: {got:?}/{expected:?}"
                     );
                 }
             });
@@ -1506,7 +1516,7 @@ mod tests {
         config.set_slot_kind(0, 0, crate::config::FxKind::Oscillator);
         config.banks[0].slots[0].is_enabled = true;
         if let Some(InputFx::Oscillator(osc)) = &mut config.banks[0].slots[0].fx {
-            osc.threshold.value = 0;
+            osc.gate_threshold.value = 0;
             osc.osc_filter.mix.value = 0;
             osc.envelope.attack_ms.value = 1.0;
         }
@@ -1553,7 +1563,7 @@ mod tests {
         let Some(InputFx::Oscillator(osc)) = &mut config.banks[0].slots[0].fx else {
             panic!()
         };
-        osc.threshold.value = 0;
+        osc.gate_threshold.value = 0;
         osc.envelope.attack_ms.value = 10.0;
         osc.osc_filter.mix.value = 0;
         osc.note.push();
@@ -1581,7 +1591,7 @@ mod tests {
             panic!()
         };
         osc.waveform.value = Waveform::Sample;
-        osc.threshold.value = 0;
+        osc.gate_threshold.value = 0;
         osc.note.push();
         for legacy in [false, true] {
             let mut engine = InputFxEngine::new(48000.0);

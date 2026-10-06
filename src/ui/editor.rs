@@ -495,7 +495,6 @@ fn input_parameters(
         },
         InputFx::Filter(filter) => {
             parameters::filter(ui, filter, full);
-            parameters::filter_sweep(ui, &mut filter.sweep, full);
         }
         InputFx::Reverb(reverb) => {
             use crate::config::reverb_configs::*;
@@ -644,53 +643,7 @@ fn track_parameters(ui: &mut egui::Ui, fx: &mut TrackFx, full: bool) {
             }
         }
         TrackFx::Roll(roll) => roll_parameters(ui, roll, full),
-        TrackFx::Filter(filter) => {
-            parameters::filter(ui, &mut filter.filter, full);
-            parameters::filter_sweep(ui, &mut filter.filter.sweep, full);
-            if full {
-                egui::CollapsingHeader::new(lang.text("Step gate sequencer"))
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        choice(ui, &mut filter.seq.step);
-                        ui.horizontal(|ui| {
-                            if ui.button(lang.text("Append step")).clicked() {
-                                filter.seq.edit.value =
-                                    crate::config::seq_configs::TrackSeqEdit::Push;
-                                filter.seq.apply_edit();
-                            }
-                            if ui.button(lang.text("Remove last")).clicked() {
-                                filter.seq.edit.value =
-                                    crate::config::seq_configs::TrackSeqEdit::Pop;
-                                filter.seq.apply_edit();
-                            }
-                        });
-                        let mut seq = filter.seq.seq().to_vec();
-                        let steps = filter.seq.step_len_seq().to_vec();
-                        let mut changed = false;
-                        theme::control_row(ui, |ui| {
-                            for (start, len) in
-                                steps.iter().enumerate().filter(|(_, len)| **len > 0)
-                            {
-                                if ui
-                                    .selectable_label(seq[start], format!("{}", start + 1))
-                                    .on_hover_text("Toggle the gate for this step")
-                                    .clicked()
-                                {
-                                    let value = !seq[start];
-                                    let end = (start + len).min(seq.len());
-                                    seq[start..end].fill(value);
-                                    changed = true;
-                                }
-                            }
-                        });
-                        if changed {
-                            filter.seq.set_seq_with_steps(seq, steps);
-                        }
-                    });
-                egui::CollapsingHeader::new("Cutoff envelope")
-                    .show(ui, |ui| parameters::envelope(ui, &mut filter.env));
-            }
-        }
+        TrackFx::Filter(filter) => parameters::filter(ui, &mut filter.filter, full),
     }
 }
 

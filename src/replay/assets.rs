@@ -101,6 +101,11 @@ impl AssetReader {
         if event.sample_assets.is_empty() {
             return Ok(());
         }
+        if let EventKind::ConfigRaw(raw) = &event.kind {
+            event.kind = EventKind::Config(
+                serde_json::from_str(raw.get()).context("Invalid replay configuration")?,
+            );
+        }
         let EventKind::Config(data) = &mut event.kind else {
             anyhow::bail!("Only configuration events can reference samples");
         };

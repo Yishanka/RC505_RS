@@ -31,7 +31,7 @@ impl OscillatorFxDspState {
 pub struct OscillatorFxParams {
     pub waveform: Waveform,
     pub level: f32,
-    pub threshold: f32,
+    pub gate_threshold: f32,
     pub input_level: f32,
     pub sample_rate: f32,
     pub note: Option<NoteOct>,
@@ -57,7 +57,7 @@ pub fn process_sample(
     state: &mut OscillatorDspState,
     waveform: Waveform,
     level: f32,
-    threshold: f32,
+    gate_threshold: f32,
     input_level: f32,
     sample_rate: f32,
     note: Option<NoteOct>,
@@ -66,8 +66,8 @@ pub fn process_sample(
     envelope: AhdsrParams,
 ) -> f32 {
     let dt = 1.0 / sample_rate.max(1.0);
-    let gate_on = note_on && input_level >= threshold;
-    let retrigger = note_retrigger && input_level >= threshold;
+    let gate_on = note_on && input_level >= gate_threshold;
+    let retrigger = note_retrigger && input_level >= gate_threshold;
     let amp = state.envelope.next(gate_on, retrigger, envelope, dt);
 
     if let Some(n) = note {
@@ -101,7 +101,7 @@ pub fn process_fx_sample(state: &mut OscillatorFxDspState, p: OscillatorFxParams
         &mut state.osc,
         p.waveform,
         p.level,
-        p.threshold,
+        p.gate_threshold,
         p.input_level,
         p.sample_rate,
         p.note,
@@ -110,8 +110,8 @@ pub fn process_fx_sample(state: &mut OscillatorFxDspState, p: OscillatorFxParams
         p.envelope,
     );
 
-    let gate_on = p.note_on && p.input_level >= p.threshold;
-    let retrigger = p.note_retrigger && p.input_level >= p.threshold;
+    let gate_on = p.note_on && p.input_level >= p.gate_threshold;
+    let retrigger = p.note_retrigger && p.input_level >= p.gate_threshold;
     let dt = 1.0 / p.sample_rate.max(1.0);
     let cutoff_env = state
         .filter_env

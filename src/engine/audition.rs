@@ -6,7 +6,7 @@ use super::{
     track_fx::{TrackFxEngine, TrackFxRuntime},
 };
 use crate::{
-    config::{AppConfig, InputFx, TrackFx},
+    config::{AppConfig, InputFx},
     presets::FxTarget,
 };
 /// UI-side tracking for the existing audition command queue. A stale boolean
@@ -90,10 +90,7 @@ pub fn supports(config: &AppConfig, target: FxTarget) -> bool {
             config.input_fx.banks[bank].slots[slot].fx,
             Some(InputFx::Oscillator(_) | InputFx::MyDelay(_))
         ),
-        FxTarget::Track { bank, slot } => matches!(
-            config.track_fx.banks[bank].slots[slot].fx,
-            Some(TrackFx::Filter(_))
-        ),
+        FxTarget::Track { .. } => false,
     }
 }
 impl AuditionParameters {
@@ -152,7 +149,7 @@ impl AuditionParameters {
         let mut runtime = InputFxRuntime::from_config(&staging.input_fx).banks[0].slots[0]
             .osc
             .take()?;
-        runtime.threshold = 0.0;
+        runtime.gate_threshold = 0.0;
         runtime.poly.input_gate = false;
         runtime.poly.input_mod_gain = None;
         runtime.poly.capture = None;
@@ -202,7 +199,7 @@ impl AuditionParameters {
                     chosen.my_delay.is_some()
                 };
                 if let Some(osc) = &mut chosen.osc {
-                    osc.threshold = 0.0;
+                    osc.gate_threshold = 0.0;
                     osc.poly.input_gate = false;
                     osc.poly.input_mod_gain = None;
                     // Audition follows the phrase currently visible in the
@@ -335,7 +332,7 @@ impl Audition {
                 let p = crate::dsp::oscillator::OscillatorFxParams {
                     waveform: osc.waveform,
                     level: osc.level,
-                    threshold: 0.0,
+                    gate_threshold: 0.0,
                     input_level: 1.0,
                     sample_rate: self.sr as f32,
                     note: None,

@@ -34,7 +34,7 @@
 6. rev.04的TRACK说明明确：Reverse和One Shot不进入叠录；One Shot再次播放键重触发；Stop含Immediate/Fade/Loop，再次Stop立即停止。软件沿用这些可核对语义，但量化UI统一为Off/Beat/Measure/Loop，并非原机所有LOOP SYNC子参数的完整复制。
 7. 实时线程设计参考[PortAudio回调约束](https://portaudio.com/docs/v19-doxydocs/writing_a_callback.html)：避开分配、文件I/O和mutex。CPAL输入/输出时间戳只作诊断；补偿建议来自实际回环，不假设驱动时间戳包含全部硬件延迟。
 8. 静默录入对应官方第12页 **INPUT THRU OFF**：切断输入到输出的直通分支，输入处理与轨道录音继续，已有循环播放保持。合成音源也走软件的同一输入总线。
-9. 新音色、包络和移调算法会改变旧项目/回放的声音。当前写入 renderer 9，记录配置及 PDC 应用标记；旧2/3/4回放关闭PDC，旧2～7回放旁路输入噪声门。接受旧版文件不代表保留每种历史DSP的逐位输出。
+9. 新音色、包络和移调算法会改变旧项目/回放的声音。当前写入 renderer 10，记录配置及 PDC 应用标记；旧2/3/4回放关闭PDC，旧2～7回放旁路输入噪声门。接受旧版文件不代表保留每种历史DSP的逐位输出。
 
 ## 硬件听感验证建议
 

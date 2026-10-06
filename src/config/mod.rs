@@ -15,7 +15,6 @@ pub mod note_configs;
 pub mod osc_configs;
 pub mod reverb_configs;
 pub mod roll_configs;
-pub mod seq_configs;
 pub mod system_configs;
 pub mod track_filter_configs;
 pub mod track_fx_configs;

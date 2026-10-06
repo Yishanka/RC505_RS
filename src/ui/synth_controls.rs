@@ -3,6 +3,10 @@ use super::{parameters, theme};
 use crate::config::osc_configs::*;
 use eframe::egui::{self, pos2, vec2};
 
+#[cfg(test)]
+#[path = "synth_threshold_tests.rs"]
+mod synth_threshold_tests;
+
 pub fn sound(ui: &mut egui::Ui, osc: &mut OscillatorConfigs, full: bool) {
     let lang = crate::app_support::language::Language::current(ui.ctx());
     osc.poll_sample();
@@ -12,6 +16,7 @@ pub fn sound(ui: &mut egui::Ui, osc: &mut OscillatorConfigs, full: bool) {
         && (osc.capture.is_some() || osc.sample_job.is_some())
     {
         theme::control_row(ui, |ui| capture_button(ui, osc));
+        capture_threshold(ui, osc);
     }
     if !full || osc.waveform.value != Waveform::Sample {
         capture_status(ui, osc);
@@ -32,6 +37,12 @@ pub fn sound(ui: &mut egui::Ui, osc: &mut OscillatorConfigs, full: bool) {
         }
     }
     if !full {
+        if osc.waveform.value == Waveform::Sample
+            || osc.capture.is_some()
+            || osc.sample_job.is_some()
+        {
+            capture_threshold(ui, osc);
+        }
         if osc.waveform.value == Waveform::Sample && osc.sample.is_none() {
             theme::caption(
                 ui,
@@ -167,8 +178,8 @@ fn input_controls(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
         &mut osc.input_gate,
         lang.choose("Gate notes with live input", "用输入音量控制音符门控"),
     );
-    if osc.input_gate || osc.waveform.value == Waveform::Sample {
-        parameters::number(ui, &mut osc.threshold, 0, 100, false);
+    if osc.input_gate {
+        parameters::number(ui, &mut osc.gate_threshold, 0, 100, false);
     }
 }
 
@@ -185,8 +196,8 @@ pub(super) fn capture_button(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
         egui::Button::new(lang.choose("Capture sound", "捕获音色")),
     )
     .on_hover_text(lang.choose(
-        "Capture input from this active FX bank. Duration and threshold are in the expanded editor.",
-        "从当前效果组的输入捕获。时长和阈值可在展开界面调整。",
+        "Capture input from this active FX bank. Adjust the trigger threshold beside the capture controls.",
+        "从当前效果组的输入捕获；触发阈值在捕获控件旁调整。",
     ))
     .clicked()
     {
@@ -204,7 +215,10 @@ fn capture_status(ui: &mut egui::Ui, osc: &OscillatorConfigs) {
             if started {
                 lang.choose("Capturing…", "正在捕获…")
             } else {
-                lang.choose("Waiting for input above threshold…", "等待输入超过阈值…")
+                lang.choose(
+                    "Waiting for input above capture threshold…",
+                    "等待输入超过捕获阈值…",
+                )
             },
         );
     } else if osc.sample_job.is_some() {
@@ -212,8 +226,13 @@ fn capture_status(ui: &mut egui::Ui, osc: &OscillatorConfigs) {
     }
 }
 
+fn capture_threshold(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
+    parameters::number(ui, &mut osc.capture_threshold, 0, 100, false);
+}
+
 fn sample_controls(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
     let lang = crate::app_support::language::Language::current(ui.ctx());
+    capture_threshold(ui, osc);
     parameters::integer(
         ui,
         &mut osc.capture_ms,

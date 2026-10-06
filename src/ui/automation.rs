@@ -2,31 +2,76 @@ use super::{navigation, parameters, theme};
 use crate::{
     config::{
         AppConfig,
-        automation::{Family, Interpolation, MAX_POINTS, PPQ, ParameterLane, Point, Target},
+        automation::{
+            Family, Interpolation, MAX_LENGTH, MAX_POINTS, MIN_LENGTH, PPQ, ParameterLane, Point,
+            Target,
+        },
     },
     presets::FxTarget,
 };
 use eframe::egui::{self, Color32, Key, Rect, Stroke, pos2, vec2};
-#[derive(Default)]
 pub struct EditorState {
     selected: usize,
     snap: u32,
-    drag: Option<(usize, bool, ParameterLane)>,
+    drag: Option<Drag>,
+    point_revision: u64,
     undo: Vec<ParameterLane>,
     redo: Vec<ParameterLane>,
     #[cfg(test)]
     plot: Option<Rect>,
+    #[cfg(test)]
+    time_id: Option<egui::Id>,
+    #[cfg(test)]
+    length_id: Option<egui::Id>,
+    #[cfg(test)]
+    value_id: Option<egui::Id>,
+}
+struct Drag {
+    index: usize,
+    curve: bool,
+    before: ParameterLane,
+    offset: egui::Vec2,
+}
+impl Default for EditorState {
+    fn default() -> Self {
+        Self {
+            selected: 0,
+            snap: 0,
+            drag: None,
+            point_revision: 0,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            #[cfg(test)]
+            plot: None,
+            #[cfg(test)]
+            time_id: None,
+            #[cfg(test)]
+            length_id: None,
+            #[cfg(test)]
+            value_id: None,
+        }
+    }
 }
 impl EditorState {
     pub fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            point_revision: self.point_revision.wrapping_add(1),
+            ..Self::default()
+        };
+    }
+    fn push_history(stack: &mut Vec<ParameterLane>, lane: ParameterLane) {
+        if stack.len() >= 64 {
+            stack.remove(0);
+        }
+        stack.push(lane);
+    }
+    fn structure_changed(&mut self) {
+        self.drag = None;
+        self.point_revision = self.point_revision.wrapping_add(1);
     }
     fn remember(&mut self, before: ParameterLane, after: &ParameterLane) {
         if before != *after {
-            if self.undo.len() == 64 {
-                self.undo.remove(0);
-            }
-            self.undo.push(before);
+            Self::push_history(&mut self.undo, before);
             self.redo.clear();
         }
     }
@@ -34,20 +79,22 @@ impl EditorState {
         let old = self
             .drag
             .take()
-            .map(|(_, _, old)| old)
+            .map(|drag| drag.before)
             .or_else(|| self.undo.pop());
         if let Some(old) = old {
-            self.redo.push(lane.clone());
+            Self::push_history(&mut self.redo, lane.clone());
             *lane = old;
             self.selected = 0;
+            self.point_revision = self.point_revision.wrapping_add(1);
         }
     }
     fn redo(&mut self, lane: &mut ParameterLane) {
         self.drag = None;
         if let Some(next) = self.redo.pop() {
-            self.undo.push(lane.clone());
+            Self::push_history(&mut self.undo, lane.clone());
             *lane = next;
             self.selected = 0;
+            self.point_revision = self.point_revision.wrapping_add(1);
         }
     }
 }
@@ -113,12 +160,9 @@ pub fn draw_lane(
     state: &mut EditorState,
 ) {
     let lang = crate::app_support::language::Language::current(ui.ctx());
-    if state.snap == 0 {
-        state.snap = PPQ / 4;
-    }
     if ui.input(|i| !i.pointer.primary_down() && !i.pointer.any_released()) {
-        if let Some((_, _, old)) = state.drag.take() {
-            state.remember(old, lane);
+        if let Some(drag) = state.drag.take() {
+            state.remember(drag.before, lane);
         }
     }
     let before = lane.clone();
@@ -140,12 +184,14 @@ pub fn draw_lane(
                 &mut lane.enabled,
                 lang.choose("Enable automation", "启用自动化"),
             ),
-        ));
+        )).on_hover_text(lang.choose("While transport runs, automation overrides this parameter. Stopping or disabling restores its base value.","演奏时自动化覆盖所选参数，停止或禁用后恢复原旋钮值。"));
         let options: Vec<_> = targets(family)
             .iter()
             .map(|t| (*t, name(*t, lang)))
             .collect();
-        parameters::selector(ui, "lane-target", &mut lane.target, &options);
+        if parameters::selector(ui, "lane-target", &mut lane.target, &options) {
+            state.structure_changed();
+        }
         let mut bars = if lane.length % (PPQ * 4) == 0 {
             lane.length / (PPQ * 4)
         } else {
@@ -166,22 +212,18 @@ pub fn draw_lane(
             .map(|(i, s)| (i as u32 + 1, s.as_str()))
             .collect();
         let exact = format!(
-            "{:.3} {}",
-            lane.length as f32 / PPQ as f32,
+            "{:.6} {}",
+            lane.length as f64 / PPQ as f64,
             lang.choose("beats", "拍")
         );
         if bars == 0 {
             lengths.insert(0, (0, exact.as_str()));
         }
         if parameters::selector(ui, "lane-bars", &mut bars, &lengths) && bars > 0 {
-            let length = bars * PPQ * 4;
-            for p in &mut lane.points {
-                p.tick = (p.tick as u64 * length as u64 / lane.length.max(1) as u64) as u32;
-            }
-            lane.length = length;
-            *lane = lane.sanitized();
+            state.structure_changed();
+            lane.rescale_length(bars * PPQ * 4);
         }
-        parameters::selector(
+        if parameters::selector(
             ui,
             "lane-interpolation",
             &mut lane.interpolation,
@@ -190,20 +232,60 @@ pub fn draw_lane(
                 (Interpolation::Linear, lang.choose("Linear", "线性")),
                 (Interpolation::Curve, lang.choose("Curve", "曲线")),
             ],
-        );
+        ) {
+            state.structure_changed();
+        }
+        ui.label(lang.choose("Snap", "吸附"));
         parameters::selector(
             ui,
             "lane-snap",
             &mut state.snap,
             &[
-                (60, "1/64"),
-                (120, "1/32"),
-                (240, "1/16"),
-                (480, "1/8"),
-                (960, "1/4"),
+                (0, lang.choose("Off · 1 tick", "关闭 · 1 tick")),
+                (
+                    15,
+                    lang.choose("1/256 note · 1/64 beat", "1/256 音符 · 1/64 拍"),
+                ),
+                (
+                    30,
+                    lang.choose("1/128 note · 1/32 beat", "1/128 音符 · 1/32 拍"),
+                ),
+                (
+                    60,
+                    lang.choose("1/64 note · 1/16 beat", "1/64 音符 · 1/16 拍"),
+                ),
+                (
+                    120,
+                    lang.choose("1/32 note · 1/8 beat", "1/32 音符 · 1/8 拍"),
+                ),
+                (
+                    240,
+                    lang.choose("1/16 note · 1/4 beat", "1/16 音符 · 1/4 拍"),
+                ),
+                (480, lang.choose("1/8 note · 1/2 beat", "1/8 音符 · 1/2 拍")),
+                (960, lang.choose("1/4 note · 1 beat", "1/4 音符 · 1 拍")),
             ],
         );
     });
+    let minimum_length = MIN_LENGTH.max(lane.points.len().saturating_sub(1) as u32);
+    let mut length_beats = lane.length as f64 / PPQ as f64;
+    let length_response = super::parameter_input::slider(
+        ui,
+        &mut length_beats,
+        minimum_length as f64 / PPQ as f64,
+        MAX_LENGTH as f64 / PPQ as f64,
+        super::parameter_input::Step::new(1.0 / PPQ as f64, 1.0 / PPQ as f64),
+        lang.choose("Loop length (beats)", "循环长度（拍）"),
+        false,
+    );
+    #[cfg(test)]
+    {
+        state.length_id = Some(length_response.id);
+    }
+    if length_response.changed() {
+        state.structure_changed();
+        lane.rescale_length(beats_to_tick(length_beats, MAX_LENGTH));
+    }
     theme::control_row(ui, |ui| {
         if navigation::register(
             ui.add_enabled(!state.undo.is_empty(), egui::Button::new(lang.text("Undo"))),
@@ -228,15 +310,13 @@ pub fn draw_lane(
         ))
         .clicked()
         {
-            state.drag = None;
+            state.structure_changed();
             lane.points.remove(state.selected);
             state.selected = state.selected.saturating_sub(1);
         }
         if navigation::button(ui, lang.choose("Reset shape", "重置形状")).clicked() {
-            state.drag = None;
-            let enabled = lane.enabled;
-            *lane = ParameterLane::create(lane.target);
-            lane.enabled = enabled;
+            state.structure_changed();
+            reset_shape(lane);
             state.selected = 0;
         }
         ui.label(format!(
@@ -255,14 +335,12 @@ pub fn draw_lane(
             "点击加点；拖动节点／中点；右键删除；Ctrl+Z/Y",
         ),
     );
-    theme::caption(
-        ui,
-        lang.choose(
-            "Enabled automation overrides its control; stopping transport restores the base value.",
-            "启用时自动化覆盖旋钮，停止演奏恢复原值。",
-        ),
-    );
-    let height = (ui.clip_rect().bottom() - ui.cursor().top() - 105.0).clamp(200.0, 380.0);
+    theme::caption(ui,match lane.interpolation {
+        Interpolation::Step=>lang.choose("Step holds the left value until the next node. Snap Off uses 1/960 beat ticks.","步进：保持左侧值，直到下一节点跳变。关闭吸附时精度为 1/960 拍。"),
+        Interpolation::Linear=>lang.choose("Linear follows the displayed axis continuously (Hz / ms use a logarithmic axis). Snap Off uses 1/960 beat ticks.","线性：沿显示坐标轴连续变化（Hz / ms 为对数轴）。关闭吸附时精度为 1/960 拍。"),
+        Interpolation::Curve=>lang.choose("Curve bends the continuous segment on the displayed axis; drag its middle handle. Snap Off uses 1/960 beat ticks.","曲线：在显示坐标轴上弯曲连续段，拖动中点调整。关闭吸附时精度为 1/960 拍。"),
+    });
+    let height = (ui.clip_rect().bottom() - ui.cursor().top() - 170.0).clamp(170.0, 360.0);
     let (rect, response) = ui.allocate_exact_size(
         vec2(ui.available_width(), height),
         egui::Sense::click_and_drag(),
@@ -296,22 +374,45 @@ pub fn draw_lane(
             theme::MUTED,
         );
     }
-    for beat in 0..=lane.length / PPQ {
-        let x = plot.left() + beat as f32 * PPQ as f32 / lane.length as f32 * plot.width();
+    let base_grid = if state.snap == 0 {
+        (lane.length / 8).max(1)
+    } else {
+        state.snap
+    };
+    let minimum_grid = (lane.length as f32 * 8.0 / plot.width().max(1.0)).ceil() as u32;
+    let grid = minimum_grid.max(1).div_ceil(base_grid) * base_grid;
+    for tick in (0..=lane.length).step_by(grid.max(1) as usize) {
+        let x = plot.left() + tick as f32 / lane.length as f32 * plot.width();
         painter.vline(
             x,
             plot.y_range(),
-            Stroke::new(1.0, Color32::from_gray(if beat % 4 == 0 { 70 } else { 43 })),
+            Stroke::new(
+                1.0,
+                Color32::from_gray(if tick % PPQ == 0 { 70 } else { 43 }),
+            ),
         );
-        if beat % 4 == 0 {
-            painter.text(
-                pos2(x, plot.bottom() + 6.0),
-                egui::Align2::LEFT_TOP,
-                format!("{}", beat / 4 + 1),
-                egui::FontId::monospace(12.0),
-                theme::MUTED,
-            );
-        }
+    }
+    for part in 0..=4 {
+        let x = plot.left() + plot.width() * part as f32 / 4.0;
+        let label = format!(
+            "{:.6}",
+            lane.length as f64 * part as f64 / (4.0 * PPQ as f64)
+        );
+        painter.text(
+            pos2(x, plot.bottom() + 6.0),
+            if part == 4 {
+                egui::Align2::RIGHT_TOP
+            } else {
+                egui::Align2::LEFT_TOP
+            },
+            format!(
+                "{} {}",
+                label.trim_end_matches('0').trim_end_matches('.'),
+                lang.choose("beats", "拍")
+            ),
+            egui::FontId::monospace(12.0),
+            theme::MUTED,
+        );
     }
     // Hit-test the geometry from the start of this frame. Paint only after
     // pointer/keyboard/value edits, so handles and curves share the same state.
@@ -321,23 +422,36 @@ pub fn draw_lane(
     if response.drag_started() {
         let origin = ui.input(|i| i.pointer.press_origin()).or(pointer);
         if let Some(origin) = origin {
-            if let Some(index) = positions.iter().position(|p| p.distance(origin) < 10.0) {
+            if let Some(index) = nearest_point(&positions, origin) {
                 state.selected = index;
-                state.drag = Some((index, false, lane.clone()));
-            } else if let Some((index, _)) = handles.iter().find(|(_, p)| p.distance(origin) < 10.0)
+                state.drag = Some(Drag {
+                    index,
+                    curve: false,
+                    before: lane.clone(),
+                    offset: origin - positions[index],
+                });
+            } else if let Some((index, handle)) =
+                handles.iter().find(|(_, p)| p.distance(origin) < 10.0)
             {
-                state.drag = Some((*index, true, lane.clone()));
+                state.selected = *index;
+                state.drag = Some(Drag {
+                    index: *index,
+                    curve: true,
+                    before: lane.clone(),
+                    offset: origin - *handle,
+                });
             }
         }
     }
-    if state.drag.as_ref().is_some_and(|(index, curve, _)| {
-        *index >= lane.points.len() || *curve && *index + 1 >= lane.points.len()
+    if state.drag.as_ref().is_some_and(|drag| {
+        drag.index >= lane.points.len() || drag.curve && drag.index + 1 >= lane.points.len()
     }) {
         state.drag = None;
     }
-    if let (Some((index, curve, _)), Some(pos)) = (&state.drag, pointer) {
-        let index = *index;
-        if *curve {
+    if let (Some(drag), Some(pointer)) = (&state.drag, pointer) {
+        let index = drag.index;
+        let pos = pointer - drag.offset;
+        if drag.curve {
             let a = lane.points[index].value;
             let b = lane.points[index + 1].value;
             if (b - a).abs() > 1e-5 {
@@ -351,12 +465,12 @@ pub fn draw_lane(
                 .clamp(-1.0, 1.0);
             }
         } else {
-            let tick = (((pos.x - plot.left()) / plot.width() * lane.length as f32
-                / state.snap as f32)
-                .round()
-                .max(0.0) as u32
-                * state.snap)
-                .min(lane.length);
+            let original = point_position(plot, lane.length, drag.before.points[index]);
+            let tick = if (pos.x - original.x).abs() < 0.5 {
+                drag.before.points[index].tick
+            } else {
+                pointer_tick(pos.x, plot, lane.length, state.snap)
+            };
             if index > 0 && index + 1 < lane.points.len() {
                 lane.points[index].tick = tick.clamp(
                     lane.points[index - 1].tick + 1,
@@ -367,14 +481,14 @@ pub fn draw_lane(
         }
     }
     if response.drag_stopped() {
-        if let Some((_, _, old)) = state.drag.take() {
-            state.remember(old, lane);
+        if let Some(drag) = state.drag.take() {
+            state.remember(drag.before, lane);
         }
         history = true;
     }
     if response.clicked() {
-        if let Some(pos) = pointer.filter(|p| plot.contains(*p)) {
-            if let Some(index) = positions.iter().position(|p| p.distance(pos) < 10.0) {
+        if let Some(pos) = pointer {
+            if let Some(index) = nearest_point(&positions, pos) {
                 state.selected = index;
             } else if let Some((index, _)) = handles
                 .iter()
@@ -383,18 +497,14 @@ pub fn draw_lane(
                 // A curvature handle is not blank canvas. A click that never
                 // reaches the drag threshold must not create a point on it.
                 state.selected = *index;
-            } else {
-                let tick = (((pos.x - plot.left()) / plot.width() * lane.length as f32
-                    / state.snap as f32)
-                    .round()
-                    .max(0.0) as u32
-                    * state.snap)
-                    .min(lane.length);
+            } else if plot.contains(pos) {
+                let tick = pointer_tick(pos.x, plot, lane.length, state.snap);
                 let value = ((plot.bottom() - pos.y) / plot.height()).clamp(0.0, 1.0);
                 if let Some(index) = lane.points.iter().position(|p| p.tick == tick) {
                     lane.points[index].value = value;
                     state.selected = index;
                 } else if lane.points.len() < MAX_POINTS {
+                    state.structure_changed();
                     lane.points.push(Point {
                         tick,
                         value,
@@ -406,13 +516,12 @@ pub fn draw_lane(
             }
         }
     }
-    if response.secondary_clicked() {
+    if response.secondary_clicked() && !ui.input(|input| input.pointer.primary_down()) {
         if let Some(pos) = pointer {
-            if let Some(index) = positions
-                .iter()
-                .position(|p| p.distance(pos) < 10.0)
-                .filter(|i| *i > 0 && *i + 1 < lane.points.len())
+            if let Some(index) =
+                nearest_point(&positions, pos).filter(|i| *i > 0 && *i + 1 < lane.points.len())
             {
+                state.structure_changed();
                 lane.points.remove(index);
                 state.selected = index.saturating_sub(1);
             }
@@ -443,6 +552,7 @@ pub fn draw_lane(
             && state.selected > 0
             && state.selected + 1 < lane.points.len()
         {
+            state.structure_changed();
             lane.points.remove(state.selected);
             state.selected -= 1;
         }
@@ -456,15 +566,30 @@ pub fn draw_lane(
             point.value = (point.value + dy as f32 * 0.01).clamp(0.0, 1.0);
         }
         if dx != 0 && state.selected > 0 && state.selected + 1 < lane.points.len() {
-            lane.points[state.selected].tick =
-                (lane.points[state.selected].tick as i64 + dx as i64 * state.snap as i64).clamp(
+            lane.points[state.selected].tick = (lane.points[state.selected].tick as i64
+                + dx as i64 * state.snap.max(1) as i64)
+                .clamp(
                     lane.points[state.selected - 1].tick as i64 + 1,
                     lane.points[state.selected + 1].tick as i64 - 1,
                 ) as u32;
         }
     }
     state.selected = state.selected.min(lane.points.len().saturating_sub(1));
+    let point_count = lane.points.len();
+    let (minimum, maximum) = point_tick_bounds(lane, state.selected);
+    ui.push_id(("lane-point",state.selected,state.point_revision),|ui|{
     if let Some(point) = lane.points.get_mut(state.selected) {
+        let mut beats=point.tick as f64/PPQ as f64;
+        let time_response=ui.add_enabled_ui(minimum<maximum,|ui|{
+            super::parameter_input::slider(ui,&mut beats,minimum as f64/PPQ as f64,maximum as f64/PPQ as f64,
+                super::parameter_input::Step::new(1.0/PPQ as f64,1.0/PPQ as f64),lang.choose("Node time (beats)","节点位置（拍）"),false)
+        }).inner;
+        #[cfg(test)]{state.time_id=Some(time_response.id);}
+        if time_response.changed(){point.tick=beats_to_tick(beats,lane.length).clamp(minimum,maximum);}
+        theme::caption(ui,format!("{} {}/{} · {} / {} ticks · {}",lang.choose("Node","节点"),state.selected+1,point_count,point.tick,lane.length,
+            if state.selected==0||state.selected+1==point_count{lang.choose("Endpoint time is fixed","端点时间固定")}
+            else if minimum==maximum{lang.choose("No free tick between neighbours","邻点之间没有空闲 tick")}
+            else{lang.choose("1 tick = 1/960 beat; entry rounds to the nearest tick, without snapping","1 tick = 1/960 拍；输入取最近 tick，不受吸附影响")}));
         let (min, max, log) = lane.target.range();
         let factor = if percentage(lane.target) { 100.0 } else { 1.0 };
         let mut value = shown(lane.target, point.value);
@@ -473,7 +598,7 @@ pub fn draw_lane(
         } else {
             1.0
         };
-        if parameters::float_with_keys(
+        let value_response=parameters::float_with_keys(
             ui,
             &mut value,
             min * factor,
@@ -482,14 +607,14 @@ pub fn draw_lane(
             key_step,
             name(lane.target, lang),
             log,
-        )
-        .changed()
-        {
+        );
+        #[cfg(test)]{state.value_id=Some(value_response.id);}
+        if value_response.changed(){
             point.value = lane.target.normalized(value / factor);
         }
-        if lane.interpolation == Interpolation::Curve {
+        if lane.interpolation == Interpolation::Curve && state.selected+1<point_count {
             let mut curve = point.curve * 100.0;
-            parameters::float_with_keys(
+            if parameters::float_with_keys(
                 ui,
                 &mut curve,
                 -100.0,
@@ -498,14 +623,55 @@ pub fn draw_lane(
                 1.0,
                 lang.choose("Segment curve (%)", "后一段曲率（%）"),
                 false,
-            );
-            point.curve = curve / 100.0;
+            ).changed(){point.curve = curve / 100.0;}
         }
     }
+    });
     if !history && state.drag.is_none() {
         state.remember(before, lane);
     }
     paint_curve(&painter, lane, plot, state.selected, theme::accent(ui));
+}
+
+fn pointer_tick(x: f32, plot: Rect, length: u32, snap: u32) -> u32 {
+    let step = snap.max(1) as f64;
+    let tick = ((x - plot.left()) as f64 / plot.width().max(1.0) as f64 * length as f64)
+        .clamp(0.0, length as f64);
+    ((tick / step).round() * step).clamp(0.0, length as f64) as u32
+}
+fn beats_to_tick(beats: f64, length: u32) -> u32 {
+    if !beats.is_finite() {
+        return 0;
+    }
+    (beats * PPQ as f64).round().clamp(0.0, length as f64) as u32
+}
+fn point_tick_bounds(lane: &ParameterLane, index: usize) -> (u32, u32) {
+    if index == 0 {
+        return (0, 0);
+    }
+    if index + 1 >= lane.points.len() {
+        return (lane.length, lane.length);
+    }
+    (
+        lane.points[index - 1].tick + 1,
+        lane.points[index + 1].tick - 1,
+    )
+}
+fn nearest_point(positions: &[egui::Pos2], pointer: egui::Pos2) -> Option<usize> {
+    positions
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.distance(pointer) < 10.0)
+        .min_by(|(_, a), (_, b)| a.distance_sq(pointer).total_cmp(&b.distance_sq(pointer)))
+        .map(|(index, _)| index)
+}
+fn reset_shape(lane: &mut ParameterLane) {
+    let (target, enabled, length, interpolation) =
+        (lane.target, lane.enabled, lane.length, lane.interpolation);
+    *lane = ParameterLane::create(target);
+    lane.enabled = enabled;
+    lane.interpolation = interpolation;
+    lane.rescale_length(length);
 }
 
 fn point_position(plot: Rect, length: u32, point: Point) -> egui::Pos2 {
@@ -525,15 +691,14 @@ fn curve_handles(lane: &ParameterLane, plot: Rect) -> Vec<(usize, egui::Pos2)> {
             let (a, b) = (pair[0], pair[1]);
             (
                 index,
-                point_position(
-                    plot,
-                    lane.length,
-                    Point {
-                        tick: (a.tick + b.tick) / 2,
-                        value: a.value
-                            + (b.value - a.value) * crate::dsp::envelope::bend_curve(0.5, a.curve),
-                        curve: 0.0,
-                    },
+                pos2(
+                    plot.left()
+                        + (a.tick as f32 + b.tick as f32) * 0.5 / lane.length.max(1) as f32
+                            * plot.width(),
+                    plot.bottom()
+                        - (a.value
+                            + (b.value - a.value) * crate::dsp::envelope::bend_curve(0.5, a.curve))
+                            * plot.height(),
                 ),
             )
         })
@@ -682,6 +847,419 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             }],
         );
+    }
+    fn type_number(
+        ctx: &egui::Context,
+        lane: &mut ParameterLane,
+        state: &mut EditorState,
+        id: egui::Id,
+        text: Option<&str>,
+    ) {
+        ctx.memory_mut(|memory| memory.request_focus(id));
+        frame(ctx, lane, state, vec![]);
+        let event = |pressed| egui::Event::Key {
+            key: Key::Enter,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(ctx, lane, state, vec![event(true)]);
+        frame(ctx, lane, state, vec![event(false)]);
+        if let Some(text) = text {
+            frame(ctx, lane, state, vec![egui::Event::Text(text.into())]);
+        }
+        frame(ctx, lane, state, vec![event(true)]);
+        frame(ctx, lane, state, vec![event(false)]);
+    }
+    fn pending_number(
+        ctx: &egui::Context,
+        lane: &mut ParameterLane,
+        state: &mut EditorState,
+        id: egui::Id,
+        text: Option<&str>,
+    ) {
+        ctx.memory_mut(|memory| memory.request_focus(id));
+        frame(ctx, lane, state, vec![]);
+        for pressed in [true, false] {
+            frame(
+                ctx,
+                lane,
+                state,
+                vec![egui::Event::Key {
+                    key: Key::Enter,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+        }
+        if let Some(text) = text {
+            frame(ctx, lane, state, vec![egui::Event::Text(text.into())]);
+        }
+    }
+    fn quick_click(
+        ctx: &egui::Context,
+        lane: &mut ParameterLane,
+        state: &mut EditorState,
+        pos: Pos2,
+        button: egui::PointerButton,
+    ) {
+        // Real OS input can contain both mouse edges inside one display frame.
+        frame(
+            ctx,
+            lane,
+            state,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+    }
+    fn editing_fixture() -> ParameterLane {
+        let mut lane = ParameterLane::create(Target::FilterCutoff);
+        lane.points = vec![
+            Point {
+                tick: 0,
+                value: 0.25,
+                curve: 0.0,
+            },
+            Point {
+                tick: PPQ,
+                value: 0.4,
+                curve: 0.0,
+            },
+            Point {
+                tick: PPQ * 2,
+                value: 0.8,
+                curve: 0.0,
+            },
+            Point {
+                tick: PPQ * 4,
+                value: 0.25,
+                curve: 0.0,
+            },
+        ];
+        lane
+    }
+    #[test]
+    fn pending_numeric_edit_cannot_overwrite_another_selected_node() {
+        for typed in [None, Some("1234.5")] {
+            for one_frame in [false, true] {
+                let ctx = egui::Context::default();
+                let mut lane = editing_fixture();
+                let mut state = EditorState {
+                    selected: 1,
+                    ..Default::default()
+                };
+                frame(&ctx, &mut lane, &mut state, vec![]);
+                frame(&ctx, &mut lane, &mut state, vec![]);
+                let untouched = lane.points[2];
+                let id = state.value_id.unwrap();
+                pending_number(&ctx, &mut lane, &mut state, id, typed);
+                let at = point_position(state.plot.unwrap(), lane.length, untouched);
+                if one_frame {
+                    quick_click(
+                        &ctx,
+                        &mut lane,
+                        &mut state,
+                        at,
+                        egui::PointerButton::Primary,
+                    );
+                } else {
+                    click(
+                        &ctx,
+                        &mut lane,
+                        &mut state,
+                        at,
+                        egui::PointerButton::Primary,
+                    );
+                }
+                assert_eq!(
+                    state.selected, 2,
+                    "The mouse must actually select the other node"
+                );
+                assert_eq!(
+                    lane.points[2], untouched,
+                    "typed={typed:?}, same-frame click={one_frame}: old text/before_edit leaked into another node"
+                );
+            }
+        }
+    }
+    #[test]
+    fn pending_numeric_edit_cannot_leak_through_delete_and_readd() {
+        for typed in [None, Some("1234.5")] {
+            let ctx = egui::Context::default();
+            let mut lane = editing_fixture();
+            let mut state = EditorState {
+                selected: 1,
+                ..Default::default()
+            };
+            frame(&ctx, &mut lane, &mut state, vec![]);
+            frame(&ctx, &mut lane, &mut state, vec![]);
+            let original = lane.clone();
+            let id = state.value_id.unwrap();
+            pending_number(&ctx, &mut lane, &mut state, id, typed);
+            let at = point_position(state.plot.unwrap(), lane.length, original.points[1]);
+            quick_click(
+                &ctx,
+                &mut lane,
+                &mut state,
+                at,
+                egui::PointerButton::Secondary,
+            );
+            assert_eq!(lane.points.len(), 3);
+            assert_eq!(
+                lane.points[0], original.points[0],
+                "Deleting a node must not commit its editor buffer into the newly selected endpoint"
+            );
+            assert_eq!(lane.points[1], original.points[2]);
+            quick_click(
+                &ctx,
+                &mut lane,
+                &mut state,
+                at,
+                egui::PointerButton::Primary,
+            );
+            frame(&ctx, &mut lane, &mut state, vec![]);
+            assert_eq!(lane.points.len(), 4);
+            assert_eq!(lane.points[1].tick, original.points[1].tick);
+            assert!((lane.points[1].value - original.points[1].value).abs() < 1e-6);
+            assert_eq!(lane.points[2], original.points[2]);
+        }
+    }
+    #[test]
+    fn snap_off_stays_off_and_places_ticks_between_the_fine_grids() {
+        let ctx = egui::Context::default();
+        let mut lane = ParameterLane::create(Target::FilterCutoff);
+        let mut state = EditorState::default();
+        for _ in 0..4 {
+            frame(&ctx, &mut lane, &mut state, vec![]);
+            assert_eq!(state.snap, 0);
+        }
+        let plot = state.plot.unwrap();
+        let at = pos2(
+            plot.left() + plot.width() * 127.0 / lane.length as f32,
+            plot.bottom() - plot.height() * 0.6,
+        );
+        click(
+            &ctx,
+            &mut lane,
+            &mut state,
+            at,
+            egui::PointerButton::Primary,
+        );
+        assert_eq!(lane.points[1].tick, 127);
+        assert_eq!(state.snap, 0);
+        let at = plot.left() + plot.width() * 129.0 / lane.length as f32;
+        assert_eq!(pointer_tick(at, plot, lane.length, 30), 120);
+        assert_eq!(pointer_tick(at, plot, lane.length, 15), 135);
+        assert_eq!(pointer_tick(at, plot, lane.length, 0), 129);
+    }
+    #[test]
+    fn typed_node_beats_are_tick_exact_ignore_grid_and_do_not_change_loop_length() {
+        let ctx = egui::Context::default();
+        let mut lane = ParameterLane::create(Target::FilterCutoff);
+        lane.points[1].tick = 119;
+        let mut state = EditorState {
+            selected: 1,
+            snap: PPQ,
+            ..Default::default()
+        };
+        frame(&ctx, &mut lane, &mut state, vec![]);
+        frame(&ctx, &mut lane, &mut state, vec![]);
+        let id = state.time_id.unwrap();
+        type_number(&ctx, &mut lane, &mut state, id, None);
+        assert_eq!(
+            lane.points[1].tick, 119,
+            "Untouched Enter cannot round away a tick"
+        );
+        let id = state.time_id.unwrap();
+        type_number(&ctx, &mut lane, &mut state, id, Some("0.129166666666667"));
+        assert_eq!(lane.points[1].tick, 124);
+        assert_eq!(lane.length, PPQ * 4);
+        let id = state.time_id.unwrap();
+        type_number(&ctx, &mut lane, &mut state, id, Some("999"));
+        assert_eq!(lane.points[1].tick, lane.length - 1);
+        assert_eq!(lane.points.len(), 3);
+        for tick in 0..=MAX_LENGTH {
+            assert_eq!(beats_to_tick(tick as f64 / PPQ as f64, MAX_LENGTH), tick);
+        }
+    }
+    #[test]
+    fn typed_short_loop_and_shape_reset_keep_period_and_nodes_well_defined() {
+        let ctx = egui::Context::default();
+        let mut lane = ParameterLane::create(Target::FilterCutoff);
+        lane.enabled = true;
+        lane.interpolation = Interpolation::Step;
+        let mut state = EditorState::default();
+        frame(&ctx, &mut lane, &mut state, vec![]);
+        frame(&ctx, &mut lane, &mut state, vec![]);
+        let id = state.length_id.unwrap();
+        type_number(&ctx, &mut lane, &mut state, id, Some("0.1"));
+        assert_eq!(lane.length, 96);
+        assert_eq!(lane.points.len(), 3);
+        assert!(
+            lane.points
+                .windows(2)
+                .all(|pair| pair[0].tick < pair[1].tick)
+        );
+        reset_shape(&mut lane);
+        assert_eq!(lane.length, 96);
+        assert!(lane.enabled);
+        assert_eq!(lane.interpolation, Interpolation::Step);
+        assert_eq!(lane.points[0].tick, 0);
+        assert_eq!(lane.points.last().unwrap().tick, 96);
+    }
+    #[test]
+    fn node_drag_keeps_grab_offset_and_vertical_drag_keeps_offgrid_time() {
+        for snap in [0, PPQ / 4] {
+            let ctx = egui::Context::default();
+            let mut lane = ParameterLane::create(Target::FilterCutoff);
+            lane.points[1].tick = 1273;
+            let mut state = EditorState {
+                snap,
+                ..Default::default()
+            };
+            frame(&ctx, &mut lane, &mut state, vec![]);
+            frame(&ctx, &mut lane, &mut state, vec![]);
+            let plot = state.plot.unwrap();
+            let center = point_position(plot, lane.length, lane.points[1]);
+            let grab = center + vec2(7.0, 4.0);
+            let target = grab - vec2(0.0, 24.0);
+            drag(&ctx, &mut lane, &mut state, grab, target);
+            assert_eq!(
+                lane.points[1].tick, 1273,
+                "Vertical drag must not jump onto a nearby grid line"
+            );
+            let actual = point_position(plot, lane.length, lane.points[1]);
+            assert!(
+                actual.distance(center - vec2(0.0, 24.0)) < 0.01,
+                "Drag should preserve its grab offset"
+            );
+            assert_eq!(lane.points.len(), 3);
+        }
+    }
+    #[test]
+    fn adding_deleting_and_readding_nodes_has_no_hidden_shape_history() {
+        for mode in [
+            Interpolation::Step,
+            Interpolation::Linear,
+            Interpolation::Curve,
+        ] {
+            let ctx = egui::Context::default();
+            let mut lane = ParameterLane::create(Target::FilterCutoff);
+            lane.interpolation = mode;
+            lane.rescale_length(96);
+            let mut state = EditorState::default();
+            frame(&ctx, &mut lane, &mut state, vec![]);
+            frame(&ctx, &mut lane, &mut state, vec![]);
+            let plot = state.plot.unwrap();
+            let at = pos2(
+                plot.left() + plot.width() * 23.0 / 96.0,
+                plot.bottom() - plot.height() * 0.61,
+            );
+            click(
+                &ctx,
+                &mut lane,
+                &mut state,
+                at,
+                egui::PointerButton::Primary,
+            );
+            assert_eq!(lane.points.len(), 4);
+            let first = lane.clone();
+            click(
+                &ctx,
+                &mut lane,
+                &mut state,
+                at,
+                egui::PointerButton::Secondary,
+            );
+            assert_eq!(lane.points.len(), 3);
+            assert_eq!(lane.length, 96);
+            click(
+                &ctx,
+                &mut lane,
+                &mut state,
+                at,
+                egui::PointerButton::Primary,
+            );
+            assert_eq!(lane, first, "{mode:?} must depend only on current points");
+            state.undo(&mut lane);
+            state.redo(&mut lane);
+            assert_eq!(lane, first);
+        }
+    }
+    #[test]
+    fn undo_during_drag_and_redo_keep_history_bounded() {
+        let mut lane = ParameterLane::create(Target::FilterCutoff);
+        let mut state = EditorState::default();
+        for i in 0..100 {
+            let old = lane.clone();
+            lane.points[1].value = i as f32 / 100.0;
+            state.remember(old, &lane);
+        }
+        state.drag = Some(Drag {
+            index: 1,
+            curve: false,
+            before: lane.clone(),
+            offset: egui::Vec2::ZERO,
+        });
+        lane.points[1].value = 0.0;
+        for _ in 0..100 {
+            state.undo(&mut lane);
+        }
+        for _ in 0..100 {
+            state.redo(&mut lane);
+            assert!(state.undo.len() <= 64 && state.redo.len() <= 64);
+        }
+    }
+    #[test]
+    fn odd_tick_segments_place_curve_handles_on_the_current_line_without_drifting() {
+        let ctx = egui::Context::default();
+        let mut lane = ParameterLane::create(Target::FilterCutoff);
+        lane.rescale_length(96);
+        lane.interpolation = Interpolation::Curve;
+        lane.points[1].tick = 23;
+        lane.points[0].curve = f32::from_bits(0x3dabcea1);
+        let mut state = EditorState::default();
+        frame(&ctx, &mut lane, &mut state, vec![]);
+        let before = lane.clone();
+        for _ in 0..10 {
+            let output = frame(&ctx, &mut lane, &mut state, vec![]);
+            assert_eq!(
+                lane, before,
+                "Merely displaying curvature cannot round/change it"
+            );
+            let plot = state.plot.unwrap();
+            let handle = curve_handles(&lane, plot)[0].1;
+            let paths = output
+                .shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Path(path)
+                        if path.stroke.width == 2.0 && path.points.len() == 49 =>
+                    {
+                        Some(path)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(paths.len(), 2);
+            assert!(paths[0].points[24].distance(handle) < 0.01);
+        }
     }
     #[test]
     fn curve_midpoint_click_is_selection_and_drag_paints_only_current_geometry() {

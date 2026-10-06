@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    config::{AppConfig, FxKind, InputFx, TrackFx, TrackFxKind},
+    config::{AppConfig, FxKind, InputFx},
     presets::{self, FxTarget},
     project,
 };
@@ -18,13 +18,11 @@ fn fractional_envelope_all_owners_reach_runtime_project_and_presets() {
     let mut c = AppConfig::new(120, 0, 5);
     c.input_fx.set_slot_kind(0, 0, FxKind::Oscillator);
     c.input_fx.set_slot_kind(0, 1, FxKind::MyDelay);
-    c.track_fx.set_slot_kind(0, 0, TrackFxKind::Filter);
     let values = [
         [1.3, 2.2, 3.4, 4.5],
         [5.6, 6.7, 7.8, 8.9],
         [9.1, 10.2, 11.3, 12.4],
         [13.5, 14.6, 15.7, 16.8],
-        [17.9, 18.1, 19.2, 20.3],
     ];
     if let Some(InputFx::Oscillator(o)) = &mut c.input_fx.banks[0].slots[0].fx {
         set(&mut o.envelope, values[0]);
@@ -34,9 +32,6 @@ fn fractional_envelope_all_owners_reach_runtime_project_and_presets() {
         set(&mut o.audio_env, values[2]);
         set(&mut o.filter_env, values[3]);
     }
-    if let Some(TrackFx::Filter(f)) = c.track_fx.slot_fx_mut(0, 0) {
-        set(&mut f.env, values[4]);
-    }
     let input = crate::engine::input_fx::InputFxRuntime::from_config(&c.input_fx);
     let osc = input.banks[0].slots[0].osc.as_ref().unwrap();
     assert_eq!(times(osc.envelope), values[0]);
@@ -44,11 +39,6 @@ fn fractional_envelope_all_owners_reach_runtime_project_and_presets() {
     let delay = input.banks[0].slots[1].my_delay.as_ref().unwrap();
     assert_eq!(times(delay.audio_env), values[2]);
     assert_eq!(times(delay.filter_env), values[3]);
-    let track = crate::engine::track_fx::TrackFxRuntime::from_config(&c.track_fx);
-    assert_eq!(
-        times(track.banks[0].slots[0].filter.as_ref().unwrap().envelope),
-        values[4]
-    );
     let json = serde_json::to_vec(&project::data_from_config(&c)).unwrap();
     let mut copy = AppConfig::new(120, 0, 5);
     project::apply_data_to_config(&mut copy, serde_json::from_slice(&json).unwrap());
@@ -59,23 +49,20 @@ fn fractional_envelope_all_owners_reach_runtime_project_and_presets() {
         assert_eq!(times(from_config(&o.envelope)), values[a]);
         assert_eq!(times(from_config(&o.osc_filter_env)), values[b]);
     }
-    if let Some(TrackFx::Filter(f)) = copy.track_fx.slot_fx_mut(0, 0) {
-        assert_eq!(times(from_config(&f.env)), values[4]);
-    } else {
-        panic!()
-    }
     for target in [
         FxTarget::Input { bank: 0, slot: 0 },
-        FxTarget::Track { bank: 0, slot: 0 },
+        FxTarget::Input { bank: 0, slot: 1 },
     ] {
         let preset = presets::encode(&c, target).unwrap();
         presets::decode(&mut copy, target, &preset).unwrap();
     }
-    let Some(InputFx::Oscillator(o)) = &copy.input_fx.banks[0].slots[0].fx else {
-        panic!()
-    };
-    assert_eq!(times(from_config(&o.envelope)), values[0]);
-    assert_eq!(times(from_config(&o.osc_filter_env)), values[1]);
+    for (slot, a, b) in [(0, 0, 1), (1, 2, 3)] {
+        let Some(InputFx::Oscillator(o)) = &copy.input_fx.banks[0].slots[slot].fx else {
+            panic!()
+        };
+        assert_eq!(times(from_config(&o.envelope)), values[a]);
+        assert_eq!(times(from_config(&o.osc_filter_env)), values[b]);
+    }
 }
 #[test]
 fn fractional_envelope_old_integer_json_keeps_old_sound_and_range_sanitizing_is_finite() {

@@ -1,6 +1,8 @@
 //! Curves are compiled off the callback; sampling uses the delayed source clock.
 use crate::config::automation::{Family, Interpolation, ParameterLane, Target};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+const FINE_INTERVALS: usize = 256;
+const LEGACY_INTERVALS: usize = 64;
 pub struct PreparedLane {
     target: Target,
     length: u32,
@@ -10,7 +12,7 @@ pub struct PreparedLane {
 struct Segment {
     start: u32,
     end: u32,
-    values: [f32; 65],
+    values: [f32; FINE_INTERVALS + 1],
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Value {
@@ -44,7 +46,7 @@ impl PreparedLane {
                 start: pair[0].tick,
                 end: pair[1].tick,
                 values: std::array::from_fn(|i| {
-                    let t = i as f32 / 64.0;
+                    let t = i as f32 / FINE_INTERVALS as f32;
                     let t = if lane.interpolation == Interpolation::Curve {
                         crate::dsp::envelope::bend_curve(t, pair[0].curve)
                     } else {
@@ -71,6 +73,14 @@ impl PreparedLane {
         Some(value)
     }
     pub fn at(&self, point: crate::engine::pdc::ClockPoint, sr: f32) -> Option<Value> {
+        self.at_precision(point, sr, true)
+    }
+    fn at_precision(
+        &self,
+        point: crate::engine::pdc::ClockPoint,
+        sr: f32,
+        fine: bool,
+    ) -> Option<Value> {
         if !point.active || self.segments.is_empty() {
             return None;
         }
@@ -87,11 +97,18 @@ impl PreparedLane {
         let value = if self.step {
             segment.values[0]
         } else {
+            let intervals = if fine {
+                FINE_INTERVALS
+            } else {
+                LEGACY_INTERVALS
+            };
+            let stride = FINE_INTERVALS / intervals;
             let p = ((tick - segment.start as f64) / (segment.end - segment.start).max(1) as f64
-                * 64.0)
-                .clamp(0.0, 64.0);
-            let i = (p as usize).min(63);
-            segment.values[i] + (segment.values[i + 1] - segment.values[i]) * (p - i as f64) as f32
+                * intervals as f64)
+                .clamp(0.0, intervals as f64);
+            let i = (p as usize).min(intervals - 1);
+            let a = segment.values[i * stride];
+            a + (segment.values[(i + 1) * stride] - a) * (p - i as f64) as f32
         };
         Some(Value {
             target: self.target,
@@ -106,12 +123,122 @@ pub fn sample(
 ) -> Option<Value> {
     lane.as_ref().and_then(|lane| lane.at(point, sr))
 }
+pub fn sample_with_precision(
+    lane: &Option<Arc<PreparedLane>>,
+    point: crate::engine::pdc::ClockPoint,
+    sr: f32,
+    fine: bool,
+) -> Option<Value> {
+    lane.as_ref()
+        .and_then(|lane| lane.at_precision(point, sr, fine))
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::automation::{MAX_LENGTH, MAX_POINTS, PPQ, Point};
     use crate::engine::pdc::ClockPoint;
+    #[test]
+    fn fine_curves_reduce_error_while_old_sampling_keeps_its_exact_values() {
+        let mut lane = ParameterLane::create(Target::FilterCutoff);
+        lane.enabled = true;
+        lane.length = PPQ;
+        lane.interpolation = Interpolation::Curve;
+        lane.points = vec![
+            Point {
+                tick: 0,
+                value: 0.0,
+                curve: 1.0,
+            },
+            Point {
+                tick: PPQ,
+                value: 1.0,
+                curve: 0.0,
+            },
+        ];
+        let prepared = PreparedLane::prepare(&lane, Some(Family::Filter)).unwrap();
+        let old: [f32; 65] = std::array::from_fn(|i| {
+            Target::FilterCutoff.physical(crate::dsp::envelope::bend_curve(i as f32 / 64.0, 1.0))
+        });
+        let mut fine_error = 0.0f32;
+        let mut old_error = 0.0f32;
+        for frame in 0..24000u64 {
+            let point = ClockPoint {
+                elapsed: frame,
+                bpm: 120,
+                active: true,
+                ..Default::default()
+            };
+            let t = frame as f32 / 24000.0;
+            let reference = Target::FilterCutoff.physical(crate::dsp::envelope::bend_curve(t, 1.0));
+            let coarse = prepared.at_precision(point, 48000.0, false).unwrap().value;
+            let fine = prepared.at(point, 48000.0).unwrap().value;
+            let p = frame as f64 / 24000.0 * 64.0;
+            let i = (p as usize).min(63);
+            assert_eq!(
+                coarse,
+                old[i] + (old[i + 1] - old[i]) * (p - i as f64) as f32
+            );
+            fine_error = fine_error.max((fine - reference).abs() / reference);
+            old_error = old_error.max((coarse - reference).abs() / reference);
+        }
+        assert!(
+            fine_error < 0.01 && fine_error < old_error * 0.2,
+            "{fine_error} / {old_error}"
+        );
+    }
+    #[test]
+    fn interpolation_is_continuous_between_ticks_and_independent_of_edit_history() {
+        let mut lane = ParameterLane::create(Target::DelayWet);
+        lane.enabled = true;
+        lane.length = PPQ;
+        lane.points = vec![
+            Point {
+                tick: 0,
+                value: 0.0,
+                curve: 0.0,
+            },
+            Point {
+                tick: PPQ,
+                value: 1.0,
+                curve: 0.0,
+            },
+        ];
+        let mut edited = lane.clone();
+        for _ in 0..20 {
+            edited.points.insert(
+                1,
+                Point {
+                    tick: 317,
+                    value: 0.2,
+                    curve: 0.7,
+                },
+            );
+            let _ = PreparedLane::prepare(&edited, Some(Family::Delay));
+            edited.points.remove(1);
+        }
+        assert_eq!(edited, lane);
+        let a = PreparedLane::prepare(&lane, Some(Family::Delay)).unwrap();
+        let b = PreparedLane::prepare(&edited, Some(Family::Delay)).unwrap();
+        let mut previous = 0.0;
+        let allocation = crate::test_alloc::count(|| {
+            for frame in 0..10000 {
+                let point = ClockPoint {
+                    elapsed: frame,
+                    bpm: 120,
+                    active: true,
+                    ..Default::default()
+                };
+                let value = a.at(point, 48000.0).unwrap().value;
+                assert_eq!(value, b.at(point, 48000.0).unwrap().value);
+                if frame > 0 {
+                    assert!(value > previous && value - previous < 0.0001);
+                }
+                previous = value;
+            }
+        });
+        assert_eq!(allocation, 0);
+    }
     #[test]
     fn step_boundaries_use_exact_sample_ratios_and_inactive_transport_restores_base() {
         for sr in [8000, 44100, 48000, 192000] {

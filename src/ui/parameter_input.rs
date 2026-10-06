@@ -93,7 +93,12 @@ pub fn slider(
 ) -> egui::Response {
     let step = step.into();
     let lang = Language::current(ui.ctx());
-    let id = ui.next_auto_id().with("precise-parameter");
+    // push_id changes the semantic scope, not egui 0.27's auto-id counter.
+    // Keep editor buffers separate across nodes and conditional parameter roles;
+    // the native Slider below retains its existing auto-generated ID.
+    let id = ui
+        .id()
+        .with((ui.next_auto_id(), "precise-parameter", label));
     let text_id = id.with("text");
     let mut state = ui
         .ctx()

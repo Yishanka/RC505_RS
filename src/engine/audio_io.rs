@@ -1337,7 +1337,7 @@ mod output_tests {
         if let Some(crate::config::InputFx::Oscillator(osc)) =
             &mut config.input_fx.banks[0].slots[0].fx
         {
-            osc.threshold.value = 100;
+            osc.gate_threshold.value = 100;
             osc.note.replace_events(
                 3840,
                 &[crate::config::sequence_edit::NoteEvent {

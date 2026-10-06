@@ -286,12 +286,7 @@ impl MyApp {
                     _ => Some("Add notes to the piano roll first"),
                 }
             }
-            Some(FxTarget::Track { .. })
-                if self.view.tracks[self.track_sel.unwrap_or(0)].frames > 0 =>
-            {
-                None
-            }
-            _ => Some("Record track audio before auditioning its step filter"),
+            _ => Some("Select an oscillator to audition notes"),
         }
     }
     pub fn toggle_audition(&mut self) {

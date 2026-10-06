@@ -136,6 +136,11 @@ pub fn configure(app: &mut MyApp, mode: &str) {
                     .collect::<Vec<_>>(),
             )));
             osc.select_sample_region();
+            if mode.contains("thresholds") {
+                osc.input_gate = true;
+                osc.gate_threshold.value = 23;
+                osc.capture_threshold.value = 7;
+            }
             if mode.contains("saved") {
                 if let Some(sample) = &osc.sample {
                     osc.sample_temporary = false;
@@ -296,15 +301,9 @@ pub fn configure(app: &mut MyApp, mode: &str) {
             }
         }
     }
-    if mode.starts_with("filter-sweep") {
+    if mode.starts_with("filter-standalone") {
         app.config.input_fx.set_slot_kind(0, 0, FxKind::Filter);
         app.config.input_fx.banks[0].slots[0].is_enabled = true;
-        if let Some(InputFx::Filter(filter)) = &mut app.config.input_fx.banks[0].slots[0].fx {
-            filter.sweep.depth = 0.6;
-            filter.sweep.sync = true;
-            filter.sweep.stepped = true;
-            filter.sweep.step_sync = true;
-        }
     }
     if mode.starts_with("sequence-links") {
         let target = FxTarget::Input { bank: 0, slot: 0 };
@@ -345,8 +344,23 @@ pub fn configure(app: &mut MyApp, mode: &str) {
         lane.interpolation = Interpolation::Curve;
         lane.points[0].curve = -0.5;
         lane.points[1].curve = 0.6;
+        if mode.contains("short") {
+            lane.rescale_length(96);
+        }
         app.config.input_fx.banks[0].slots[0].parameter_lane = lane;
         app.editor.page = EditorPage::Automation;
+    }
+    if mode.starts_with("standalone-") {
+        if mode.contains("track") {
+            app.config
+                .track_fx
+                .set_slot_kind(0, 0, crate::config::TrackFxKind::Filter);
+            app.editor.select(FxTarget::Track { bank: 0, slot: 0 });
+        } else {
+            app.config.input_fx.set_slot_kind(0, 0, FxKind::Filter);
+            app.editor.select(FxTarget::Input { bank: 0, slot: 0 });
+        }
+        app.editor.page = EditorPage::Sound;
     }
     if mode.starts_with("candidate-") {
         let target = FxTarget::Input { bank: 0, slot: 0 };

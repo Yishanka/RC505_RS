@@ -375,7 +375,7 @@ impl PolyOscState {
         }
         free.map(|slot| slot as u8)
     }
-    pub fn capture(&mut self, r: &PolyOscRuntime, input: f32, sr: f32, threshold: f32) {
+    pub fn capture(&mut self, r: &PolyOscRuntime, input: f32, sr: f32, capture_threshold: f32) {
         use std::sync::atomic::Ordering;
         let Some(c) = &r.capture else {
             self.capture_identity = 0;
@@ -390,7 +390,7 @@ impl PolyOscState {
         if c.state.load(Ordering::Relaxed) == 2 {
             return;
         }
-        if !self.capture_started && input.abs() >= threshold {
+        if !self.capture_started && input.abs() >= capture_threshold {
             self.capture_started = true;
             c.state.store(1, Ordering::Release);
             c.sample_rate.store(sr as u32, Ordering::Relaxed);
@@ -493,7 +493,7 @@ pub fn process_poly_sample(
     let enabled = running
         && loop_ticks > 0
         && !schedule.is_empty()
-        && (!r.input_gate || p.input_level >= p.threshold);
+        && (!r.input_gate || p.input_level >= p.gate_threshold);
     let cycle = selection.elapsed_ticks / loop_ticks.max(1) as u64;
     let local_tick = (selection.elapsed_ticks % loop_ticks.max(1) as u64) as usize;
     let boundary = schedule
@@ -862,7 +862,7 @@ mod poly_tests {
         OscillatorFxParams {
             waveform,
             level: 0.7,
-            threshold: 0.0,
+            gate_threshold: 0.0,
             input_level: 0.0,
             sample_rate: sr,
             note: None,

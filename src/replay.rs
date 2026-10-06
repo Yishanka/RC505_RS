@@ -18,7 +18,7 @@ use std::{
 };
 
 // v7 excludes internally generated audio from physical input compensation.
-pub const RENDERER_VERSION: u32 = 9;
+pub const RENDERER_VERSION: u32 = 10;
 mod assets;
 mod delta;
 pub mod library;
@@ -30,13 +30,35 @@ const MAX_EVENTS: u64 = 100_000;
 const MAX_LOG_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 64_000_000;
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(from = "ReadEventKind")]
 pub enum EventKind {
     Action(Action),
     /// Verification at the boundary following the sample that applied a graph.
     /// Payload timestamps are relative to the take, like Event::frame.
     PdcApplied(PdcApplied),
     Config(ProjectData),
+    // Preserve retired fields in a single raw payload while reading old logs.
+    // The wire tag remains Config; current writers still use typed Config.
+    #[serde(rename = "Config")]
+    ConfigRaw(Box<serde_json::value::RawValue>),
     ConfigDelta(delta::ConfigDelta),
+}
+#[derive(Deserialize)]
+enum ReadEventKind {
+    Action(Action),
+    PdcApplied(PdcApplied),
+    Config(Box<serde_json::value::RawValue>),
+    ConfigDelta(delta::ConfigDelta),
+}
+impl From<ReadEventKind> for EventKind {
+    fn from(value: ReadEventKind) -> Self {
+        match value {
+            ReadEventKind::Action(value) => Self::Action(value),
+            ReadEventKind::PdcApplied(value) => Self::PdcApplied(value),
+            ReadEventKind::Config(value) => Self::ConfigRaw(value),
+            ReadEventKind::ConfigDelta(value) => Self::ConfigDelta(value),
+        }
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Event {
@@ -157,7 +179,7 @@ impl Writer {
                     Vec::new(),
                 )
             }
-            EventKind::ConfigDelta(_) => {
+            EventKind::ConfigDelta(_) | EventKind::ConfigRaw(_) => {
                 anyhow::bail!("Only the replay writer may create configuration deltas")
             }
         };
@@ -347,7 +369,7 @@ fn render_impl(
                     core.action(*action, &mut OfflinePages);
                     last_action = Some((frame, *action));
                 }
-                EventKind::Config(_) | EventKind::ConfigDelta(_) => {
+                EventKind::Config(_) | EventKind::ConfigRaw(_) | EventKind::ConfigDelta(_) => {
                     let value = config_state
                         .apply(&event, &mut assets)?
                         .context("Missing replay config")?;
@@ -403,7 +425,7 @@ fn render_impl(
                 core.action(*action, &mut OfflinePages);
                 last_action = Some((metadata.frames, *action));
             }
-            EventKind::Config(_) | EventKind::ConfigDelta(_) => {
+            EventKind::Config(_) | EventKind::ConfigRaw(_) | EventKind::ConfigDelta(_) => {
                 let value = config_state
                     .apply(&event, &mut assets)?
                     .context("Missing replay config")?;
@@ -518,7 +540,7 @@ mod tests {
         if let Some(crate::config::InputFx::Oscillator(osc)) =
             &mut config.input_fx.banks[0].slots[1].fx
         {
-            osc.threshold.value = 0;
+            osc.gate_threshold.value = 0;
             if renderer >= 3 {
                 use crate::config::{
                     note_configs::NoteOct,
