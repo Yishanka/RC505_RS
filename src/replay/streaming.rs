@@ -968,7 +968,7 @@ mod tests {
         let mut live = Vec::new();
         for frame in 0..6000 {
             let action = match frame {
-                1000 | 4000 | 4500 => Some(Action::All),
+                1000 | 4000 | 4500 => Some(Action::Metronome(frame != 4000)),
                 _ => None,
             };
             if let Some(action) = action {

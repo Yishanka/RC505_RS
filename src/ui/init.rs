@@ -78,15 +78,15 @@ pub fn draw_init(ui: &mut egui::Ui, app: &mut MyApp) {
                             "",
                         )
                         .on_hover_text(lang.choose(
-                            "Moves the selected project and its audio into project trash.",
-                            "将所选工程及音频移入工程回收站，可恢复。",
+                            "Permanently delete the selected project and its audio after confirmation.",
+                            "确认后永久删除所选工程及其音频。",
                         ))
                         .clicked()
                         {
-                            app.trash_project();
+                            app.request_delete_project();
                         }
-                        if ui.button(lang.text("Restore last deleted")).clicked() {
-                            app.restore_project();
+                        if ui.button(lang.choose("Storage / recycle bin", "数据管理 / 回收站")).clicked() {
+                            app.open_storage();
                         }
                     });
                 });

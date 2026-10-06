@@ -246,6 +246,7 @@ impl PolyVoice {
 }
 #[derive(Clone)]
 pub struct PolyOscState {
+    shared_modulation_clock: bool,
     phrase: super::phrase::PhraseState,
     phrase_restart_pending: bool,
     voices: Box<[PolyVoice; 16]>,
@@ -271,6 +272,9 @@ pub struct PolyOscState {
     input_mod_level: f32,
 }
 impl PolyOscState {
+    pub fn set_shared_modulation_clock(&mut self, enabled: bool) {
+        self.shared_modulation_clock = enabled;
+    }
     pub fn phrase_view(&self) -> super::phrase::PhraseView {
         self.phrase.view()
     }
@@ -282,6 +286,7 @@ impl PolyOscState {
     }
     pub fn new() -> Self {
         Self {
+            shared_modulation_clock: true,
             phrase: super::phrase::PhraseState::default(),
             phrase_restart_pending: false,
             voices: Box::new(std::array::from_fn(|_| PolyVoice::new())),
@@ -574,9 +579,16 @@ pub fn process_poly_sample(
         }
     }
     let increments = r.lfos.each_ref().map(|lfo| lfo.increment(bpm, sr));
-    for (phase, increment) in state.free_phase.iter_mut().zip(increments) {
+    for (index, (phase, increment)) in state.free_phase.iter_mut().zip(increments).enumerate() {
         if running {
-            *phase = (*phase + increment).fract();
+            let lfo = &r.lfos[index];
+            if state.shared_modulation_clock && lfo.sync && lfo.mode == LfoMode::Free {
+                let rate = sr.round().max(1.0) as f64;
+                let frame = (elapsed.max(0.0) * rate).round();
+                *phase = (frame * bpm.max(1) as f64 / (rate * 60.0 * lfo.beats as f64)).fract();
+            } else {
+                *phase = (*phase + increment).fract();
+            }
         }
     }
     let free_modulation: [f32; 2] = std::array::from_fn(|i| {
@@ -858,6 +870,115 @@ fn sample_voice(v: &mut PolyVoice, r: &SampleMaterial, frequency: f32, sr: f32) 
 mod poly_tests {
     use super::*;
     use crate::config::{OscillatorConfigs, sequence_edit::NoteEvent};
+    #[test]
+    fn free_sync_lfos_follow_music_time_across_late_enable_bypass_and_transport_restart() {
+        let sr = 8000.0;
+        let bpm = 137;
+        for second_retrigger in [false, true] {
+            let mut c = OscillatorConfigs::new();
+            c.note.replace_events(
+                3840,
+                &[NoteEvent::new(0, 3840, NoteOct::from_pitch_index(48))],
+            );
+            c.lfo.enabled = true;
+            c.lfo.mode = LfoMode::Free;
+            c.lfo.sync = true;
+            c.lfo.beats = 0.75;
+            c.lfo2.enabled = true;
+            c.lfo2.sync = second_retrigger;
+            c.lfo2.mode = if second_retrigger {
+                LfoMode::Retrigger
+            } else {
+                LfoMode::Free
+            };
+            c.lfo2.rate_hz = 3.7;
+            c.lfo2.beats = 0.5;
+            let runtime = PolyOscRuntime::from_config(&c);
+            let mut continuous = PolyOscState::new();
+            let mut late = PolyOscState::new();
+            let mut legacy = PolyOscState::new();
+            legacy.set_shared_modulation_clock(false);
+            let mut old_phase = [0.0f64; 2];
+            let increments = runtime.lfos.each_ref().map(|lfo| lfo.increment(bpm, sr));
+            let count = crate::test_alloc::count(|| {
+                for frame in 0..10000 {
+                    let running = !(6100..7300).contains(&frame);
+                    let origin = if frame >= 7300 { 7300 } else { 0 };
+                    let elapsed = if running {
+                        (frame - origin) as f64 / sr as f64
+                    } else {
+                        0.0
+                    };
+                    process_poly_sample(
+                        &mut continuous,
+                        &runtime,
+                        params(sr, Waveform::Sine),
+                        elapsed,
+                        bpm,
+                        running,
+                    );
+                    let enabled = frame >= 1373 && !(3101..4207).contains(&frame);
+                    if !enabled {
+                        late.reset();
+                        legacy.reset();
+                        continue;
+                    }
+                    process_poly_sample(
+                        &mut late,
+                        &runtime,
+                        params(sr, Waveform::Sine),
+                        elapsed,
+                        bpm,
+                        running,
+                    );
+                    process_poly_sample(
+                        &mut legacy,
+                        &runtime,
+                        params(sr, Waveform::Sine),
+                        elapsed,
+                        bpm,
+                        running,
+                    );
+                    if running {
+                        for i in 0..2 {
+                            old_phase[i] = (old_phase[i] + increments[i]).fract();
+                        }
+                        assert_eq!(
+                            late.free_phase[0], continuous.free_phase[0],
+                            "Free+sync retained an enable origin at {frame}"
+                        );
+                        assert!(
+                            (legacy.free_phase[0] - old_phase[0]).abs() < 1e-12,
+                            "Old renderer lost its integral phase"
+                        );
+                    }
+                    assert_eq!(
+                        late.free_phase[1], legacy.free_phase[1],
+                        "Free Hz / retrigger clock changed"
+                    );
+                    if second_retrigger {
+                        for (a, b) in late
+                            .voices
+                            .iter()
+                            .zip(legacy.voices.iter())
+                            .filter(|(a, b)| a.active && b.active)
+                        {
+                            assert_eq!(
+                                a.lfo_phase[1], b.lfo_phase[1],
+                                "Per-note retrigger changed"
+                            );
+                        }
+                    }
+                    assert!(late.shared_modulation_clock);
+                    assert!(
+                        !legacy.shared_modulation_clock,
+                        "Reset must preserve renderer compatibility"
+                    );
+                }
+            });
+            assert_eq!(count, 0);
+        }
+    }
     pub(super) fn params(sr: f32, waveform: Waveform) -> OscillatorFxParams {
         OscillatorFxParams {
             waveform,

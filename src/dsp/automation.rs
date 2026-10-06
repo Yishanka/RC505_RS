@@ -139,6 +139,49 @@ mod tests {
     use crate::config::automation::{MAX_LENGTH, MAX_POINTS, PPQ, Point};
     use crate::engine::pdc::ClockPoint;
     #[test]
+    fn one_beat_filter_lane_has_no_effect_enable_origin() {
+        let mut lane = ParameterLane::create(Target::FilterCutoff);
+        lane.length = PPQ;
+        lane.enabled = true;
+        lane.interpolation = Interpolation::Curve;
+        lane.points[1].tick = PPQ / 2;
+        lane.points[2].tick = PPQ;
+        let continuous = PreparedLane::prepare(&lane, Some(Family::Filter)).unwrap();
+        lane.enabled = false;
+        assert!(PreparedLane::prepare(&lane, Some(Family::Filter)).is_none());
+        lane.enabled = true;
+        let enabled_later = PreparedLane::prepare(&lane, Some(Family::Filter)).unwrap();
+        for fine in [false, true] {
+            for frame in [1, 1373, 2101, 4703, 8000, 1_000_001] {
+                let point = ClockPoint {
+                    elapsed: frame,
+                    bpm: 137,
+                    active: true,
+                    ..Default::default()
+                };
+                assert_eq!(
+                    continuous.at_precision(point, 8000.0, fine).unwrap().value,
+                    enabled_later
+                        .at_precision(point, 8000.0, fine)
+                        .unwrap()
+                        .value
+                );
+            }
+        }
+        assert!(
+            enabled_later
+                .at(
+                    ClockPoint {
+                        elapsed: 999,
+                        active: false,
+                        ..Default::default()
+                    },
+                    8000.0
+                )
+                .is_none()
+        );
+    }
+    #[test]
     fn fine_curves_reduce_error_while_old_sampling_keeps_its_exact_values() {
         let mut lane = ParameterLane::create(Target::FilterCutoff);
         lane.enabled = true;

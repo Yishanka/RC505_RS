@@ -18,7 +18,7 @@ use std::{
 };
 
 // v7 excludes internally generated audio from physical input compensation.
-pub const RENDERER_VERSION: u32 = 11;
+pub const RENDERER_VERSION: u32 = 12;
 mod assets;
 mod delta;
 pub mod library;
@@ -82,11 +82,13 @@ pub struct ReplayInfo {
 }
 
 pub struct Writer {
-    pub root: PathBuf,
+    root: PathBuf,
+    owned_root: Option<PathBuf>,
+    failed: bool,
     pub origin: u64,
     info: ReplayInfo,
-    input: hound::WavWriter<BufWriter<fs::File>>,
-    events: BufWriter<fs::File>,
+    input: Option<hound::WavWriter<BufWriter<fs::File>>>,
+    events: Option<BufWriter<fs::File>>,
     next_sequence: u64,
     event_bytes: u64,
     initial: Option<std::thread::JoinHandle<Result<()>>>,
@@ -101,19 +103,18 @@ impl Writer {
         snapshot: AudioSnapshot,
         config: ProjectData,
     ) -> Result<Self> {
-        fs::create_dir_all(&root)?;
-        let input = hound::WavWriter::create(
-            root.join("input.wav"),
-            session::wav_spec(snapshot.sample_rate),
-        )?;
-        let events = BufWriter::new(fs::File::create(root.join("events.jsonl"))?);
-        let initial_root = root.join("initial");
+        let parent = root
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        crate::storage::ensure_directory(parent)?;
+        // Never adopt an existing directory: only this recording may remove it.
+        fs::create_dir(&root).context("Replay directory already exists or cannot be created")?;
         let sr = snapshot.sample_rate;
-        let initial = std::thread::Builder::new()
-            .name("replay-initial-state".into())
-            .spawn(move || session::write_bundle(&initial_root, &snapshot, config))?;
-        Ok(Self {
+        let mut writer = Self {
+            owned_root: Some(root.clone()),
             root,
+            failed: false,
             origin,
             info: ReplayInfo {
                 version: 1,
@@ -126,16 +127,41 @@ impl Writer {
                 events_sha256: String::new(),
                 initial_sha256: String::new(),
             },
-            input,
-            events,
+            input: None,
+            events: None,
             next_sequence: 0,
             event_bytes: 0,
-            initial: Some(initial),
+            initial: None,
             assets: assets::AssetWriter::default(),
             config_state: delta::State::default(),
-        })
+        };
+        let setup = (|| -> Result<()> {
+            writer.input = Some(hound::WavWriter::create(
+                writer.root.join("input.wav"),
+                session::wav_spec(sr),
+            )?);
+            writer.events = Some(BufWriter::new(fs::File::create(
+                writer.root.join("events.jsonl"),
+            )?));
+            let initial_root = writer.root.join("initial");
+            writer.initial = Some(
+                std::thread::Builder::new()
+                    .name("replay-initial-state".into())
+                    .spawn(move || session::write_bundle(&initial_root, &snapshot, config))?,
+            );
+            Ok(())
+        })();
+        if let Err(error) = setup {
+            return Err(writer.with_cleanup_error(error));
+        }
+        Ok(writer)
     }
     pub fn audio(&mut self, at: u64, frames: &[[f32; 2]]) -> Result<()> {
+        let result = self.write_audio(at, frames);
+        self.failed |= result.is_err();
+        result
+    }
+    fn write_audio(&mut self, at: u64, frames: &[[f32; 2]]) -> Result<()> {
         ensure!(
             at == self.origin + self.info.frames,
             "Replay input has a gap; this take cannot be exported accurately"
@@ -145,14 +171,25 @@ impl Writer {
                 <= self.info.sample_rate as u64 * MAX_TAKE_SECONDS,
             "Take reached 30 minute limit"
         );
+        ensure!(!self.failed, "Replay capture has already failed");
+        let input = self
+            .input
+            .as_mut()
+            .context("Replay input writer is closed")?;
         for frame in frames {
-            self.input.write_sample(frame[0])?;
-            self.input.write_sample(frame[1])?;
+            input.write_sample(frame[0])?;
+            input.write_sample(frame[1])?;
         }
         self.info.frames += frames.len() as u64;
         Ok(())
     }
     pub fn event(&mut self, frame: u64, kind: EventKind) -> Result<()> {
+        let result = self.write_event(frame, kind);
+        self.failed |= result.is_err();
+        result
+    }
+    fn write_event(&mut self, frame: u64, kind: EventKind) -> Result<()> {
+        ensure!(!self.failed, "Replay capture has already failed");
         ensure!(frame >= self.origin, "Invalid replay timestamp");
         ensure!(
             self.next_sequence < MAX_EVENTS,
@@ -194,20 +231,42 @@ impl Writer {
             self.event_bytes + bytes.len() as u64 + 1 <= MAX_LOG_BYTES,
             "Replay event log exceeds the 512 MiB limit"
         );
-        self.events.write_all(&bytes)?;
-        self.events.write_all(b"\n")?;
+        let events = self
+            .events
+            .as_mut()
+            .context("Replay event writer is closed")?;
+        events.write_all(&bytes)?;
+        events.write_all(b"\n")?;
         self.event_bytes += bytes.len() as u64 + 1;
         self.next_sequence += 1;
         Ok(())
     }
     pub fn finish(mut self, end: u64) -> Result<PathBuf> {
+        match self.finish_inner(end) {
+            Ok(()) => {
+                self.owned_root = None;
+                Ok(self.root.clone())
+            }
+            Err(error) => Err(self.with_cleanup_error(error)),
+        }
+    }
+    fn finish_inner(&mut self, end: u64) -> Result<()> {
+        ensure!(!self.failed, "Replay capture has already failed");
         ensure!(
             end == self.origin + self.info.frames,
             "Replay is incomplete"
         );
-        self.input.finalize()?;
-        self.events.flush()?;
-        self.events.get_ref().sync_all()?;
+        self.input
+            .take()
+            .context("Replay input writer is closed")?
+            .finalize()?;
+        let mut events = self
+            .events
+            .take()
+            .context("Replay event writer is closed")?;
+        events.flush()?;
+        events.get_ref().sync_all()?;
+        drop(events);
         self.initial
             .take()
             .unwrap()
@@ -224,9 +283,52 @@ impl Writer {
             &self.root.join("replay.json"),
             &serde_json::to_vec_pretty(&self.info)?,
         )?;
-        Ok(self.root)
+        Ok(())
+    }
+    /// Worker-only cleanup. Handles and the initial snapshot thread must be gone
+    /// before Windows can unlink their files or a removed directory can stay gone.
+    pub fn abort(mut self) -> Result<()> {
+        self.abort_inner()
+    }
+    fn abort_inner(&mut self) -> Result<()> {
+        drop(self.input.take());
+        drop(self.events.take());
+        if let Some(initial) = self.initial.take() {
+            let _ = initial.join();
+        }
+        if let Some(root) = self.owned_root.take() {
+            let parent = root
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            crate::storage::remove_tree(parent, &root).with_context(|| {
+                format!(
+                    "Incomplete recording could not be removed: {}",
+                    root.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+    fn with_cleanup_error(&mut self, error: anyhow::Error) -> anyhow::Error {
+        match self.abort_inner() {
+            Ok(()) => error,
+            Err(cleanup) => anyhow::anyhow!("{error}; {cleanup:#}"),
+        }
     }
 }
+impl Drop for Writer {
+    fn drop(&mut self) {
+        // Only a successfully create-new, still-uncommitted root is owned here.
+        // Explicit worker/finish paths report failures; this is unwind fallback.
+        if self.owned_root.is_some() {
+            let _ = self.abort_inner();
+        }
+    }
+}
+#[cfg(test)]
+#[path = "replay/writer_cleanup_tests.rs"]
+mod writer_cleanup_tests;
 
 pub fn info(root: &Path) -> Result<ReplayInfo> {
     let value: ReplayInfo = serde_json::from_slice(&fs::read(root.join("replay.json"))?)?;

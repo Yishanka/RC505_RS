@@ -12,6 +12,7 @@ pub fn draw(ctx: &egui::Context, app: &mut MyApp) {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
+                ui.set_enabled(!app.storage_ui.modal_open());
                 ui.label(lang.choose(
                     "Save or export the replay, keep a draft, or discard this recording.",
                     "可以保存回放、导出音频、保留草稿，或直接丢弃本次录制。",
@@ -38,8 +39,8 @@ pub fn draw(ctx: &egui::Context, app: &mut MyApp) {
                             "",
                         )
                         .on_hover_text(lang.choose(
-                            "Moves to replay trash; restore from the replay library.",
-                            "移入回放回收站，可在回放库恢复。",
+                            "Permanently delete this recording after confirmation.",
+                            "确认后永久删除本次录制。",
                         ))
                         .clicked()
                         {
@@ -56,6 +57,7 @@ pub fn draw(ctx: &egui::Context, app: &mut MyApp) {
             .id(egui::Id::new("replay-library"))
             .open(&mut open).default_size([860.0,600.0]).vscroll(true)
             .show(ctx, |ui| {
+                ui.set_enabled(!app.storage_ui.modal_open());
                 ui.label(lang.choose(
                     "Playback calculates sound from the recorded inputs and operations in real time. Drag the playhead to seek; pause anywhere to import into a project. WAV is created only when you choose Export.",
                     "播放按原始输入与操作实时演算。可拖动进度，任意位置暂停并导入工程；仅在点击导出时生成 WAV。"));
@@ -64,7 +66,7 @@ pub fn draw(ctx: &egui::Context, app: &mut MyApp) {
                         app.toggle_take(); close_requested=app.take_pending;
                     }
                     if ui.button(lang.choose("Refresh", "刷新列表")).clicked() { app.open_replays(); }
-                    if ui.add_enabled(!app.read_only && !app.busy(),egui::Button::new(lang.choose("Restore deleted replay", "恢复最近删除的回放"))).clicked() { app.restore_replay(); }
+                    if ui.add_enabled(app.app_state == crate::state::AppState::Init && !app.busy(),egui::Button::new(lang.choose("Storage / recycle bin", "数据管理 / 回收站"))).on_hover_text(lang.choose("Available from the project screen", "请从工程选择界面打开")).clicked() { app.open_storage(); }
                 });
                 ui.separator();
                 egui::ScrollArea::vertical().id_source("replay-list").max_height(270.0).min_scrolled_height(100.0).show(ui, |ui| {

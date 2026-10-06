@@ -1390,6 +1390,146 @@ fn sample_persistence_regression() {
     );
 }
 
+fn library_delete_regression(ctx: &egui::Context, app: &mut MyApp, time: &mut f64) {
+    use crate::{
+        config::{FxKind, InputFx},
+        presets::{self, FxTarget},
+        ui::editor::LibraryDelete,
+    };
+    let saved_state = app.app_state;
+    let (job_sender, job_receiver) = std::sync::mpsc::channel();
+    app.editor.library_delete = Some(LibraryDelete::Phrase("Pending operation".into()));
+    app.editor.library_delete_job = Some(job_receiver);
+    for state in [AppState::Init, AppState::MainLoop] {
+        app.app_state = state;
+        let mut raw = egui::RawInput::default();
+        raw.viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .unwrap()
+            .events
+            .push(egui::ViewportEvent::Close);
+        <MyApp as eframe::App>::raw_input_hook(app, ctx, &mut raw);
+        let output = ctx.run(raw, |ctx| app.render_frame(ctx));
+        assert!(output.viewport_output.values().any(|v| {
+            v.commands
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::CancelClose))
+        }));
+        assert!(!output.viewport_output.values().any(|v| {
+            v.commands
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Close))
+        }));
+        assert!(app.busy());
+    }
+    drop(job_sender);
+    app.editor.library_delete_job = None;
+    app.editor.library_delete = None;
+    app.app_state = saved_state;
+    let root = crate::app_support::paths::appdata_root()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    assert!(
+        root.starts_with(std::path::Path::new("var").canonicalize().unwrap()),
+        "Deletion regression needs an isolated data directory"
+    );
+    super::preview::configure(app, "performance");
+    app.config.input_fx.set_slot_kind(0, 0, FxKind::Oscillator);
+    if let Some(InputFx::Oscillator(o)) = &mut app.config.input_fx.banks[0].slots[0].fx {
+        o.note.push();
+    }
+    let name = format!("delete-check-{}", crate::session::id());
+    presets::save_clip(&app.config, FxTarget::Input { bank: 0, slot: 0 }, &name).unwrap();
+    let path = root.join("clips").join(format!("{name}.json"));
+    let bytes = std::fs::read(&path).unwrap();
+    app.editor.library_delete = Some(LibraryDelete::Phrase(name.clone()));
+    frame(ctx, app, time, vec![]);
+    let before = crate::project::data_from_config(&app.config);
+    for key in [
+        Key::Num1,
+        Key::J,
+        Key::F9,
+        Key::F10,
+        Key::ArrowDown,
+        Key::Delete,
+    ] {
+        press(ctx, app, time, key, Modifiers::NONE);
+    }
+    assert!(app.editor.library_delete.is_some() && !app.replay_browser);
+    assert!(before == crate::project::data_from_config(&app.config));
+    press(ctx, app, time, Key::Escape, Modifiers::NONE);
+    assert!(app.editor.library_delete.is_none());
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    app.editor.library_delete = Some(LibraryDelete::Phrase(name.clone()));
+    frame(ctx, app, time, vec![]);
+    let mut raw = egui::RawInput {
+        focused: false,
+        events: vec![egui::Event::Key {
+            key: Key::Enter,
+            physical_key: Some(Key::Enter),
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }],
+        ..Default::default()
+    };
+    <MyApp as eframe::App>::raw_input_hook(app, ctx, &mut raw);
+    let _ = ctx.run(raw, |ctx| app.render_frame(ctx));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    frame(
+        ctx,
+        app,
+        time,
+        vec![egui::Event::Key {
+            key: Key::Enter,
+            physical_key: Some(Key::Enter),
+            pressed: false,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }],
+    );
+    for delete in [false, true] {
+        if app.editor.library_delete.is_none() {
+            app.editor.library_delete = Some(LibraryDelete::Phrase(name.clone()));
+        }
+        for _ in 0..3 {
+            frame(ctx, app, time, vec![]);
+        }
+        let rects = ctx
+            .data(|d| {
+                d.get_temp::<(egui::Rect, egui::Rect)>(egui::Id::new("library-delete-buttons"))
+            })
+            .unwrap();
+        let pos = if delete {
+            rects.1.center()
+        } else {
+            rects.0.center()
+        };
+        for pressed in [true, false] {
+            frame(
+                ctx,
+                app,
+                time,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        if delete {
+            finish_jobs(ctx, app, time);
+        }
+        assert!(app.editor.library_delete.is_none());
+        assert_eq!(path.exists(), !delete);
+    }
+}
+
 pub fn run() {
     assert!(
         std::env::args().any(|a| a == "--offline")
@@ -1602,16 +1742,86 @@ pub fn run() {
     fader_panel_transition_regression(&ctx, &mut app, &mut time);
     phrase_keyboard_regression(&ctx, &mut app, &mut time);
     sample_persistence_regression();
+    library_delete_regression(&ctx, &mut app, &mut time);
     app.app_state = AppState::Init;
     app.active_project_idx = None;
     let count = app.projects.len();
     let identity = app.projects[0].file.clone();
     app.sel_project_idx = 0;
-    app.trash_project();
-    assert_eq!(app.projects.len(), count - 1);
-    app.restore_project();
+    let config_path = crate::app_support::paths::projects_dir().join(&identity);
+    app.request_delete_project();
     assert_eq!(app.projects.len(), count);
-    assert!(app.projects.iter().any(|p| p.file == identity));
+    assert!(app.storage_ui.confirm.is_some());
+    press(&ctx, &mut app, &mut time, Key::Escape, Modifiers::NONE);
+    assert!(app.storage_ui.confirm.is_none());
+    assert!(config_path.exists());
+    app.request_delete_project();
+    for _ in 0..3 {
+        frame(&ctx, &mut app, &mut time, vec![]);
+    }
+    let buttons = ctx
+        .data(|d| d.get_temp::<(egui::Rect, egui::Rect)>(egui::Id::new("storage-confirm-buttons")))
+        .unwrap();
+    let pos = buttons.1.center();
+    for pressed in [true, false] {
+        frame(
+            &ctx,
+            &mut app,
+            &mut time,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Modifiers::NONE,
+                },
+            ],
+        );
+    }
+    finish_jobs(&ctx, &mut app, &mut time);
+    assert!(app.storage_ui.confirm.is_none(), "{}", app.status);
+    assert_eq!(app.projects.len(), count - 1);
+    assert!(!config_path.exists());
+    assert!(!config_path.with_extension("json.bak").exists());
+    assert!(
+        !crate::project::load_index()
+            .iter()
+            .any(|p| p.file == identity)
+    );
+    // Discarding a captured take removes its actual files after confirmation.
+    let replay_root = crate::replay::library::root();
+    let take = replay_root.join(format!("draft-{}", crate::session::id()));
+    std::fs::create_dir_all(&take).unwrap();
+    std::fs::write(take.join("input.wav"), b"isolated recording").unwrap();
+    app.draft = Some(take.clone());
+    app.discard_take();
+    assert!(take.exists() && app.storage_ui.confirm.is_some());
+    for _ in 0..3 {
+        frame(&ctx, &mut app, &mut time, vec![]);
+    }
+    let buttons = ctx
+        .data(|d| d.get_temp::<(egui::Rect, egui::Rect)>(egui::Id::new("storage-confirm-buttons")))
+        .unwrap();
+    let pos = buttons.1.center();
+    for pressed in [true, false] {
+        frame(
+            &ctx,
+            &mut app,
+            &mut time,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Modifiers::NONE,
+                },
+            ],
+        );
+    }
+    finish_jobs(&ctx, &mut app, &mut time);
+    assert!(app.draft.is_none() && !take.exists(), "{}", app.status);
     app.project_name_mode = Some(ProjectNameMode::Add);
     frame(&ctx, &mut app, &mut time, vec![]);
     press(&ctx, &mut app, &mut time, Key::Escape, Modifiers::NONE);

@@ -39,6 +39,15 @@ pub struct FilterDspState {
 }
 
 impl FilterDspState {
+    /// Standalone parameter lanes can join the common control-rate grid. This
+    /// does not reset integrators/smoothing and is not used by OSC voice filters.
+    pub(crate) fn set_control_frame(&mut self, source_frame: u64) {
+        self.control_tick = (source_frame % 8) as u8;
+    }
+    #[cfg(test)]
+    pub(crate) fn target_cutoff(&self) -> f32 {
+        self.last_cutoff
+    }
     pub fn new() -> Self {
         Self {
             integrators: [0.0; 2],

@@ -353,7 +353,9 @@ pub struct RenderCore {
     master: crate::dsp::master::MasterFxState,
     pub input_thru: bool,
     input_monitor_gain: f32,
-    pub transport: bool,
+    // Only old replay renderers use a separately latched transport flag.
+    legacy_transport: bool,
+    activity_transport: bool,
     pub metronome: bool,
     pub metronome_volume: f32,
     legacy: bool,
@@ -400,7 +402,8 @@ impl RenderCore {
             graph_applied_at: None,
             pdc_applied_event: None,
             master: crate::dsp::master::MasterFxState::new(sr as f32),
-            transport: false,
+            legacy_transport: false,
+            activity_transport: true,
             input_thru: true,
             input_monitor_gain: 1.0,
             metronome: false,
@@ -495,8 +498,10 @@ impl RenderCore {
     pub fn idle(&self) -> bool {
         if self.legacy {
             self.legacy_idle()
+        } else if self.activity_transport {
+            !self.metronome && !self.preview && self.tracks_stopped()
         } else {
-            !self.transport && !self.preview && self.tracks_stopped()
+            !self.legacy_transport && !self.preview && self.tracks_stopped()
         }
     }
     pub fn tracks_stopped(&self) -> bool {
@@ -517,16 +522,24 @@ impl RenderCore {
             self.input.set_automation_precision(false);
             self.external_input.set_automation_precision(false);
             self.track_fx.set_automation_precision(false);
+            self.input.set_shared_modulation_clock(false);
+            self.external_input.set_shared_modulation_clock(false);
+            self.track_fx.set_shared_modulation_clock(false);
         }
     }
     pub fn set_renderer_version(&mut self, version: u32) {
         self.legacy_renderer(version == 2);
+        self.activity_transport = version >= 12;
         self.allow_pdc = version >= 5;
         self.separate_recording_sources = version >= 7;
         self.allow_input_noise = version >= 8;
         self.input.set_automation_precision(version >= 10);
         self.external_input.set_automation_precision(version >= 10);
         self.track_fx.set_automation_precision(version >= 10);
+        self.input.set_shared_modulation_clock(version >= 12);
+        self.external_input
+            .set_shared_modulation_clock(version >= 12);
+        self.track_fx.set_shared_modulation_clock(version >= 12);
         if !self.allow_pdc {
             self.pdc.plan = super::pdc::LatencyPlan::default();
             self.pdc.reset();
@@ -644,7 +657,7 @@ impl RenderCore {
         }
         self.clock.origin = None;
         self.preview = false;
-        self.transport = false;
+        self.legacy_transport = false;
         self.metronome = false;
         self.exhausted = false;
     }
@@ -671,10 +684,10 @@ impl RenderCore {
             Action::All => {
                 let stop = !self.idle();
                 self.preview = false;
-                self.transport = !stop && !self.legacy;
+                self.legacy_transport = !stop && !self.legacy && !self.activity_transport;
                 if stop {
                     self.metronome = false;
-                } else if !self.legacy {
+                } else if !self.legacy && !self.activity_transport {
                     self.clock.start();
                 }
                 for i in 0..TRACKS {
@@ -688,7 +701,7 @@ impl RenderCore {
             Action::Panic => {
                 self.pdc.reset();
                 self.preview = false;
-                self.transport = false;
+                self.legacy_transport = false;
                 self.metronome = false;
                 for t in &mut self.tracks {
                     t.pending = None;
@@ -716,7 +729,7 @@ impl RenderCore {
             Action::Metronome(enabled) => {
                 self.metronome = enabled;
                 if enabled {
-                    self.transport = true;
+                    self.legacy_transport = !self.activity_transport;
                     self.clock.start();
                 }
             }
@@ -1213,6 +1226,12 @@ impl RenderCore {
         self.output_peak = self.output_peak.max(mixed[0].abs().max(mixed[1].abs()));
         if mixed.iter().any(|v| v.abs() > 1.0) {
             self.clipped += 1;
+        }
+        // One-shot completion and the last fade can become idle inside this
+        // frame. Publish a stopped transport immediately, without retaining an
+        // independent start latch after the last source of activity has ended.
+        if self.activity_transport && self.idle() {
+            self.clock.origin = None;
         }
         self.clock.frame += 1;
         [mixed[0].clamp(-1.0, 1.0), mixed[1].clamp(-1.0, 1.0)]
@@ -2010,3 +2029,7 @@ mod source_recording_tests;
 #[cfg(test)]
 #[path = "input_noise_tests.rs"]
 mod input_noise_tests;
+
+#[cfg(test)]
+#[path = "transport_tests.rs"]
+mod transport_tests;

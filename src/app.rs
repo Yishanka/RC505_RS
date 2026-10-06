@@ -54,6 +54,7 @@ pub struct HeldFx {
     pub previous: bool,
 }
 pub enum JobResult {
+    SavedCleanupWarning(String),
     PlayerReady(
         crate::replay::streaming::Consumer,
         crate::replay::streaming::Session,
@@ -78,6 +79,7 @@ pub enum JobResult {
     Error(String),
 }
 pub struct MyApp {
+    pub storage_ui: ui::storage::StorageUi,
     pub shortcuts: shortcuts::Bindings,
     pub shortcut_editor: ui::shortcuts::ShortcutEditor,
     pub master_fx_open: bool,
@@ -222,6 +224,7 @@ impl MyApp {
             .unwrap_or(0);
         Self {
             shortcuts: shortcuts::Bindings::load(),
+            storage_ui: Default::default(),
             shortcut_editor: ui::shortcuts::ShortcutEditor::default(),
             master_fx_open: false,
             replay_panel: None,
@@ -312,7 +315,9 @@ impl MyApp {
         }
     }
     pub fn busy(&self) -> bool {
-        self.job.is_some()
+        self.storage_ui.busy()
+            || self.editor.library_delete_job.is_some()
+            || self.job.is_some()
             || self.saving
             || self.take_pending
             || self.reconnecting
@@ -424,6 +429,16 @@ impl MyApp {
         true
     }
     fn request_exit(&mut self, target: PendingExit) {
+        if self.busy() {
+            self.status = self
+                .language
+                .choose(
+                    "Wait for the current operation to finish.",
+                    "请等待当前操作完成。",
+                )
+                .into();
+            return;
+        }
         self.replay_autoplay = false;
         if self.taking() || self.take_pending || self.draft.is_some() {
             self.status = "Finish and save or discard the replay take first.".into();
@@ -509,6 +524,7 @@ impl MyApp {
         let responses: Vec<_> = self.audio.responses().collect();
         for response in responses {
             match response {
+                Response::SavedCleanupWarning(error) => self.saved_cleanup_warning(error),
                 Response::Saved(_) => {
                     self.saving = false;
                     self.status = "Configuration and audio snapshot saved.".into();
@@ -669,6 +685,7 @@ impl MyApp {
                         }
                     }
                 }
+                JobResult::SavedCleanupWarning(error) => self.saved_cleanup_warning(error),
                 JobResult::Saved => {
                     self.saving = false;
                     self.status =
@@ -741,7 +758,9 @@ impl MyApp {
                     .is_some_and(|panel| panel.modal_open()) as u64)
                     << 1),
             self.draft.is_some() as u64,
-            self.show_save_prompt as u64,
+            self.show_save_prompt as u64
+                | ((self.editor.library_delete.is_some() as u64) << 1)
+                | ((self.storage_ui.modal_open() as u64) << 2),
             self.project_name_mode.is_some() as u64,
             self.language as u64,
             self.calibration_open as u64,
@@ -754,6 +773,8 @@ impl MyApp {
         ctx.memory_mut(|m| m.stop_text_input());
         self.focus_request = self.focus != Focus::Performance
             && !self.show_save_prompt
+            && self.editor.library_delete.is_none()
+            && !self.storage_ui.modal_open()
             && !self.help_open
             && !self.shortcut_editor.open
             && !self.master_fx_open
@@ -809,13 +830,21 @@ impl MyApp {
         }
         self.follow_default_output();
         ctx.request_repaint_after(Duration::from_millis(16));
-        if ctx.input(|i| i.viewport().close_requested())
-            && !self.allow_window_close
-            && self.app_state != AppState::Init
-        {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            if !self.show_save_prompt {
-                self.request_exit(PendingExit::CloseWindow);
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if self.busy() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.status = self
+                    .language
+                    .choose(
+                        "Wait for the current operation to finish.",
+                        "请等待当前操作完成。",
+                    )
+                    .into();
+            } else if !self.allow_window_close && self.app_state != AppState::Init {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                if !self.show_save_prompt {
+                    self.request_exit(PendingExit::CloseWindow);
+                }
             }
         }
         self.handle_input(ctx);
@@ -824,7 +853,11 @@ impl MyApp {
                 ui::visualizer::draw(ui, &self.view.output_spectrum);
             }
             ui.set_enabled(
-                !self.show_save_prompt && !self.shortcut_editor.open && !self.master_fx_open,
+                !self.show_save_prompt
+                    && !self.shortcut_editor.open
+                    && !self.master_fx_open
+                    && self.editor.library_delete.is_none()
+                    && !self.storage_ui.modal_open(),
             );
             match self.app_state {
                 _ if self.player_open => ui::replay_panel::draw(ui, self),
@@ -832,13 +865,18 @@ impl MyApp {
                 _ => ui::performance::draw(ui, self),
             }
         });
-        if !self.show_save_prompt {
+        if !self.show_save_prompt
+            && self.editor.library_delete.is_none()
+            && !self.storage_ui.modal_open()
+        {
             ui::help::draw(ctx, self);
             ui::replays::draw(ctx, self);
             ui::calibration::draw(ctx, self);
             ui::shortcuts::draw(ctx, self);
             ui::audio_fx_panel::draw_master(ctx, self);
         }
+        ui::storage::draw(ctx, self);
+        ui::editor::draw_library_delete(ctx, self);
         if self.show_save_prompt {
             let title = if matches!(self.pending_exit, Some(PendingExit::CloseWindow)) {
                 lang.choose("Save before closing RC505 RS", "关闭 RC505 RS 前保存")

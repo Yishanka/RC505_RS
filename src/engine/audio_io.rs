@@ -94,6 +94,7 @@ enum WorkerMessage {
 }
 pub enum Response {
     Saved(String),
+    SavedCleanupWarning(String),
     Take(PathBuf),
     Error(String),
     Calibrated(super::latency::Measurement),
@@ -518,6 +519,7 @@ pub struct AudioIO {
     pub diagnostics: Arc<Diagnostics>,
     responses: mpsc::Receiver<Response>,
     stop: Arc<AtomicBool>,
+    worker_join: Option<std::thread::JoinHandle<()>>,
     offline: Option<Callback>,
     pub online: bool,
     pub status: String,
@@ -528,6 +530,9 @@ impl Drop for AudioIO {
         self.output_stream.take();
         self.offline.take();
         self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker_join.take() {
+            let _ = worker.join();
+        }
     }
 }
 impl AudioIO {
@@ -768,7 +773,7 @@ impl AudioIO {
         let diagnostics = Arc::new(Diagnostics::default());
         let worker_diag = diagnostics.clone();
         let worker_stop = stop.clone();
-        std::thread::Builder::new()
+        let worker_join = std::thread::Builder::new()
             .name("audio-retire-and-replay".into())
             .spawn(move || {
                 let mut writer: Option<replay::Writer> = None;
@@ -778,11 +783,16 @@ impl AudioIO {
                             worker_message(message, &mut writer, &response_tx, &worker_diag)
                         {
                             worker_diag.take_failed.store(true, Ordering::Relaxed);
-                            writer = None;
+                            let error = abort_writer(&mut writer, error);
                             let _ = response_tx.send(Response::Error(error.to_string()));
                         }
                     } else {
                         std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
+                if let Some(writer) = writer.take() {
+                    if let Err(error) = writer.abort() {
+                        let _ = response_tx.send(Response::Error(format!("{error:#}")));
                     }
                 }
             })
@@ -826,6 +836,7 @@ impl AudioIO {
                 diagnostics,
                 responses,
                 stop,
+                worker_join: Some(worker_join),
                 offline: None,
                 online: false,
                 status: String::new(),
@@ -890,6 +901,14 @@ impl AudioIO {
         }
     }
 }
+fn abort_writer(writer: &mut Option<replay::Writer>, error: anyhow::Error) -> anyhow::Error {
+    if let Some(writer) = writer.take() {
+        if let Err(cleanup) = writer.abort() {
+            return anyhow::anyhow!("{error}; {cleanup:#}");
+        }
+    }
+    error
+}
 fn worker_message(
     message: WorkerMessage,
     writer: &mut Option<replay::Writer>,
@@ -939,6 +958,7 @@ fn worker_message(
                     data,
                     ..
                 } => {
+                    anyhow::ensure!(writer.is_none(), "A replay capture is already active");
                     *writer = Some(replay::Writer::begin(
                         root, project_id, at, *snapshot, data,
                     )?);
@@ -947,10 +967,15 @@ fn worker_message(
                     let Some(value) = writer.take() else {
                         anyhow::bail!("No valid replay capture to finish");
                     };
-                    anyhow::ensure!(
-                        !diagnostics.take_failed.load(Ordering::Relaxed),
-                        "Replay capture overflowed; incomplete input cannot be exported"
-                    );
+                    if diagnostics.take_failed.load(Ordering::Relaxed) {
+                        let error = anyhow::anyhow!(
+                            "Replay capture overflowed; incomplete input cannot be exported"
+                        );
+                        return Err(match value.abort() {
+                            Ok(()) => error,
+                            Err(cleanup) => anyhow::anyhow!("{error}; {cleanup:#}"),
+                        });
+                    }
                     let root = value.finish(at)?;
                     let _ = tx.send(Response::Take(root));
                 }
@@ -964,6 +989,9 @@ fn worker_message(
                         let _ = tx.send(
                             match crate::session::save_snapshot(&entry, &snapshot, data) {
                                 Ok(revision) => Response::Saved(revision),
+                                Err(e) if e.is::<crate::project::storage::SaveCleanupWarning>() => {
+                                    Response::SavedCleanupWarning(e.to_string())
+                                }
                                 Err(e) => Response::Error(format!("Snapshot save failed: {e}")),
                             },
                         );
@@ -1006,6 +1034,76 @@ fn select_host(_input: &str, _output: &str) -> Result<cpal::Host> {
 #[cfg(test)]
 mod output_tests {
     use super::*;
+    #[test]
+    fn replay_writer_cleanup_worker_shutdown_discards_only_uncommitted_takes() {
+        for finish in [false, true] {
+            let (mut audio, mut cb) = callback();
+            let root =
+                PathBuf::from("var").join(format!("worker-take-cleanup-{}", crate::session::id()));
+            audio
+                .send(Control::BeginTake {
+                    core: Box::new(RenderCore::new(8000)),
+                    snapshot: Box::new(AudioSnapshot::empty(8000)),
+                    retired_audition: None,
+                    root: root.clone(),
+                    project_id: "worker.json".into(),
+                    data: crate::project::data_from_config(&AppConfig::new(120, 0, 5)),
+                })
+                .unwrap();
+            cb.commands();
+            if finish {
+                audio.send(Control::EndTake).unwrap();
+                cb.commands();
+            }
+            // A completed take stays valid even if the UI never receives it.
+            let (_tx, empty) = mpsc::channel();
+            drop(std::mem::replace(&mut audio.responses, empty));
+            drop(cb);
+            drop(audio);
+            assert_eq!(root.exists(), finish);
+            if finish {
+                assert_eq!(replay::info(&root).unwrap().frames, 0);
+                crate::storage::remove_tree(&PathBuf::from("var"), &root).unwrap();
+            }
+        }
+    }
+    #[test]
+    fn replay_writer_cleanup_failed_end_and_worker_error_remove_the_new_take() {
+        for failed_end in [false, true] {
+            let root =
+                PathBuf::from("var").join(format!("worker-failed-take-{}", crate::session::id()));
+            let mut writer = Some(
+                replay::Writer::begin(
+                    root.clone(),
+                    "worker.json".into(),
+                    0,
+                    AudioSnapshot::empty(8000),
+                    crate::project::data_from_config(&AppConfig::new(120, 0, 5)),
+                )
+                .unwrap(),
+            );
+            let (tx, _rx) = mpsc::channel();
+            let diagnostics = Diagnostics::default();
+            let message = if failed_end {
+                diagnostics.take_failed.store(true, Ordering::Relaxed);
+                WorkerMessage::Control {
+                    at: 0,
+                    command: Control::EndTake,
+                    accepted: true,
+                }
+            } else {
+                WorkerMessage::Audio {
+                    at: 3,
+                    len: 1,
+                    frames: [[0.0; 2]; PACKET],
+                }
+            };
+            let error = worker_message(message, &mut writer, &tx, &diagnostics).unwrap_err();
+            let _ = abort_writer(&mut writer, error);
+            assert!(writer.is_none());
+            assert!(!root.exists());
+        }
+    }
     fn callback() -> (AudioIO, Callback) {
         AudioIO::bridge(cpal::StreamConfig {
             channels: 2,

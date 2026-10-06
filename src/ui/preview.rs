@@ -32,6 +32,13 @@ pub fn configure(app: &mut MyApp, mode: &str) {
     if mode.starts_with("projects") {
         return;
     }
+    if mode.starts_with("storage")
+        || mode.starts_with("delete-project")
+        || mode.starts_with("discard-replay")
+    {
+        super::storage::preview(app, mode);
+        return;
+    }
     app.active_project_idx = Some(0);
     if mode.starts_with("performance-audio-noise") {
         app.config.input_noise.enabled = true;

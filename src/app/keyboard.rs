@@ -57,6 +57,30 @@ impl MyApp {
         }
         // Physical performance polling intentionally removes auto-repeat from
         // buttons. Panel traversal keeps the original navigation key events.
+        if self.editor.library_delete.is_some() || self.storage_ui.modal_open() {
+            self.performance_keys.suspend();
+            for index in 0..8 {
+                self.release_momentary(index);
+            }
+            self.fader_keys.fill(faders::KeyFader::default());
+            self.speed_keys.fill(faders::KeyFader::default());
+            self.clear_gesture.cancel();
+            if input.focused
+                && pressed(&input, Key::Escape)
+                && !self.storage_ui.busy()
+                && self.editor.library_delete_job.is_none()
+            {
+                if self.editor.library_delete.is_some() {
+                    self.editor.library_delete = None;
+                } else {
+                    self.storage_ui.close();
+                }
+                ctx.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::NONE, Key::Escape);
+                });
+            }
+            return;
+        }
         let navigation_input = input.clone();
         let global_keys = !typing && !self.player_open && !self.replay_browser;
         let editing_controls =

@@ -14,6 +14,7 @@ pub mod piano_roll;
 pub mod replay_panel;
 pub mod replays;
 pub mod shortcuts;
+pub mod storage;
 pub mod theme;
 pub mod visualizer;
 

@@ -188,6 +188,7 @@ pub struct InputFxState {
 }
 
 pub struct InputFxEngine {
+    shared_modulation_clock: bool,
     fine_automation: bool,
     external_only: bool,
     control_clock: super::pdc::ClockHistory,
@@ -205,6 +206,9 @@ pub struct InputFxEngine {
 }
 
 impl InputFxEngine {
+    pub fn set_shared_modulation_clock(&mut self, enabled: bool) {
+        self.shared_modulation_clock = enabled;
+    }
     pub fn set_automation_precision(&mut self, fine: bool) {
         self.fine_automation = fine;
     }
@@ -229,6 +233,7 @@ impl InputFxEngine {
     }
     pub fn new(sample_rate: f32) -> Self {
         Self {
+            shared_modulation_clock: true,
             fine_automation: true,
             external_only: false,
             control_clock: super::pdc::ClockHistory::new(sample_rate),
@@ -564,6 +569,9 @@ impl InputFxEngine {
                 ) {
                 process_osc_fx_sample(&mut state_bank.slots[idx].osc, params)
             } else {
+                state_bank.slots[idx]
+                    .poly_osc
+                    .set_shared_modulation_clock(self.shared_modulation_clock);
                 crate::dsp::oscillator::process_poly_sample(
                     &mut state_bank.slots[idx].poly_osc,
                     &osc.poly,
@@ -774,6 +782,14 @@ impl InputFxEngine {
                 crate::config::automation::Target::FilterQ,
                 filter.q,
             );
+            if self.shared_modulation_clock && lane.is_some() {
+                state_bank.slots[idx]
+                    .filter_l
+                    .set_control_frame(point.elapsed);
+                state_bank.slots[idx]
+                    .filter_r
+                    .set_control_frame(point.elapsed);
+            }
             out_l = process_filter_sample(
                 &mut state_bank.slots[idx].filter_l,
                 FilterParams {
@@ -878,6 +894,9 @@ impl InputFxEngine {
                 let point = point.unwrap();
                 if slot.enabled || latency > 0 {
                     state_bank.slots[idx].audio.set_pdc(self.pdc_enabled);
+                    state_bank.slots[idx]
+                        .audio
+                        .set_shared_modulation_clock(self.shared_modulation_clock);
                     let wet = state_bank.slots[idx].audio.process_automated(
                         audio,
                         point.bpm,
@@ -1272,6 +1291,98 @@ impl FxBankState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn filter_lane_target_phase_is_enable_independent_and_output_transition_converges() {
+        use crate::config::{
+            FxKind,
+            automation::{PPQ, ParameterLane, Target},
+            track_options::InputRouting,
+        };
+        let sr = 8000.0;
+        let mut config = InputFxConfigs::new();
+        config.set_slot_kind(0, 0, FxKind::Filter);
+        config.banks[0].slots[0].is_enabled = true;
+        let mut lane = ParameterLane::create(Target::FilterCutoff);
+        lane.enabled = true;
+        lane.length = PPQ;
+        lane.points[0].value = Target::FilterCutoff.normalized(400.0);
+        lane.points[1].tick = PPQ / 2;
+        lane.points[1].value = Target::FilterCutoff.normalized(2600.0);
+        lane.points[2].tick = PPQ;
+        lane.points[2].value = lane.points[0].value;
+        config.banks[0].slots[0].parameter_lane = lane;
+        let mut reference = InputFxEngine::new(sr);
+        reference.set_routing(InputRouting::Serial);
+        reference.set_clock(true, 137);
+        reference.swap_runtime(InputFxRuntime::from_config(&config));
+        let mut modern = InputFxEngine::new(sr);
+        modern.set_routing(InputRouting::Serial);
+        modern.set_clock(true, 137);
+        let mut legacy = InputFxEngine::new(sr);
+        legacy.set_routing(InputRouting::Serial);
+        legacy.set_clock(true, 137);
+        legacy.set_shared_modulation_clock(false);
+        let mut modern_on = InputFxRuntime::from_config(&config);
+        let mut legacy_on = modern_on.clone();
+        let mut modern_reopen = modern_on.clone();
+        let mut legacy_reopen = legacy_on.clone();
+        config.banks[0].slots[0].is_enabled = false;
+        let mut modern_off = InputFxRuntime::from_config(&config);
+        let mut legacy_off = modern_off.clone();
+        modern.swap_runtime(InputFxRuntime::from_config(&config));
+        legacy.swap_runtime(InputFxRuntime::from_config(&config));
+        let (mut settling_peak, mut modern_peak, mut legacy_peak) = (0.0f32, 0.0f32, 0.0f32);
+        // Runtime ownership swaps are excluded here: the loop checks precisely
+        // the sample path, while existing configure tests cover retirement.
+        for n in 0..16000 {
+            if n == 1373 {
+                modern_on = modern.swap_runtime(modern_on);
+                legacy_on = legacy.swap_runtime(legacy_on);
+            }
+            if n == 8705 {
+                modern_reopen = modern.swap_runtime(modern_reopen);
+                legacy_reopen = legacy.swap_runtime(legacy_reopen);
+            }
+            if n == 7301 {
+                modern_off = modern.swap_runtime(modern_off);
+                legacy_off = legacy.swap_runtime(legacy_off);
+            }
+            let active = n >= 1373 && (n < 7301 || n >= 8705);
+            let t = n as f64 / sr as f64;
+            let x = (n as f32 * 0.23).sin() * 0.1 + (n as f32 * 0.047).sin() * 0.03;
+            let count = crate::test_alloc::count(|| {
+                let a = reference.process_frame(t, x, -x, &[]);
+                let b = modern.process_frame(t, x, -x, &[]);
+                let c = legacy.process_frame(t, x, -x, &[]);
+                if active {
+                    assert_eq!(
+                        modern.state.banks[0].slots[0].filter_l.target_cutoff(),
+                        reference.state.banks[0].slots[0].filter_l.target_cutoff(),
+                        "Target phase changed at {n}"
+                    );
+                    let error = (a.0 - b.0).abs().max((a.1 - b.1).abs());
+                    if n < 3373 || (8705..10705).contains(&n) {
+                        settling_peak = settling_peak.max(error);
+                    } else {
+                        modern_peak = modern_peak.max(error);
+                        legacy_peak = legacy_peak.max((a.0 - c.0).abs().max((a.1 - c.1).abs()));
+                    }
+                }
+            });
+            assert_eq!(count, 0);
+        }
+        println!(
+            "Filter lane enable transition max={settling_peak:e}; settled source-grid max={modern_peak:e}; old local-grid max={legacy_peak:e}"
+        );
+        assert!(
+            modern_peak < 0.00001,
+            "Persistent filter control-grid mismatch: {modern_peak}"
+        );
+        assert!(
+            legacy_peak > modern_peak * 4.0 + 1e-6,
+            "The fixture must expose the old offset: {legacy_peak}/{modern_peak}"
+        );
+    }
     #[test]
     fn stepped_modulation_and_phase_restart_follow_pdc_source_clock() {
         use crate::config::{FxKind, audio_fx::AudioFxKind as K, track_options::InputRouting};

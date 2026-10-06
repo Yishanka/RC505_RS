@@ -34,6 +34,7 @@ use crate::config::vocoder_configs::{
 use crate::config::{AppConfig, FxKind, InputFx, TrackFx, TrackFxKind};
 
 const INDEX_FILE: &str = "projects_index.json";
+pub mod storage;
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectEntry {
@@ -555,7 +556,17 @@ pub fn missing_saved_sample_count(config: &AppConfig) -> usize {
 
 pub fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
     use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Storage path has no parent"))?;
+    crate::storage::checked_directory(parent)?;
+    if crate::storage::exists(path)? {
+        crate::storage::managed_child(parent, path)?;
+    }
     let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    if crate::storage::exists(&temporary)? {
+        crate::storage::managed_child(parent, &temporary)?;
+    }
     let result = (|| -> anyhow::Result<()> {
         let mut file = fs::File::create(&temporary)?;
         file.write_all(bytes)?;
@@ -606,27 +617,12 @@ pub fn persistable_data(data: &ProjectData) -> anyhow::Result<ProjectData> {
 }
 
 pub fn save_project_data(entry: &ProjectEntry, data: &ProjectData) -> anyhow::Result<()> {
-    use fs2::FileExt;
     let data = persistable_data(data)?;
     ensure_project_dir()?;
-    let path = crate::session::safe_child(&projects_root(), &entry.file)?;
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(path.with_extension("lock"))?;
-    lock.try_lock_exclusive()
-        .map_err(|_| anyhow::anyhow!("Project is being saved by another process"))?;
-    if path.exists() {
-        fs::copy(&path, path.with_extension("json.bak"))?;
-    }
-    atomic_write(&path, &serde_json::to_vec_pretty(&data)?)
-}
-
-pub fn remove_project_file(file: &str) {
-    let path = project_file_path(file);
-    let _ = fs::remove_file(path);
+    let root = projects_root();
+    let _lock = storage::lock_project(&root, entry)?;
+    storage::write_locked(&root, entry, &data)?;
+    storage::prune_after_save(&root, entry)
 }
 
 pub fn make_project_file_name(name: &str, idx: usize) -> String {
@@ -657,49 +653,6 @@ fn recover_index() -> Vec<ProjectEntry> {
             })
         })
         .collect()
-}
-
-pub fn trash_project(entry: &ProjectEntry) -> anyhow::Result<()> {
-    let root = projects_root().join("trash").join(crate::session::id());
-    fs::create_dir_all(&root)?;
-    // Persist recovery metadata first; all paths are validated single components.
-    atomic_write(&root.join("entry.json"), &serde_json::to_vec(entry)?)?;
-    let source = crate::session::safe_child(&projects_root(), &entry.file)?;
-    if source.exists() {
-        fs::rename(&source, root.join(&entry.file))?;
-    }
-    let assets = crate::session::project_assets(entry)?;
-    if assets.exists() {
-        fs::rename(&assets, root.join("assets"))?;
-    }
-    Ok(())
-}
-pub fn restore_last_deleted() -> anyhow::Result<Option<ProjectEntry>> {
-    let mut entries: Vec<_> = fs::read_dir(projects_root().join("trash"))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.path().join("entry.json").exists())
-        .collect();
-    entries.sort_by_key(|e| e.file_name());
-    let Some(last) = entries.pop() else {
-        return Ok(None);
-    };
-    let root = last.path();
-    let entry: ProjectEntry = serde_json::from_slice(&fs::read(root.join("entry.json"))?)?;
-    let destination = crate::session::safe_child(&projects_root(), &entry.file)?;
-    anyhow::ensure!(
-        !destination.exists() && !crate::session::project_assets(&entry)?.exists(),
-        "Project identity already exists; restore will not overwrite it"
-    );
-    if root.join(&entry.file).exists() {
-        fs::rename(root.join(&entry.file), destination)?;
-    }
-    if root.join("assets").exists() {
-        fs::rename(root.join("assets"), crate::session::project_assets(&entry)?)?;
-    }
-    fs::rename(root.join("entry.json"), root.join("restored.json"))?;
-    Ok(Some(entry))
 }
 
 pub fn data_from_config(config: &AppConfig) -> ProjectData {
@@ -1480,16 +1433,12 @@ fn projects_root() -> PathBuf {
 }
 
 fn ensure_project_dir() -> anyhow::Result<()> {
-    fs::create_dir_all(projects_root())?;
+    crate::storage::ensure_directory(&projects_root())?;
     Ok(())
 }
 
 fn index_path() -> PathBuf {
     projects_root().join(INDEX_FILE)
-}
-
-fn project_file_path(file: &str) -> PathBuf {
-    projects_root().join(file)
 }
 
 fn sanitize_name(name: &str) -> String {

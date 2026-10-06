@@ -41,6 +41,7 @@ impl AudioFxParams {
 
 #[derive(Clone)]
 pub struct AudioFxState {
+    shared_modulation_clock: bool,
     pdc: bool,
     aligned_dry: [f32; 2],
     pitch: [super::pitch_shift::PitchShift; 2],
@@ -120,6 +121,7 @@ impl AudioFxState {
         let mut reverb = ReverbDspState::new();
         reverb.prepare(sr);
         Self {
+            shared_modulation_clock: true,
             pdc: false,
             aligned_dry: [0.0; 2],
             stagger,
@@ -202,6 +204,9 @@ impl AudioFxState {
     }
     pub fn set_pdc(&mut self, enabled: bool) {
         self.pdc = enabled;
+    }
+    pub fn set_shared_modulation_clock(&mut self, enabled: bool) {
+        self.shared_modulation_clock = enabled;
     }
     pub fn aligned_dry(&self) -> (f32, f32) {
         (self.aligned_dry[0], self.aligned_dry[1])
@@ -423,7 +428,8 @@ impl AudioFxState {
     ) -> (f32, f32) {
         use super::automation::Value;
         use crate::config::automation::Target;
-        if self.signature != r.signature || self.kind != Some(r.config.kind) {
+        let first_kind = self.kind != Some(r.config.kind);
+        if self.signature != r.signature || first_kind {
             self.configure(r);
         }
         let p = &r.config;
@@ -442,23 +448,32 @@ impl AudioFxState {
         };
         // Sync uses the shared sample clock, so replay/offline and live agree.
         let phase = if p.sync_beats > 0.0 && clock_active {
-            (elapsed * freq as f64).fract() as f32
+            if self.shared_modulation_clock {
+                super::audio_modulation::synced_cycle(elapsed, bpm, self.sr, p.sync_beats)
+            } else {
+                (elapsed * freq as f64).fract() as f32
+            }
         } else {
             self.phase as f32
         };
         self.phase = (self.phase + freq as f64 / self.sr as f64).fract();
         let shape_controls = matches!(p.kind, K::AutoPan | K::Tremolo);
         let phase = if shape_controls || matches!(p.kind, K::Phaser | K::Flanger) {
-            self.modulation.phase(
-                p,
-                phase,
-                freq,
-                elapsed,
-                clock_active,
-                bpm,
-                self.sr,
-                shape_controls,
-            )
+            if self.shared_modulation_clock && p.sync_beats > 0.0 && clock_active {
+                self.modulation
+                    .synced_phase(p, elapsed, bpm, self.sr, shape_controls)
+            } else {
+                self.modulation.phase(
+                    p,
+                    phase,
+                    freq,
+                    elapsed,
+                    clock_active,
+                    bpm,
+                    self.sr,
+                    shape_controls,
+                )
+            }
         } else {
             phase
         };
@@ -649,6 +664,10 @@ impl AudioFxState {
                 wet = [y.0, y.1];
             }
             K::Phaser => {
+                if self.shared_modulation_clock && p.sync_beats > 0.0 && clock_active {
+                    self.control_tick =
+                        (((elapsed.max(0.0) * self.sr as f64).round() as u64) % 16) as u8;
+                }
                 self.phaser_shift += (self.phaser_shift_target - self.phaser_shift) * self.smooth;
                 if self.phaser_fade_left == 0 && self.phaser_stages != self.phaser_target_stages {
                     self.phaser_old = self.phaser;
@@ -659,7 +678,12 @@ impl AudioFxState {
                     self.phaser_stages = self.phaser_target_stages;
                     self.phaser_fade_left = (self.sr * 0.005).round().max(1.0) as usize;
                 }
-                if self.control_tick == 0 {
+                if self.control_tick == 0
+                    || (first_kind
+                        && self.shared_modulation_clock
+                        && p.sync_beats > 0.0
+                        && clock_active)
+                {
                     let hz =
                         (200.0 * 20.0_f32.powf((0.5 + 0.5 * lfo) * p.depth) * self.phaser_shift)
                             .max(20.0);
@@ -904,6 +928,39 @@ pub fn harmony(note: f32, root: u8, scale: Scale, steps: i8) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn free_hz_modulation_keeps_legacy_audio_and_sync_phaser_initializes_immediately() {
+        for kind in [K::AutoPan, K::Tremolo, K::Phaser, K::Flanger] {
+            let mut p = AudioFxConfig::new(kind);
+            p.sync_beats = 0.0;
+            p.rate_hz = 1.7;
+            p.mod_stepped = true;
+            p.mod_step_hz = 3.7;
+            p.mod_retrigger = false;
+            let runtime = AudioFxParams::new(&p);
+            let mut modern = AudioFxState::new(8000.0);
+            let mut old = AudioFxState::new(8000.0);
+            old.set_shared_modulation_clock(false);
+            for frame in 0..5000 {
+                let x = (frame as f32 * 0.17).sin() * 0.1;
+                let t = frame as f64 / 8000.0;
+                assert_eq!(
+                    modern.process(&runtime, 137, t, true, (x, -x)),
+                    old.process(&runtime, 137, t, true, (x, -x)),
+                    "Free Hz changed for {kind:?}"
+                );
+            }
+        }
+        let mut p = AudioFxConfig::new(K::Phaser);
+        p.sync_beats = 1.0;
+        let runtime = AudioFxParams::new(&p);
+        let mut state = AudioFxState::new(8000.0);
+        state.process(&runtime, 137, 1373.0 / 8000.0, true, (0.1, 0.1));
+        assert_ne!(
+            state.phaser_a, 0.0,
+            "First initialization cannot wait until frame %16 is zero"
+        );
+    }
     #[test]
     fn diatonic_harmonies_follow_key_and_scale() {
         assert_eq!(harmony(60.0, 0, Scale::Major, 2), 64.0);

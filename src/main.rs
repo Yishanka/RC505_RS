@@ -11,6 +11,7 @@ mod project;
 mod replay;
 mod session;
 mod state;
+mod storage;
 #[cfg(test)]
 mod test_alloc;
 mod ui;

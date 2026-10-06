@@ -2,6 +2,18 @@ use super::*;
 use crate::engine::core::{AudioSnapshot, Parameters};
 
 impl MyApp {
+    pub(super) fn saved_cleanup_warning(&mut self, error: String) {
+        self.saving = false;
+        self.exit_after_save = false;
+        self.update_after_save = false;
+        self.status = format!(
+            "{} {error}",
+            self.language.choose(
+                "Saved; unused audio cleanup needs attention in Storage.",
+                "已保存；部分未引用音频未能清理，请在数据管理中重试。"
+            )
+        );
+    }
     pub fn set_follow_output(&mut self, follow: bool) {
         self.config.system_config.follow_system_output = follow;
         self.output_endpoint_id.clear();
@@ -268,6 +280,9 @@ impl MyApp {
             })();
             let _ = tx.send(match result {
                 Ok(()) => JobResult::Saved,
+                Err(e) if e.is::<project::storage::SaveCleanupWarning>() => {
+                    JobResult::SavedCleanupWarning(e.to_string())
+                }
                 Err(e) => JobResult::Error(format!("Save failed: {e}")),
             });
         });
@@ -362,7 +377,7 @@ impl MyApp {
     }
     pub fn keep_take(&mut self) {
         // Keep the valid draft in the on-disk replay browser for crash recovery;
-        // discarding here dismisses the prompt, it never recursively deletes data.
+        // Keeping a draft dismisses the prompt and retains its replay files.
         self.draft = None;
         self.status = "Draft kept in replay history. You can reopen it later.".into();
         self.replay_list = crate::replay::library::list();

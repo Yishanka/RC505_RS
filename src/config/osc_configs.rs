@@ -77,6 +77,18 @@ pub struct OscillatorConfigs {
 }
 
 impl OscillatorConfigs {
+    /// Clearing also rejects a late import/capture result, so it cannot restore
+    /// a source that the user has just removed.
+    pub fn clear_sample(&mut self) {
+        self.capture = None;
+        self.capture_serial = self.capture_serial.wrapping_add(1);
+        self.sample_job = None;
+        self.sample = None;
+        self.sample_ref = None;
+        self.sample_temporary = true;
+        self.sample_message.clear();
+    }
+
     pub fn new() -> Self {
         Self {
             sel_idx: None,

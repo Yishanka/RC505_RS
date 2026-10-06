@@ -123,6 +123,7 @@ pub struct TrackFxState {
 }
 
 pub struct TrackFxEngine {
+    shared_modulation_clock: bool,
     fine_automation: bool,
     pdc_enabled: bool,
     raw_carriers: [Option<(f32, f32)>; 5],
@@ -152,12 +153,16 @@ impl TrackFilterDspState {
 }
 
 impl TrackFxEngine {
+    pub fn set_shared_modulation_clock(&mut self, enabled: bool) {
+        self.shared_modulation_clock = enabled;
+    }
     pub fn set_automation_precision(&mut self, fine: bool) {
         self.fine_automation = fine;
     }
     pub fn new(sample_rate: f32, track_count: usize) -> Self {
         let sr = sample_rate.max(1.0);
         Self {
+            shared_modulation_clock: true,
             fine_automation: true,
             pdc_enabled: false,
             raw_carriers: [None; 5],
@@ -432,6 +437,9 @@ impl TrackFxEngine {
 
             if let Some(audio) = &slot.audio {
                 bank_state.slots[idx].audio.set_pdc(self.pdc_enabled);
+                bank_state.slots[idx]
+                    .audio
+                    .set_shared_modulation_clock(self.shared_modulation_clock);
                 let wet = bank_state.slots[idx].audio.process_automated(
                     audio,
                     point.bpm,
@@ -518,6 +526,16 @@ impl TrackFxEngine {
             }
 
             if let Some(filter) = slot.filter.as_ref() {
+                if self.shared_modulation_clock && lane.is_some() {
+                    bank_state.slots[idx]
+                        .filter
+                        .filter_l
+                        .set_control_frame(point.elapsed);
+                    bank_state.slots[idx]
+                        .filter
+                        .filter_r
+                        .set_control_frame(point.elapsed);
+                }
                 let cutoff_hz = crate::dsp::automation::Value::get(
                     lane,
                     crate::config::automation::Target::FilterCutoff,
@@ -713,6 +731,74 @@ impl TrackFxBankState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn late_synced_fx_enable_and_reopen_match_unequal_tracks_at_pdc_source_time() {
+        use crate::config::{TrackFxKind, audio_fx::AudioFxKind as K};
+        let sr = 8000.0;
+        let latency = crate::dsp::pitch_shift::latency_frames(sr);
+        for beat_step in [0.0, 0.25] {
+            let mut config = TrackFxConfigs::new(2);
+            config.set_slot_kind(0, 0, TrackFxKind::Audio(K::Transpose));
+            config.set_slot_kind(0, 1, TrackFxKind::Audio(K::Tremolo));
+            if let Some(TrackFx::Audio(p)) = config.slot_fx_mut(0, 1) {
+                p.sync_beats = 1.5;
+                p.mod_stepped = true;
+                p.mod_step_beats = beat_step;
+                p.mod_step_hz = 3.7;
+                p.mod_retrigger = false;
+                p.depth = 1.0;
+                p.mix = 1.0;
+            }
+            for track in 0..2 {
+                config.tracks[track].enabled[0][0] = true;
+                config.tracks[track].enabled[0][1] = true;
+            }
+            let mut on = TrackFxRuntime::from_config(&config);
+            let mut reopen = on.clone();
+            config.tracks[1].enabled[0][1] = false;
+            let mut off = TrackFxRuntime::from_config(&config);
+            let mut engine = TrackFxEngine::new(sr, 2);
+            engine.set_pdc(true);
+            engine.exchange_runtime(&mut TrackFxRuntime::from_config(&config));
+            let count = crate::test_alloc::count(|| {
+                for frame in 0..14000 {
+                    if frame == 1739 {
+                        engine.exchange_runtime(&mut on);
+                    }
+                    if frame == 4301 {
+                        engine.exchange_runtime(&mut off);
+                    }
+                    if frame == 5717 {
+                        engine.exchange_runtime(&mut reopen);
+                    }
+                    let active = !(8000..9300).contains(&frame);
+                    let origin = if frame >= 9300 { 9300 } else { 0 };
+                    let elapsed = if active {
+                        (frame - origin) as f64 / sr as f64
+                    } else {
+                        0.0
+                    };
+                    engine.set_clock(137, active);
+                    engine.set_transport_elapsed(elapsed);
+                    let a = engine.process_frame(0, (frame % 797) as f64 / sr as f64, 0.2, 0.1);
+                    let b = engine.process_frame(
+                        1,
+                        ((frame + 239) % 1301) as f64 / sr as f64,
+                        0.2,
+                        0.1,
+                    );
+                    let enabled = (1739..4301).contains(&frame) || frame >= 5717;
+                    if enabled && (frame < 8000 || frame >= 9300 + latency) {
+                        assert!(
+                            (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6,
+                            "step{beat_step},frame{frame}: {a:?}/{b:?}"
+                        );
+                    }
+                }
+            });
+            assert_eq!(count, 0);
+        }
+    }
     #[test]
     fn equal_final_filter_curve_has_equal_audio_after_different_edit_and_codec_paths() {
         use crate::{

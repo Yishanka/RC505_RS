@@ -8,7 +8,9 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
+mod library;
 mod sample_reference;
+pub use library::{DeleteJob, DeleteSoundResult, start_delete_clip, start_delete_sound};
 pub use sample_reference::{localize_replay_samples, read_saved_sample, resolve_project_samples};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,15 +180,8 @@ pub fn save(config: &mut AppConfig, target: FxTarget, name: &str) -> Result<()> 
     }
     let text = encode(config, target)?;
     fs::create_dir_all(root())?;
-    // Create-new avoids silently replacing a user's preset with the same name.
-    use std::io::Write;
-    let mut output = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
+    write_new(&path, text.as_bytes())
         .context("Preset already exists or cannot be created; choose a new name")?;
-    output.write_all(text.as_bytes())?;
-    output.sync_all()?;
     sample_reference::mark_saved(config, target, name, &text);
     Ok(())
 }
@@ -524,13 +519,26 @@ pub fn save_clip(config: &AppConfig, target: FxTarget, name: &str) -> Result<()>
     );
     let text = serde_json::to_string_pretty(&ClipFile { version: 1, clip })?;
     fs::create_dir_all(clip_root())?;
+    write_new(&path, text.as_bytes()).context("Clip already exists; choose another name")?;
+    Ok(())
+}
+
+fn write_new(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
-    fs::OpenOptions::new()
+    let mut output = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)
-        .context("Clip already exists; choose another name")?
-        .write_all(text.as_bytes())?;
+        .open(path)?;
+    let result = output.write_all(bytes).and_then(|_| output.sync_all());
+    drop(output);
+    if let Err(error) = result {
+        // Only this create-new operation owns the incomplete file.
+        if let Err(cleanup) = fs::remove_file(path) {
+            return Err(error)
+                .with_context(|| format!("Incomplete preset could not be removed: {cleanup}"));
+        }
+        return Err(error.into());
+    }
     Ok(())
 }
 pub fn load_clip(config: &mut AppConfig, target: FxTarget, name: &str) -> Result<()> {

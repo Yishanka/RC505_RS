@@ -258,13 +258,18 @@ fn sample_controls(ui: &mut egui::Ui, osc: &mut OscillatorConfigs) {
             });
         }
         capture_button(ui, osc);
-        if (osc.sample.is_some() || osc.sample_ref.is_some())
-            && button(ui, lang.choose("Clear sample", "移除采样")).clicked()
+        if (osc.sample.is_some()
+            || osc.sample_ref.is_some()
+            || osc.sample_job.is_some()
+            || osc.capture.is_some())
+            && button(ui, lang.choose("Clear current sample", "清除当前采样"))
+                .on_hover_text(lang.choose(
+                    "Remove this slot's sample. Saved sounds are managed in the sound library.",
+                    "移除此槽的采样；已保存音色可在音色库中删除。",
+                ))
+                .clicked()
         {
-            osc.sample = None;
-            osc.sample_ref = None;
-            osc.sample_temporary = true;
-            osc.sample_message.clear();
+            osc.clear_sample();
         }
     });
     // A dropped WAV uses the same bounded worker import path as the native picker.

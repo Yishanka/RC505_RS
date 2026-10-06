@@ -1,3 +1,5 @@
+#[path = "library_delete.rs"]
+mod library_delete;
 #[path = "synth_controls.rs"]
 mod synth_controls;
 use super::{
@@ -11,6 +13,7 @@ use crate::{
     presets::{self, FxTarget},
 };
 use eframe::egui;
+pub use library_delete::{LibraryDelete, draw as draw_library_delete};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum EditorPage {
@@ -38,6 +41,8 @@ pub struct EditorState {
     pub clips: Vec<String>,
     pub presets: Vec<String>,
     pub candidate: Option<presets::SoundCandidate>,
+    pub library_delete: Option<LibraryDelete>,
+    pub library_delete_job: Option<presets::DeleteJob>,
     pub message: String,
 }
 
@@ -58,6 +63,8 @@ impl Default for EditorState {
             clips: presets::list_clips(),
             presets: presets::list(),
             candidate: None,
+            library_delete: None,
+            library_delete_job: None,
             message: String::new(),
         }
     }
@@ -100,6 +107,7 @@ impl EditorState {
             self.page = EditorPage::Sound;
             self.message.clear();
             self.candidate = None;
+            self.library_delete = None;
         }
         self.target = Some(target);
     }
@@ -198,9 +206,17 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
                 }
                 let response=egui::ComboBox::from_id_source("load_preset").selected_text(lang.choose("Browse sounds…","浏览候选音色…")).show_ui(ui, |ui| {
                     for name in app.editor.presets.clone() {
-                        if ui.selectable_label(false, &name).clicked() {
-                            app.choose_preset_candidate(target,&name);
-                        }
+                        ui.horizontal(|ui| {
+                            if ui.selectable_label(false, &name).clicked() {
+                                app.choose_preset_candidate(target,&name);
+                                ui.close_menu();
+                            }
+                            if ui.add_enabled(!app.read_only, egui::Button::new(lang.choose("Delete…", "删除…"))).clicked() {
+                                app.editor.library_delete = Some(LibraryDelete::Sound(name.clone()));
+                                app.editor.message.clear();
+                                ui.close_menu();
+                            }
+                        });
                     }
                 });super::navigation::register(response.response);
             });
@@ -239,11 +255,19 @@ pub fn draw(ui: &mut egui::Ui, app: &mut MyApp, full: bool) {
                     };
                 }
                 let response=egui::ComboBox::from_id_source("load_clip").selected_text(lang.choose("Load phrase…", "载入乐句…")).show_ui(ui,|ui| {
-                    for name in app.editor.clips.clone() {if ui.selectable_label(false,&name).clicked() {
-                        let previous=presets::note_mut(&mut app.config,target).map(|n|piano_roll::Snapshot::capture(n));
-                        let next=super::phrases::next_loop(app,target);
-                        app.editor.message=match presets::load_clip_timed(&mut app.config,target,&name,next) {Ok(())=>{if let (Some(previous),Some(note))=(previous,presets::note_mut(&mut app.config,target)){app.editor.piano.remember_state(previous,note);}format!("{} {name}",lang.choose("Loaded", "已载入"))},Err(e)=>e.to_string()};
-                    }}
+                    for name in app.editor.clips.clone() {ui.horizontal(|ui| {
+                        if ui.selectable_label(false,&name).clicked() {
+                            let previous=presets::note_mut(&mut app.config,target).map(|n|piano_roll::Snapshot::capture(n));
+                            let next=super::phrases::next_loop(app,target);
+                            app.editor.message=match presets::load_clip_timed(&mut app.config,target,&name,next) {Ok(())=>{if let (Some(previous),Some(note))=(previous,presets::note_mut(&mut app.config,target)){app.editor.piano.remember_state(previous,note);}format!("{} {name}",lang.choose("Loaded", "已载入"))},Err(e)=>e.to_string()};
+                            ui.close_menu();
+                        }
+                        if ui.add_enabled(!app.read_only, egui::Button::new(lang.choose("Delete…", "删除…"))).clicked() {
+                            app.editor.library_delete = Some(LibraryDelete::Phrase(name.clone()));
+                            app.editor.message.clear();
+                            ui.close_menu();
+                        }
+                    });}
                 });super::navigation::register(response.response);
                 if let Some(clip)=presets::clip(&app.config,target) {if !clip.name.is_empty(){ui.label(format!("{} → {}",clip.name,target.label()));}}
             });

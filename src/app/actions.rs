@@ -118,40 +118,9 @@ impl MyApp {
         self.project_name_mode = None;
         self.open_project(index);
     }
-    pub fn trash_project(&mut self) {
-        if self.read_only || self.busy() || self.sel_project_idx >= self.projects.len() {
-            return;
-        }
-        let entry = self.projects[self.sel_project_idx].clone();
-        if let Err(error) = crate::replay::library::migrate(&self.projects) {
-            self.status = format!("Cannot detach replays before deleting project: {error}");
-            return;
-        }
-        match project::trash_project(&entry) {
-            Ok(()) => {
-                self.projects.remove(self.sel_project_idx);
-                self.sel_project_idx = self
-                    .sel_project_idx
-                    .min(self.projects.len().saturating_sub(1));
-                let _ = project::save_index(&self.projects);
-                self.status =
-                    "Project moved to Trash; use Restore last deleted to recover it.".into();
-            }
-            Err(e) => self.status = e.to_string(),
-        }
-    }
-    pub fn restore_project(&mut self) {
-        if self.read_only || self.busy() {
-            return;
-        }
-        match project::restore_last_deleted() {
-            Ok(Some(entry)) => {
-                self.projects.push(entry);
-                let _ = project::save_index(&self.projects);
-                self.status = "Deleted project restored.".into();
-            }
-            Ok(None) => self.status = "Trash is empty.".into(),
-            Err(e) => self.status = e.to_string(),
+    pub fn request_delete_project(&mut self) {
+        if let Some(entry) = self.projects.get(self.sel_project_idx).cloned() {
+            self.request_storage_action(crate::ui::storage::Action::Project(entry));
         }
     }
     pub fn focus_panel(&mut self, ctx: &egui::Context, focus: Focus) {

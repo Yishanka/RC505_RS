@@ -301,17 +301,56 @@ pub fn read_bundle(root: &Path) -> Result<(AudioSnapshot, ProjectData)> {
 pub fn save_snapshot(
     entry: &ProjectEntry,
     snapshot: &AudioSnapshot,
+    data: ProjectData,
+) -> Result<String> {
+    save_snapshot_in(
+        &crate::app_support::paths::projects_dir(),
+        entry,
+        snapshot,
+        data,
+    )
+}
+pub(crate) fn save_snapshot_in(
+    projects: &Path,
+    entry: &ProjectEntry,
+    snapshot: &AudioSnapshot,
     mut data: ProjectData,
 ) -> Result<String> {
     data = project::persistable_data(&data)?;
+    crate::storage::ensure_directory(projects)?;
+    let _lock = project::storage::lock_project(&projects, entry)?;
     let revision = id();
-    let root = project_assets(entry)?.join("snapshots");
-    fs::create_dir_all(&root)?;
+    project::storage::project_path(projects, entry)?;
+    let assets = projects.join(format!("{}.assets", entry.file));
+    if crate::storage::exists(&assets)? {
+        crate::storage::checked_directory(&assets)?;
+    }
+    let root = assets.join("snapshots");
+    crate::storage::ensure_directory(&root)?;
     let temporary = root.join(format!("{revision}.pending"));
-    write_bundle(&temporary, snapshot, data.clone())?;
-    fs::rename(&temporary, root.join(&revision))?;
+    crate::storage::checked_directory(&root)?;
+    let committed = root.join(&revision);
+    let result = (|| -> Result<()> {
+        write_bundle(&temporary, snapshot, data.clone())?;
+        fs::rename(&temporary, &committed)?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        if temporary.exists() {
+            crate::storage::remove_tree(&root, &temporary).context(format!(
+                "Snapshot was not saved ({error}); temporary audio cleanup failed"
+            ))?;
+        }
+        return Err(error);
+    }
     data.snapshot = Some(revision.clone());
-    project::save_project_data(entry, &data)?;
+    if let Err(error) = project::storage::write_locked(&projects, entry, &data) {
+        crate::storage::remove_tree(&root, &committed).context(format!(
+            "Snapshot was not saved ({error}); temporary audio cleanup failed"
+        ))?;
+        return Err(error);
+    }
+    project::storage::prune_after_save(&projects, entry)?;
     Ok(revision)
 }
 pub fn load_snapshot(entry: &ProjectEntry, revision: &str) -> Result<AudioSnapshot> {
