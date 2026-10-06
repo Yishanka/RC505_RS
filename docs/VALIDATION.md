@@ -2,6 +2,8 @@
 
 ## 0.4.8 验证（2026-10-06）
 
+- `43357e8`及`v0.4.8`已推送，[主分支](https://github.com/Yishanka/RC505_RS/actions/runs/37471622988)和[发布构建](https://github.com/Yishanka/RC505_RS/actions/runs/37471623207)的检查、测试与打包通过。[安装包与便携包](https://github.com/Yishanka/RC505_RS/releases/tag/v0.4.8)已发布，latest清单和校验单一致；安装器SHA-256为`a6ba4499b39acd40431d373cea2f59528ba7948d2d0bce136e4124fcb776bd69`。
+- 清理9个中间补丁Release并精简7个历史页面；保留初始版本、`v0.1.1-alpha`、主要功能节点及近期回退点，共10个Release。远端原有20个源码标签的对象ID逐一核对不变，另新增`v0.4.8`。
 - 旧安装脚本在隔离身份、未传DATADIR时复现`Runtime error (at 1:1281)`及`app constant before it was initialized`，退出码1；修复后同一入口正常。
 - Inno隔离安装矩阵覆盖完全不传路径参数的首装、显式自定义路径更新、无参数重装保留目录。实际向导控件与事件另验证返回修改程序目录、手动数据目录不被覆盖、参数优先级、安装准备及路径摘要；数据标记哈希与单安装包缓存检查通过。测试身份不创建正式产品注册或快捷方式。
 - 全目标检查与342项Rust测试、3项发布工具测试、主程序及启动器release构建通过。源码标签保留策略和新版本未发布时禁止历史清理均有测试。
