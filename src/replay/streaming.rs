@@ -1517,12 +1517,14 @@ mod tests {
         .unwrap();
         let (mut consumer, session) = start(&root, 8000).unwrap();
         wait_until(|| session.shared.failed.load(Ordering::Acquire));
-        assert!(
+        // The worker publishes the failure flag before sending its display
+        // event. Wait for both rather than racing the channel send.
+        wait_until(|| {
             session
                 .display
                 .try_iter()
                 .any(|message| matches!(message, DisplayEvent::Error(_)))
-        );
+        });
         assert_eq!(session.shared.position(), 0);
         session.shared.seek(5900);
         session.shared.toggle();

@@ -18,7 +18,7 @@ use std::{
 };
 
 // v7 excludes internally generated audio from physical input compensation.
-pub const RENDERER_VERSION: u32 = 10;
+pub const RENDERER_VERSION: u32 = 11;
 mod assets;
 mod delta;
 pub mod library;
@@ -599,6 +599,11 @@ mod tests {
                     3100 => {
                         config.track_levels[0] = 0.37;
                         config.master_fx.compressor_enabled = true;
+                        if renderer >= 11 {
+                            config.master_fx.filter_enabled = true;
+                            config.master_fx.filter.cutoff_hz = 700;
+                            config.master_fx.filter.resonance_x10 = 12;
+                        }
                         config.master_fx.reverb_enabled = true;
                         config.master_fx.compressor.threshold_db = -24.0;
                         config.master_fx.compressor.ratio = 4.0;
@@ -625,6 +630,7 @@ mod tests {
                     _ => {
                         config.input_thru = true;
                         config.master_fx.compressor.threshold_db = -18.0;
+                        config.master_fx.filter.cutoff_hz = 1600;
                     }
                 }
                 let data = crate::project::data_from_config(&config);

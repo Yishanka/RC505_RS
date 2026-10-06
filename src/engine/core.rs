@@ -1787,6 +1787,27 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn master_filter_changes_monitor_output_but_never_recorded_input() {
+        let mut config = AppConfig::new(120, 0, 5);
+        config.input_thru = true;
+        config.track_options[0].quantize = crate::config::track_options::Quantize::Off;
+        config.master_fx.filter_enabled = true;
+        config.master_fx.filter.filter_type = crate::config::filter_configs::FilterType::Hpf;
+        config.master_fx.filter.cutoff_hz = 1000;
+        let mut core = core();
+        core.configure(&mut Parameters::from_config(&config, 8000));
+        core.action(Action::Trigger(0), &mut OfflinePages);
+        let mut out = [0.0; 2];
+        for _ in 0..2000 {
+            out = core.process([0.4, -0.2], &mut OfflinePages);
+        }
+        assert!(
+            out.iter().all(|v| v.abs() < 0.0001),
+            "HPF did not reject DC: {out:?}"
+        );
+        assert_eq!(core.tracks[0].audio.read(1900), [0.4, -0.2]);
+    }
     fn record(core: &mut RenderCore, length: usize) {
         core.action(Action::Trigger(0), &mut OfflinePages);
         for i in 0..length {

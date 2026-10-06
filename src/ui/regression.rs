@@ -320,7 +320,26 @@ fn mouse_fader_keyboard_regression(ctx: &egui::Context, app: &mut MyApp, time: &
     );
     // Master parameters allow performance shortcuts as well.
     app.master_fx_open = true;
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new("master-fx-window").with("page"), 0_u8));
     frame(ctx, app, time, vec![]);
+    let cutoff = ctx
+        .data(|data| {
+            data.get_temp::<egui::Id>(egui::Id::new((
+                "parameter",
+                app.language.text("Cutoff(Hz)"),
+            )))
+        })
+        .expect("Master filter cutoff must be rendered");
+    ctx.memory_mut(|memory| memory.request_focus(cutoff));
+    frame(ctx, app, time, vec![]);
+    let before = app.config.master_fx.filter.cutoff_hz;
+    press(ctx, app, time, Key::ArrowRight, Modifiers::NONE);
+    assert_eq!(app.config.master_fx.filter.cutoff_hz, before + 1);
+    press(ctx, app, time, Key::ArrowDown, Modifiers::NONE);
+    let q = app.config.master_fx.filter.resonance_x10;
+    press(ctx, app, time, Key::ArrowRight, Modifiers::NONE);
+    assert_eq!(app.config.master_fx.filter.resonance_x10, q + 1);
+    assert_eq!(app.config.master_fx.filter.cutoff_hz, before + 1);
     let monitor = app.config.input_thru;
     press(ctx, app, time, Key::J, Modifiers::NONE);
     assert_ne!(app.config.input_thru, monitor);

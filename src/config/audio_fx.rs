@@ -224,10 +224,12 @@ pub struct AudioFxConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MasterFxConfig {
+    pub filter_enabled: bool,
     pub compressor_enabled: bool,
     pub reverb_enabled: bool,
     pub compressor: AudioFxConfig,
     pub reverb: AudioFxConfig,
+    pub filter: super::filter_configs::FilterSettings,
 }
 impl Default for MasterFxConfig {
     fn default() -> Self {
@@ -235,16 +237,19 @@ impl Default for MasterFxConfig {
         compressor.ratio = 2.0;
         compressor.threshold_db = -12.0;
         Self {
+            filter_enabled: false,
             compressor_enabled: false,
             reverb_enabled: false,
             compressor,
             reverb: AudioFxConfig::new(AudioFxKind::Reverb),
+            filter: super::filter_configs::FilterSettings::default(),
         }
     }
 }
 impl MasterFxConfig {
     pub fn sanitized(&self) -> Self {
         let mut result = *self;
+        result.filter = result.filter.sanitized();
         result.compressor = result.compressor.sanitized();
         result.reverb = result.reverb.sanitized();
         result.compressor.kind = AudioFxKind::Dynamics;

@@ -1736,6 +1736,12 @@ mod audio_effect_tests {
             }
             config.master_fx.compressor_enabled = true;
             config.master_fx.compressor.threshold_db = -25.5;
+            config.master_fx.filter_enabled = true;
+            config.master_fx.filter.filter_type = crate::config::filter_configs::FilterType::Hpf;
+            config.master_fx.filter.cutoff_hz = 321;
+            config.master_fx.filter.resonance_x10 = 13;
+            config.master_fx.filter.drive = 17;
+            config.master_fx.filter.mix = 82;
             config.master_fx.reverb_enabled = true;
             config.master_fx.reverb.decay_ms = 4200.0;
             let saved = data_from_config(&config);
@@ -1754,6 +1760,26 @@ mod audio_effect_tests {
             );
             assert_eq!(saved.master_fx, again.master_fx);
         }
+    }
+    #[test]
+    fn old_master_bus_defaults_filter_to_bypass_and_clamps_loaded_values() {
+        use crate::config::audio_fx::MasterFxConfig;
+        let mut value = serde_json::to_value(MasterFxConfig::default()).unwrap();
+        value.as_object_mut().unwrap().remove("filter");
+        value.as_object_mut().unwrap().remove("filter_enabled");
+        value["compressor_enabled"] = serde_json::json!(true);
+        let c: MasterFxConfig = serde_json::from_value(value.clone()).unwrap();
+        assert!(!c.filter_enabled && c.compressor_enabled);
+        assert_eq!(c.filter, Default::default());
+        value["filter_enabled"] = serde_json::json!(true);
+        value["filter"] =
+            serde_json::json!({"cutoff_hz": 0, "resonance_x10": 999, "mix": 999, "drive": 999});
+        let c: MasterFxConfig = serde_json::from_value(value).unwrap();
+        let c = c.sanitized();
+        assert_eq!(c.filter.cutoff_hz, 20);
+        assert_eq!(c.filter.resonance_x10, 100);
+        assert_eq!(c.filter.mix, 100);
+        assert_eq!(c.filter.drive, 100);
     }
     #[test]
     fn old_delay_keeps_manual_feedback_and_new_track_vocoder_persists() {
@@ -1784,7 +1810,11 @@ mod audio_effect_tests {
         };
         assert!(v.carrier.value == VocoderCarrier::Track4);
         assert_eq!(v.formant_semitones, 7);
-        assert!(!restored.master_fx.compressor_enabled && !restored.master_fx.reverb_enabled);
+        assert!(
+            !restored.master_fx.filter_enabled
+                && !restored.master_fx.compressor_enabled
+                && !restored.master_fx.reverb_enabled
+        );
     }
 }
 fn apply_vocoder(v: &mut crate::config::vocoder_configs::VocoderConfigs, d: &VocoderData) {

@@ -46,6 +46,7 @@ pub fn configure(app: &mut MyApp, mode: &str) {
         app.config.input_noise.enabled = true;
         if mode.contains("master") {
             app.master_fx_open = true;
+            app.config.master_fx.filter_enabled = true;
             app.config.master_fx.compressor_enabled = true;
         }
         app.config.system_config.input_device.value =

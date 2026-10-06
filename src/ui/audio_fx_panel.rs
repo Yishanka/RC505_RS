@@ -1329,6 +1329,9 @@ pub fn master(
         "主输出效果／位于轨道推子之后",
     );
     ui.horizontal_wrapped(|ui| {
+        navigation::register(
+            ui.checkbox(&mut config.filter_enabled, lang.choose("Filter", "主滤波")),
+        );
         navigation::register(ui.checkbox(
             &mut config.compressor_enabled,
             lang.choose("Compressor", "主压缩"),
@@ -1362,44 +1365,60 @@ pub fn draw_master(ctx: &egui::Context, app: &mut crate::app::MyApp) {
                 ui.memory(|m| m.focused().is_none()),
             );
             let page_id = id.with("page");
-            let mut page = ui
-                .ctx()
-                .data(|d| d.get_temp::<bool>(page_id))
-                .unwrap_or(false);
-            ui.horizontal(|ui| {
+            let mut page = ui.ctx().data(|d| d.get_temp::<u8>(page_id)).unwrap_or(0);
+            ui.horizontal_wrapped(|ui| {
                 navigation::register(ui.selectable_value(
                     &mut page,
-                    false,
+                    0,
+                    lang.choose("Filter", "滤波"),
+                ));
+                navigation::register(ui.selectable_value(
+                    &mut page,
+                    1,
                     lang.choose("Compressor / limiter / gate", "压缩／限幅／噪声门"),
                 ));
                 navigation::register(ui.selectable_value(
                     &mut page,
-                    true,
+                    2,
                     lang.choose("Reverb", "混响"),
                 ));
             });
             ui.ctx().data_mut(|d| d.insert_temp(page_id, page));
             ui.separator();
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                if page {
-                    navigation::register(
-                        ui.checkbox(&mut config.reverb_enabled, lang.choose("Enabled", "启用")),
-                    );
-                    draw(ui, &mut config.reverb, true);
-                } else {
-                    navigation::register(ui.checkbox(
-                        &mut config.compressor_enabled,
-                        lang.choose("Enabled", "启用"),
-                    ));
-                    draw(ui, &mut config.compressor, true);
-                }
-                theme::caption(
-                    ui,
-                    lang.choose(
-                        "Affects the output mix, not track recordings.",
-                        "作用于总输出，不录进轨道。",
-                    ),
-                );
+            ui.push_id(("master-processor", page), |ui| {
+                egui::ScrollArea::vertical()
+                    .id_source((id, page))
+                    .show(ui, |ui| {
+                        if page == 0 {
+                            navigation::register(ui.checkbox(
+                                &mut config.filter_enabled,
+                                lang.choose("Enabled", "启用"),
+                            ));
+                            let mut editor = config.filter.editor();
+                            parameters::filter(ui, &mut editor, true);
+                            config.filter =
+                                crate::config::filter_configs::FilterSettings::from_editor(&editor);
+                        } else if page == 2 {
+                            navigation::register(ui.checkbox(
+                                &mut config.reverb_enabled,
+                                lang.choose("Enabled", "启用"),
+                            ));
+                            draw(ui, &mut config.reverb, true);
+                        } else {
+                            navigation::register(ui.checkbox(
+                                &mut config.compressor_enabled,
+                                lang.choose("Enabled", "启用"),
+                            ));
+                            draw(ui, &mut config.compressor, true);
+                        }
+                        theme::caption(
+                            ui,
+                            lang.choose(
+                                "Filter → Compressor → Reverb · Output mix only; tracks stay dry.",
+                                "滤波 → 压缩 → 混响 · 作用于总输出，不录进轨道。",
+                            ),
+                        );
+                    });
             });
             navigation::end(ui);
         });

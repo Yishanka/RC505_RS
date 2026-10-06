@@ -26,7 +26,7 @@ On launch, the app checks for a newer release in the background. It prompts when
 - Independent keyboard faders and speeds, momentary FX, silent input monitoring and a monitor-only metronome.
 - OSC with synthetic, vocal and sampled waveforms; mono/8/16 voices, legato/glide, editable envelopes, two LFOs and an internal filter. Capture a sound directly in the compact panel. New samples remain temporary until explicitly saved as a sound preset.
 - Polyphonic piano roll with separate sound and phrase presets, note audition, shared phrases and next-loop phrase changes.
-- Input and track FX for pitch, harmony, distortion, dynamics, EQ, delay, reverb and modulation, plus master compression/reverb. See the [FX catalogue](docs/RC505_MK2_FX_CATALOG_CN.md) for coverage and differences from the hardware.
+- Input and track FX for pitch, harmony, distortion, dynamics, EQ, delay, reverb and modulation, plus master filtering/compression/reverb. See the [FX catalogue](docs/RC505_MK2_FX_CATALOG_CN.md) for coverage and differences from the hardware.
 - Global input noise gate with a threshold control, effect-latency alignment and measured recording compensation. Internally generated OSC notes retain their musical timing.
 - A global replay library: capture input and sample-timed operations with **F9**, open the library with **F10**, then play, seek, pause or import the current state into a project. Playback recalculates the audio; it creates a complete WAV only when you export one.
 - Chinese/English UI, three colour themes and a background frequency spectrum.
