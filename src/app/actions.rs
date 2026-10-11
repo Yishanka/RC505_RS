@@ -29,6 +29,7 @@ impl MyApp {
             return;
         }
         if self.send(Control::Action(action)) {
+            self.safety.changed();
             if matches!(action, Action::Panic | Action::Preview(false)) {
                 self.tempo_start_queued = None;
             } else if matches!(

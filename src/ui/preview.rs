@@ -32,6 +32,32 @@ pub fn configure(app: &mut MyApp, mode: &str) {
     if mode.starts_with("projects") {
         return;
     }
+    if mode.starts_with("recovery") {
+        app.active_project_idx = Some(0);
+        app.app_state = AppState::MainLoop;
+        app.safety.decision=Some(serde_json::from_value(serde_json::json!({
+            "version":1,"project_file":"preview.json","project_name":"Loop session",
+            "generation":1,"captured_unix_ms":1791705600000u64,"saved_unix_ms":1791705601000u64,
+            "frame":480000,"sample_rate":48000,"epoch":"preview","slot":0,"manifest_sha256":"0".repeat(64)
+        })).unwrap());
+        return;
+    }
+    if mode.starts_with("device-lost") || mode.starts_with("exit-device") {
+        app.active_project_idx = Some(0);
+        app.app_state = AppState::MainLoop;
+        app.left_page = crate::app::LeftPage::Audio;
+        app.status = app
+            .language
+            .choose(
+                "Audio device unavailable; checkpoint retained. Save or reconnect.",
+                "音频设备不可用，已保留恢复点。可以保存或重新连接。",
+            )
+            .into();
+        if mode.starts_with("exit-device") {
+            app.back_to_projects();
+        }
+        return;
+    }
     if mode.starts_with("storage")
         || mode.starts_with("delete-project")
         || mode.starts_with("discard-replay")

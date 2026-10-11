@@ -6,6 +6,7 @@ mod monitoring;
 mod performance_keys;
 mod replay_management;
 mod replay_playback;
+pub(crate) mod runtime_safety;
 pub mod shortcuts;
 mod workflow;
 use crate::{
@@ -63,6 +64,7 @@ pub enum JobResult {
         index: usize,
         data: project::ProjectData,
         core: Box<RenderCore>,
+        recovery: runtime_safety::OpenedRecovery,
     },
     Update(crate::updater::Release),
     UpdateDownloaded(PathBuf),
@@ -70,6 +72,7 @@ pub enum JobResult {
         index: usize,
         data: project::ProjectData,
         core: Box<RenderCore>,
+        recovery: Option<runtime_safety::OpenedRecovery>,
     },
     Saved,
     Rendered {
@@ -79,6 +82,7 @@ pub enum JobResult {
     Error(String),
 }
 pub struct MyApp {
+    pub(crate) safety: runtime_safety::RuntimeSafety,
     pub storage_ui: ui::storage::StorageUi,
     pub shortcuts: shortcuts::Bindings,
     pub shortcut_editor: ui::shortcuts::ShortcutEditor,
@@ -168,9 +172,6 @@ impl MyApp {
         let visualizer_enabled = launch.as_ref().is_none_or(|v| v.visualizer_enabled);
         let buffer_frames = launch.as_ref().map(|v| v.buffer_frames()).unwrap_or(128);
         let mut config = AppConfig::new(120, 85, 5);
-        if !std::env::args().any(|v| v == "--offline") {
-            config.system_config.refresh();
-        }
         if let Some(settings) = launch.as_ref() {
             config.beat_config.set_latency(settings.latency_comp_ms());
             if !settings.input_device.is_empty() {
@@ -181,20 +182,15 @@ impl MyApp {
                 config.system_config.output_device.value = settings.output_device.clone();
             }
         }
-        let mut audio = if std::env::args().any(|v| v == "--offline") {
-            AudioIO::offline("Offline editing".into())
-        } else {
-            (if config.system_config.follow_system_output {
-                AudioIO::with_system_output(&config.system_config.input_device.value, buffer_frames)
+        let offline = std::env::args().any(|v| v == "--offline");
+        let mut audio = AudioIO::offline(
+            if offline {
+                "Offline editing"
             } else {
-                AudioIO::with_buffer(
-                    &config.system_config.input_device.value,
-                    &config.system_config.output_device.value,
-                    buffer_frames,
-                )
-            })
-            .unwrap_or_else(|e| AudioIO::offline(format!("Audio unavailable: {e}")))
-        };
+                "Connecting audio…"
+            }
+            .into(),
+        );
         if guard {
             let _ = audio.send(Control::CalibrationHold(true));
         }
@@ -222,7 +218,8 @@ impl MyApp {
         let selected = launch
             .and_then(|s| projects.iter().position(|p| p.name == s.last_project))
             .unwrap_or(0);
-        Self {
+        let mut app = Self {
+            safety: runtime_safety::RuntimeSafety::new(offline),
             shortcuts: shortcuts::Bindings::load(),
             storage_ui: Default::default(),
             shortcut_editor: ui::shortcuts::ShortcutEditor::default(),
@@ -238,11 +235,7 @@ impl MyApp {
             visualizer_enabled,
             replay_autoplay: false,
             last_ui_scene: None,
-            output_endpoint_id: if config.system_config.follow_system_output && audio.online {
-                crate::engine::output_watch::default_id().unwrap_or_default()
-            } else {
-                String::new()
-            },
+            output_endpoint_id: String::new(),
             output_watch: (!std::env::args().any(|v| v == "--offline"))
                 .then(crate::engine::output_watch::OutputWatch::new),
             output_error_seen: 0,
@@ -312,7 +305,12 @@ impl MyApp {
             update_after_save: false,
             #[cfg(debug_assertions)]
             preview_frame: 0,
+        };
+        if !offline {
+            app.refresh_devices();
+            app.start_audio_open();
         }
+        app
     }
     pub fn busy(&self) -> bool {
         self.storage_ui.busy()
@@ -321,6 +319,7 @@ impl MyApp {
             || self.saving
             || self.take_pending
             || self.reconnecting
+            || self.safety.recovery_busy()
             || self.audio.diagnostics.calibrating.load(Ordering::Relaxed)
     }
     pub fn language_switch(&mut self, ui: &mut egui::Ui) {
@@ -344,6 +343,8 @@ impl MyApp {
     pub fn performance_locked(&self) -> bool {
         self.engine_transition
             || self.reconnecting
+            || self.safety.decision.is_some()
+            || self.safety.attach.is_some()
             || self.audio.diagnostics.calibrating.load(Ordering::Relaxed)
     }
     pub fn taking(&self) -> bool {
@@ -404,6 +405,7 @@ impl MyApp {
         let Ok(bytes) = serde_json::to_vec(&data) else {
             return false;
         };
+        self.safety.observe_config(&bytes);
         if self.last_config != bytes {
             match self.audio.configure(&self.config) {
                 Ok(()) => {
@@ -429,6 +431,7 @@ impl MyApp {
         true
     }
     fn request_exit(&mut self, target: PendingExit) {
+        self.cancel_audio_wait_for_exit();
         if self.busy() {
             self.status = self
                 .language
@@ -466,9 +469,8 @@ impl MyApp {
             self.update_after_save = false;
         }
         self.send(Control::Player(None));
-        if !self.stop_audition() {
-            return;
-        }
+        self.stop_audition();
+        self.reset_audition_state();
         self.player_open = false;
         self.replay_panel = None;
         self.master_fx_open = false;
@@ -478,6 +480,7 @@ impl MyApp {
         self.editor.expanded = false;
         self.show_save_prompt = false;
         self.exit_after_save = false;
+        self.safety.finish_departure();
         match self.pending_exit.take() {
             Some(PendingExit::ToInit) => {
                 self.app_state = AppState::Init;
@@ -528,9 +531,7 @@ impl MyApp {
                 Response::Saved(_) => {
                     self.saving = false;
                     self.status = "Configuration and audio snapshot saved.".into();
-                    if self.exit_after_save {
-                        self.finish_exit();
-                    }
+                    self.clear_recovery_after_save();
                 }
                 Response::Take(path) => {
                     self.take_pending = false;
@@ -562,7 +563,12 @@ impl MyApp {
                                 .into();
                     }
                 }
-                Response::Captured(snapshot) => self.finish_reconnect(*snapshot),
+                Response::Captured(_) => {}
+                Response::Checkpoint {
+                    token,
+                    snapshot,
+                    data,
+                } => self.accept_checkpoint(token, snapshot, data),
             }
         }
         let result = self.job.as_ref().and_then(|job| match job.try_recv() {
@@ -591,6 +597,7 @@ impl MyApp {
                     index,
                     mut data,
                     core,
+                    mut recovery,
                 } => {
                     self.close_player();
                     // The import stays in working memory. Saving is explicit;
@@ -611,12 +618,18 @@ impl MyApp {
                         self.last_config.clear();
                         self.sync_config();
                         self.send(Control::Enable(true));
+                        recovery.info = None;
+                        let recovery_warning = self.install_recovery_context(recovery);
+                        self.safety.changed();
                         self.status = self.language.choose("Replay position imported. Save config + audio snapshot to keep it; Discard restores the saved project.","已导入当前回放位置。保存配置与音频快照可保留，放弃修改可回到导入前的已保存工程。").into();
                         if project::temporary_sample_count(&self.config) > 0 {
                             self.status.push_str(self.language.choose(
                                 " Save temporary OSC samples as sounds separately.",
                                 " 临时 OSC 采样需另存为音色。",
                             ));
+                        }
+                        if let Some(warning) = recovery_warning {
+                            self.status.push_str(&format!("\n{warning}"));
                         }
                     }
                 }
@@ -632,7 +645,12 @@ impl MyApp {
                     self.status = format!("Verified installer downloaded: {}", path.display());
                     self.update_installer = Some(path);
                 }
-                JobResult::Loaded { index, data, core } => {
+                JobResult::Loaded {
+                    index,
+                    data,
+                    core,
+                    recovery,
+                } => {
                     self.stop_audition();
                     let migrated_sample_source = project::has_legacy_mydelay(&data);
                     let input = self.config.system_config.input_device.value.clone();
@@ -656,6 +674,11 @@ impl MyApp {
                         self.last_config.clear();
                         self.sync_config();
                         self.send(Control::Enable(true));
+                        let recovery_warning =
+                            recovery.and_then(|r| self.install_recovery_context(r));
+                        if self.safety.decision.is_some() {
+                            self.send(Control::Enable(false));
+                        }
                         self.replay_list = crate::replay::library::list();
                         self.status = if project::missing_saved_sample_count(&self.config) > 0 {
                             self.language.choose("Project ready; a saved OSC sample is unavailable. Open OSC to inspect or replace its reference.","工程已打开；有已保存的 OSC 采样不可用，请在音色页查看或更换引用。").into()
@@ -683,6 +706,9 @@ impl MyApp {
                                     format!("Project ready; cannot save audio preferences: {e}");
                             }
                         }
+                        if let Some(warning) = recovery_warning {
+                            self.status.push_str(&format!("\n{warning}"));
+                        }
                     }
                 }
                 JobResult::SavedCleanupWarning(error) => self.saved_cleanup_warning(error),
@@ -690,9 +716,7 @@ impl MyApp {
                     self.saving = false;
                     self.status =
                         "Configuration saved; the previous audio snapshot is retained.".into();
-                    if self.exit_after_save {
-                        self.finish_exit();
-                    }
+                    self.clear_recovery_after_save();
                 }
                 JobResult::Rendered { root, result } => {
                     self.status = format!("Rendered WAV: {}", result.wav.display());
@@ -760,7 +784,9 @@ impl MyApp {
             self.draft.is_some() as u64,
             self.show_save_prompt as u64
                 | ((self.editor.library_delete.is_some() as u64) << 1)
-                | ((self.storage_ui.modal_open() as u64) << 2),
+                | ((self.storage_ui.modal_open() as u64) << 2)
+                | ((self.safety.decision.is_some() as u64) << 3),
+            // Recovery choices own keyboard/focus independently of normal editing.
             self.project_name_mode.is_some() as u64,
             self.language as u64,
             self.calibration_open as u64,
@@ -773,6 +799,7 @@ impl MyApp {
         ctx.memory_mut(|m| m.stop_text_input());
         self.focus_request = self.focus != Focus::Performance
             && !self.show_save_prompt
+            && self.safety.decision.is_none()
             && self.editor.library_delete.is_none()
             && !self.storage_ui.modal_open()
             && !self.help_open
@@ -829,8 +856,13 @@ impl MyApp {
             ui::preview::sample_visuals(self, &mode);
         }
         self.follow_default_output();
+        self.poll_runtime_safety();
         ctx.request_repaint_after(Duration::from_millis(16));
         if ctx.input(|i| i.viewport().close_requested()) {
+            self.cancel_audio_wait_for_exit();
+            if self.safety.decision.is_some() && !self.busy() {
+                self.cancel_recovery_offer();
+            }
             if self.busy() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.status = self
@@ -857,7 +889,8 @@ impl MyApp {
                     && !self.shortcut_editor.open
                     && !self.master_fx_open
                     && self.editor.library_delete.is_none()
-                    && !self.storage_ui.modal_open(),
+                    && !self.storage_ui.modal_open()
+                    && self.safety.decision.is_none(),
             );
             match self.app_state {
                 _ if self.player_open => ui::replay_panel::draw(ui, self),
@@ -866,6 +899,7 @@ impl MyApp {
             }
         });
         if !self.show_save_prompt
+            && self.safety.decision.is_none()
             && self.editor.library_delete.is_none()
             && !self.storage_ui.modal_open()
         {
@@ -892,12 +926,13 @@ impl MyApp {
                     if ui.button(lang.text("Save configuration only")).clicked(){self.exit_after_save=true;self.save_now();}
                     ui.label(lang.text("Configuration only keeps the previous saved audio, not the current loops."));
                     ui.horizontal(|ui|{
-                        if ui.button(lang.text("Discard session changes")).clicked(){self.finish_exit();}
+                        if ui.button(lang.text("Discard session changes")).clicked(){self.discard_session();}
                         if ui::theme::action(ui, ui::theme::Icon::Back, lang.text("Cancel"), "Esc").clicked(){self.show_save_prompt=false;self.pending_exit=None;}
                     });
                 });ui.label(&self.status);
             });
         }
+        self.draw_recovery_prompt(ctx);
         self.sync_config();
         let scene_after = self.ui_scene();
         if scene_after != scene {

@@ -12,7 +12,6 @@ use std::{
 pub struct DefaultOutput {
     pub id: String,
     pub name: String,
-    pub device: cpal::Device,
 }
 pub struct OutputWatch {
     stop: Arc<AtomicBool>,
@@ -35,7 +34,9 @@ impl OutputWatch {
                         let name = device.name()?;
                         let id = default_id()?;
                         anyhow::ensure!(before == id, "System output is changing; retrying");
-                        Ok(DefaultOutput { id, name, device })
+                        // Even endpoint COM/device handles are dropped here,
+                        // never sent to the GUI for later destruction.
+                        Ok(DefaultOutput { id, name })
                     })()
                     .map_err(|e| e.to_string());
                     let _ = tx.try_send(result);

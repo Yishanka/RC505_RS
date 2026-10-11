@@ -22,10 +22,17 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "audio_device_controller.rs"]
+mod device_controller;
+pub use device_controller::OpenRequest;
+
 const PACKET: usize = 256;
 pub const DEFAULT_BUFFER: u32 = 128;
 #[derive(Default)]
 pub struct Diagnostics {
+    /// Non-blocking retirement: a recovered backend must never play or record
+    /// again if its driver eventually resumes after the replacement was opened.
+    pub shutdown: AtomicBool,
     pub calibration_hold: AtomicBool,
     pub auditioning: AtomicBool,
     pub audition_commands: AtomicU64,
@@ -33,10 +40,12 @@ pub struct Diagnostics {
     pub underrun: AtomicU64,
     pub overflow: AtomicU64,
     pub stream_errors: AtomicU64,
+    pub input_errors: AtomicU64,
     pub output_errors: AtomicU64,
     pub output_generation: AtomicU64,
     pub maximum_callback_ns: AtomicU64,
     pub callback_frames: AtomicU64,
+    pub callback_generation: AtomicU64,
     pub queue_frames: AtomicU64,
     pub input_latency_ns: AtomicU64,
     pub output_latency_ns: AtomicU64,
@@ -66,6 +75,11 @@ pub enum Control {
         data: ProjectData,
     },
     Capture(Box<AudioSnapshot>),
+    Checkpoint {
+        token: u64,
+        snapshot: Box<AudioSnapshot>,
+        data: ProjectData,
+    },
     BeginTake {
         retired_audition: Option<Box<super::audition::Audition>>,
         core: Box<RenderCore>,
@@ -99,6 +113,11 @@ pub enum Response {
     Error(String),
     Calibrated(super::latency::Measurement),
     Captured(Box<AudioSnapshot>),
+    Checkpoint {
+        token: u64,
+        snapshot: Box<AudioSnapshot>,
+        data: ProjectData,
+    },
 }
 struct RealtimePages {
     available: HeapConsumer<Page>,
@@ -122,6 +141,8 @@ struct Callback {
     visual: super::spectrum::SpectrumFeed,
     core: Box<RenderCore>,
     commands: HeapConsumer<Control>,
+    pending_command: Option<Control>,
+    checkpoint_responses: HeapProducer<Response>,
     worker: HeapProducer<WorkerMessage>,
     views: HeapProducer<EngineView>,
     pages: RealtimePages,
@@ -156,12 +177,39 @@ impl Callback {
     }
     fn commands(&mut self) {
         for _ in 0..32 {
-            if self.worker.free_len() < 3 {
+            if self.diagnostics.shutdown.load(Ordering::Acquire) {
                 break;
             }
-            let Some(mut command) = self.commands.pop() else {
+            let Some(mut command) = self.pending_command.take().or_else(|| self.commands.pop())
+            else {
                 break;
             };
+            if matches!(command, Control::Checkpoint { .. }) {
+                if self.checkpoint_responses.free_len() == 0 {
+                    self.pending_command = Some(command);
+                    break;
+                }
+                if let Control::Checkpoint {
+                    token,
+                    mut snapshot,
+                    data,
+                } = command
+                {
+                    self.core.snapshot(&mut snapshot, &mut self.pages);
+                    // Observation only: no replay event or input packet flush.
+                    // A stalled replay disk writer cannot delay this response.
+                    let _ = self.checkpoint_responses.push(Response::Checkpoint {
+                        token,
+                        snapshot,
+                        data,
+                    });
+                }
+                continue;
+            }
+            if self.worker.free_len() < 3 {
+                self.pending_command = Some(command);
+                break;
+            }
             self.flush();
             let at = self.core.clock.frame;
             let mut accepted = true;
@@ -229,6 +277,9 @@ impl Callback {
                 }
                 Control::Snapshot { snapshot, .. } => self.core.snapshot(snapshot, &mut self.pages),
                 Control::Capture(snapshot) => self.core.snapshot(snapshot, &mut self.pages),
+                Control::Checkpoint { snapshot, .. } => {
+                    self.core.snapshot(snapshot, &mut self.pages)
+                }
                 Control::BeginTake {
                     core,
                     snapshot,
@@ -450,14 +501,6 @@ impl OutputPump {
         rate: u32,
         diagnostics: &Diagnostics,
     ) {
-        if self.state.is_none() {
-            self.state = self.pending.pop();
-        }
-        let Some(state) = self.state.as_mut() else {
-            data.fill(0.0);
-            return;
-        };
-        let started = Instant::now();
         if let Some(duration) = info
             .timestamp()
             .playback
@@ -467,6 +510,26 @@ impl OutputPump {
                 .output_latency_ns
                 .store(duration.as_nanos() as u64, Ordering::Relaxed);
         }
+        self.render(data, channels, rate, diagnostics);
+    }
+    /// Split from the driver timestamp wrapper so device-loss behavior can be
+    /// verified without opening any actual hardware.
+    fn render(&mut self, data: &mut [f32], channels: usize, rate: u32, diagnostics: &Diagnostics) {
+        if diagnostics.shutdown.load(Ordering::Acquire) {
+            data.fill(0.0);
+            return;
+        }
+        if self.state.is_none() {
+            self.state = self.pending.pop();
+        }
+        let Some(state) = self.state.as_mut() else {
+            data.fill(0.0);
+            return;
+        };
+        let started = Instant::now();
+        diagnostics
+            .callback_generation
+            .fetch_add(1, Ordering::Release);
         state.callback.commands();
         let frames = data.len() / channels;
         diagnostics
@@ -482,6 +545,10 @@ impl OutputPump {
         let input = &mut state.input_rx;
         let drift = &mut state.drift;
         for frame in data.chunks_exact_mut(channels) {
+            if diagnostics.shutdown.load(Ordering::Acquire) {
+                frame.fill(0.0);
+                continue;
+            }
             let wet = state
                 .converter
                 .next(|| callback.frame(drift.next(input, diagnostics)));
@@ -505,19 +572,19 @@ impl OutputPump {
     }
 }
 pub struct AudioIO {
-    input_stream: Option<cpal::Stream>,
-    output_stream: Option<cpal::Stream>,
-    output_return_tx: mpsc::Sender<Box<OutputState>>,
-    output_return_rx: mpsc::Receiver<Box<OutputState>>,
-    parked_output: Option<Box<OutputState>>,
+    controller: Option<device_controller::Client>,
     pub output_config: cpal::StreamConfig,
     pub config: cpal::StreamConfig,
     input_name: String,
     output_name: String,
+    live_input: bool,
+    pub output_endpoint_id: String,
+    pub device_error: Option<String>,
     commands: HeapProducer<Control>,
     views: HeapConsumer<EngineView>,
     pub diagnostics: Arc<Diagnostics>,
     responses: mpsc::Receiver<Response>,
+    checkpoint_responses: HeapConsumer<Response>,
     stop: Arc<AtomicBool>,
     worker_join: Option<std::thread::JoinHandle<()>>,
     offline: Option<Callback>,
@@ -526,210 +593,86 @@ pub struct AudioIO {
 }
 impl Drop for AudioIO {
     fn drop(&mut self) {
-        self.input_stream.take();
-        self.output_stream.take();
-        self.offline.take();
-        self.stop.store(true, Ordering::Release);
-        if let Some(worker) = self.worker_join.take() {
-            let _ = worker.join();
+        // Never call a driver or wait for disk/replay work on the GUI thread.
+        // Stop the producer first, then let the worker drain independently of
+        // driver teardown (which may never return after a hardware failure).
+        self.diagnostics.shutdown.store(true, Ordering::Release);
+        if self.diagnostics.taking.load(Ordering::Relaxed) {
+            self.diagnostics.take_failed.store(true, Ordering::Relaxed);
         }
+        self.stop.store(true, Ordering::Release);
+        if let Some(controller) = &self.controller {
+            controller.shutdown();
+        } else {
+            self.offline.take();
+        }
+        self.worker_join.take(); // detach; queued writes finish on their worker
     }
 }
 impl AudioIO {
+    /// GUI entry point. No enumeration or CPAL stream access on the caller.
+    pub fn open_async(input: String, output: Option<String>, block: u32) -> Result<OpenRequest> {
+        device_controller::open(input, output, block)
+    }
+    // Synchronous wrappers are only for explicit hardware tests/CLI callers.
+    // Interactive startup and reconnect must poll open_async instead.
     pub fn new(input: &str, output: &str, _tracks: usize, _latency: usize) -> Result<Self> {
         Self::with_buffer(input, output, DEFAULT_BUFFER)
     }
     pub fn with_buffer(input: &str, output: &str, block: u32) -> Result<Self> {
-        Self::open(input, Some(output), block)
+        Self::open_async(input.into(), Some(output.into()), block)?.wait()
     }
     pub fn with_system_output(input: &str, block: u32) -> Result<Self> {
-        Self::open(input, None, block)
+        Self::open_async(input.into(), None, block)?.wait()
     }
-    fn open(input: &str, output: Option<&str>, block: u32) -> Result<Self> {
-        let host = if let Some(output) = output {
-            select_host(input, output)?
-        } else {
-            cpal::default_host()
-        };
-        let input_device = host
-            .input_devices()?
-            .find(|d| d.name().ok().as_deref() == Some(input))
-            .context("Input device unavailable")?;
-        let output_device = if let Some(name) = output {
-            host.output_devices()?
-                .find(|d| d.name().ok().as_deref() == Some(name))
-        } else {
-            host.default_output_device()
-        };
-        let inputs = input_device.supported_input_configs()?.collect::<Vec<_>>();
-        let outputs = output_device
-            .as_ref()
-            .and_then(|d| d.supported_output_configs().ok())
-            .map(|v| v.collect::<Vec<_>>())
-            .unwrap_or_default();
-        let config = super::device_config::common_config(&inputs, &outputs, block)
-            .or_else(|_| super::device_config::endpoint_config(&inputs, 48000, block, false))?;
-        let (mut audio, callback) = Self::bridge(config.clone());
-        let (mut input_tx, input_rx) = HeapRb::<Frame>::new(16_384).split();
-        let diagnostics = audio.diagnostics.clone();
-        let input_errors = audio.diagnostics.clone();
-        let channels = config.channels as usize;
-        let input_stream = input_device.build_input_stream(
-            &config,
-            move |data: &[f32], info: &cpal::InputCallbackInfo| {
-                if let Some(duration) = info
-                    .timestamp()
-                    .callback
-                    .duration_since(&info.timestamp().capture)
-                {
-                    diagnostics
-                        .input_latency_ns
-                        .store(duration.as_nanos() as u64, Ordering::Relaxed);
-                }
-                for frame in data.chunks_exact(channels) {
-                    let clean = |s: f32| if s.is_finite() { s } else { 0.0 };
-                    let value = [
-                        clean(frame[0]),
-                        clean(frame.get(1).copied().unwrap_or(frame[0])),
-                    ];
-                    if input_tx.push(value).is_err() {
-                        diagnostics.overflow.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-            },
-            move |_| {
-                input_errors.stream_errors.fetch_add(1, Ordering::Relaxed);
-            },
-            None,
-        )?;
-        audio.input_stream = Some(input_stream);
-        audio.input_name = input.into();
-        audio.parked_output = Some(Box::new(OutputState {
-            callback,
-            input_rx,
-            drift: super::latency::InputAdapter::new(block as usize),
-            converter: super::output_resampler::OutputResampler::new(
-                config.sample_rate.0,
-                config.sample_rate.0,
-            ),
-            fade_remaining: 0,
-            fade_total: 1,
-        }));
-        if let Some(device) = output_device {
-            if let Err(error) = audio.retarget_output(&device, block) {
-                audio.status = format!("Output unavailable; waiting to reconnect: {error}");
-            }
-        } else {
-            audio.status = "No system output device; waiting to reconnect".into();
-        }
-        Ok(audio)
-    }
-    /// Swap only the physical endpoint. The exact callback/renderer is moved,
-    /// including transport, pending actions, undo, FX history and replay state.
-    pub fn retarget_output(&mut self, device: &cpal::Device, block: u32) -> Result<()> {
-        let name = device.name()?;
-        let output_config = super::device_config::endpoint_config(
-            &device.supported_output_configs()?.collect::<Vec<_>>(),
-            self.config.sample_rate.0,
+    pub fn request_output(&mut self, output: Option<String>, block: u32) -> Result<()> {
+        let controller = self
+            .controller
+            .as_mut()
+            .context("No live audio device controller")?;
+        controller.request(device_controller::Operation::Output {
+            name: output,
             block,
-            true,
-        )?;
-        let (mut tx, rx) = HeapRb::<Box<OutputState>>::new(1).split();
-        let mut pump = OutputPump {
-            state: None,
-            pending: rx,
-            returned: self.output_return_tx.clone(),
-        };
-        let diagnostics = self.diagnostics.clone();
-        let errors = diagnostics.clone();
-        let channels = output_config.channels as usize;
-        let rate = output_config.sample_rate.0;
-        // Prepare/start the new endpoint with silence before releasing the old
-        // one. A failed build never destroys the running renderer.
-        let stream = device.build_output_stream(
-            &output_config,
-            move |data: &mut [f32], info| {
-                pump.process(data, info, channels, rate, &diagnostics);
-            },
-            move |_| {
-                errors.stream_errors.fetch_add(1, Ordering::Relaxed);
-                errors.output_errors.fetch_add(1, Ordering::Relaxed);
-            },
-            None,
-        )?;
-        stream.play()?;
-        self.output_stream.take(); // CPAL joins its callback; Drop returns ownership.
-        if self.parked_output.is_none() {
-            self.parked_output = Some(
-                self.output_return_rx
-                    .recv_timeout(Duration::from_secs(1))
-                    .context("Output callback did not return its state")?,
-            );
-        }
-        let mut state = self.parked_output.take().context("Missing output state")?;
-        state.converter =
-            super::output_resampler::OutputResampler::new(self.config.sample_rate.0, rate);
-        state.drift.reset_target(block as usize);
-        state.fade_total = (rate / 200).max(1) as usize;
-        state.fade_remaining = state.fade_total;
-        // A route change invalidates a loopback probe. Never apply its result.
-        state.callback.calibration.take();
-        self.diagnostics.calibrating.store(false, Ordering::Relaxed);
-        if let Some(input) = &self.input_stream {
-            if let Err(error) = input.play() {
-                self.parked_output = Some(state);
-                self.online = false;
-                return Err(error.into());
-            }
-        }
-        self.diagnostics
-            .output_generation
-            .fetch_add(1, Ordering::Relaxed);
-        if let Err(state) = tx.push(state) {
-            self.parked_output = Some(state);
-            self.online = false;
-            anyhow::bail!("Output handoff queue unavailable");
-        }
-        self.output_stream = Some(stream);
-        self.output_name = name;
-        self.output_config = output_config;
-        self.online = true;
-        self.status = format!(
-            "{} Hz engine → {} Hz / {} ch output",
-            self.config.sample_rate.0, rate, channels
-        );
+        })?;
+        self.device_error = None;
         Ok(())
     }
     pub fn park_output(&mut self) {
-        if self.output_stream.is_none() {
-            return;
+        if let Some(controller) = &mut self.controller {
+            if let Err(error) = controller.request(device_controller::Operation::Park) {
+                self.device_error = Some(error.to_string());
+            }
         }
-        if let Some(input) = &self.input_stream {
-            let _ = input.pause();
-        }
-        self.output_stream.take();
-        self.diagnostics
-            .output_generation
-            .fetch_add(1, Ordering::Relaxed);
-        self.parked_output = self.output_return_rx.try_recv().ok();
-        self.online = false;
-        self.status = "No system output device; waiting to reconnect".into();
-        // Input during physical device loss cannot be reconstructed.
+    }
+    pub fn device_busy(&self) -> bool {
+        self.controller.as_ref().is_some_and(|c| c.busy())
+    }
+    pub fn device_timed_out(&self) -> bool {
+        self.controller.as_ref().is_some_and(|c| c.timed_out())
+    }
+    pub fn has_live_input(&self) -> bool {
+        self.live_input
+    }
+    /// Retire an inaccessible backend before restoring a checkpoint elsewhere.
+    /// The next resumed callback is silent even if a CPAL teardown is stuck.
+    pub fn retire(&mut self) {
+        self.diagnostics.shutdown.store(true, Ordering::Release);
         if self.diagnostics.taking.load(Ordering::Relaxed) {
             self.diagnostics.take_failed.store(true, Ordering::Relaxed);
         }
-        if let Some(state) = &mut self.parked_output {
-            state.callback.calibration.take();
+        self.stop.store(true, Ordering::Release);
+        if let Some(controller) = &self.controller {
+            controller.shutdown();
         }
-        self.diagnostics.calibrating.store(false, Ordering::Relaxed);
-    }
-    pub fn has_live_input(&self) -> bool {
-        self.input_stream.is_some()
+        self.online = false;
     }
     pub fn offline(message: String) -> Self {
+        Self::offline_at(48_000, message)
+    }
+    pub fn offline_at(sample_rate: u32, message: String) -> Self {
         let config = cpal::StreamConfig {
             channels: 2,
-            sample_rate: cpal::SampleRate(48_000),
+            sample_rate: cpal::SampleRate(sample_rate),
             buffer_size: cpal::BufferSize::Fixed(DEFAULT_BUFFER),
         };
         let (mut audio, callback) = Self::bridge(config);
@@ -738,7 +681,6 @@ impl AudioIO {
         audio
     }
     fn bridge(config: cpal::StreamConfig) -> (Self, Callback) {
-        let (output_return_tx, output_return_rx) = mpsc::channel();
         let sr = config.sample_rate.0;
         let (commands, command_rx) = HeapRb::new(128).split();
         let (view_tx, views) = HeapRb::new(8).split();
@@ -770,6 +712,7 @@ impl AudioIO {
             })
             .expect("page pool thread");
         let (response_tx, responses) = mpsc::channel();
+        let (checkpoint_tx, checkpoint_responses) = HeapRb::new(8).split();
         let diagnostics = Arc::new(Diagnostics::default());
         let worker_diag = diagnostics.clone();
         let worker_stop = stop.clone();
@@ -803,6 +746,8 @@ impl AudioIO {
             visual: super::spectrum::SpectrumFeed::new(sr, stop.clone()),
             core: Box::new(RenderCore::new(sr)),
             commands: command_rx,
+            pending_command: None,
+            checkpoint_responses: checkpoint_tx,
             worker: worker_tx,
             views: view_tx,
             pages: RealtimePages {
@@ -822,19 +767,19 @@ impl AudioIO {
         };
         (
             Self {
-                input_stream: None,
-                output_stream: None,
-                output_return_tx,
-                output_return_rx,
-                parked_output: None,
+                controller: None,
                 output_config: config.clone(),
                 config,
                 input_name: String::new(),
                 output_name: String::new(),
+                live_input: false,
+                output_endpoint_id: String::new(),
+                device_error: None,
                 commands,
                 views,
                 diagnostics,
                 responses,
+                checkpoint_responses,
                 stop,
                 worker_join: Some(worker_join),
                 offline: None,
@@ -854,13 +799,20 @@ impl AudioIO {
             callback.commands();
             callback.publish();
         }
-        if self.output_stream.is_none() {
-            if self.parked_output.is_none() {
-                self.parked_output = self.output_return_rx.try_recv().ok();
+        if let Some(controller) = &mut self.controller {
+            if let Some(state) = controller.poll() {
+                self.output_config = state.output_config;
+                self.input_name = state.input_name;
+                self.output_name = state.output_name;
+                self.live_input = state.live_input;
+                self.output_endpoint_id = state.endpoint_id;
+                self.online = state.online && !self.diagnostics.shutdown.load(Ordering::Acquire);
+                self.status = state.status;
+                self.device_error = state.error;
             }
-            if let Some(state) = &mut self.parked_output {
-                state.callback.commands();
-                state.callback.publish();
+            if controller.timed_out() {
+                self.device_error = Some("Audio driver operation timed out; save or exit remains available. Waiting for the existing operation; no additional driver thread was started.".into());
+                self.status = self.device_error.clone().unwrap();
             }
         }
         let mut view = None;
@@ -869,8 +821,9 @@ impl AudioIO {
         }
         view
     }
-    pub fn responses(&self) -> impl Iterator<Item = Response> + '_ {
-        self.responses.try_iter()
+    pub fn responses(&mut self) -> impl Iterator<Item = Response> + '_ {
+        let checkpoints = &mut self.checkpoint_responses;
+        std::iter::from_fn(move || checkpoints.pop()).chain(self.responses.try_iter())
     }
     pub fn configure(&mut self, config: &AppConfig) -> Result<()> {
         self.send(Control::Config {
@@ -884,20 +837,18 @@ impl AudioIO {
     pub fn curr_output_name(&self) -> &str {
         if self.online { &self.output_name } else { "" }
     }
-    pub fn suspend(&self) {
-        if let Some(stream) = &self.input_stream {
-            let _ = stream.pause();
-        }
-        if let Some(stream) = &self.output_stream {
-            let _ = stream.pause();
+    pub fn suspend(&mut self) {
+        if let Some(controller) = &mut self.controller {
+            if let Err(error) = controller.request(device_controller::Operation::Suspend) {
+                self.device_error = Some(error.to_string());
+            }
         }
     }
-    pub fn resume(&self) {
-        if let Some(stream) = &self.input_stream {
-            let _ = stream.play();
-        }
-        if let Some(stream) = &self.output_stream {
-            let _ = stream.play();
+    pub fn resume(&mut self) {
+        if let Some(controller) = &mut self.controller {
+            if let Err(error) = controller.request(device_controller::Operation::Resume) {
+                self.device_error = Some(error.to_string());
+            }
         }
     }
 }
@@ -1000,6 +951,17 @@ fn worker_message(
                 Control::Capture(snapshot) => {
                     let _ = tx.send(Response::Captured(snapshot));
                 }
+                Control::Checkpoint {
+                    token,
+                    snapshot,
+                    data,
+                } => {
+                    let _ = tx.send(Response::Checkpoint {
+                        token,
+                        snapshot,
+                        data,
+                    });
+                }
                 Control::Calibrate(Some(value)) if value.finished() => {
                     let tx = tx.clone();
                     std::thread::spawn(move || {
@@ -1015,25 +977,158 @@ fn worker_message(
     }
     Ok(())
 }
-fn select_host(_input: &str, _output: &str) -> Result<cpal::Host> {
-    #[cfg(all(target_os = "windows", feature = "asio"))]
-    if let Ok(host) = cpal::host_from_id(cpal::HostId::Asio) {
-        if host
-            .input_devices()?
-            .any(|d| d.name().ok().as_deref() == Some(_input))
-            && host
-                .output_devices()?
-                .any(|d| d.name().ok().as_deref() == Some(_output))
-        {
-            return Ok(host);
-        }
-    }
-    Ok(cpal::default_host())
-}
 
 #[cfg(test)]
 mod output_tests {
     use super::*;
+    #[test]
+    fn checkpoint_reply_bypasses_a_stalled_replay_writer_and_does_not_advance_time() {
+        let (mut audio, mut callback) = callback();
+        let (mut stalled_writer, mut queued) = HeapRb::new(4).split();
+        for _ in 0..3 {
+            assert!(
+                stalled_writer
+                    .push(WorkerMessage::Audio {
+                        at: 0,
+                        len: 1,
+                        frames: [[0.0; 2]; PACKET],
+                    })
+                    .is_ok()
+            );
+        }
+        callback.worker = stalled_writer;
+        callback.core.clock.frame = 417;
+        audio
+            .send(Control::Checkpoint {
+                token: 5,
+                snapshot: Box::new(AudioSnapshot::empty(8000)),
+                data: crate::project::data_from_config(&AppConfig::new(120, 0, 5)),
+            })
+            .unwrap();
+        assert_eq!(crate::test_alloc::count(|| callback.commands()), 0);
+        let Some(Response::Checkpoint {
+            token, snapshot, ..
+        }) = audio.responses().next()
+        else {
+            panic!("Checkpoint waited for a replay disk worker");
+        };
+        assert_eq!(token, 5);
+        assert_eq!(snapshot.at, 417);
+        assert_eq!(callback.core.clock.frame, 417);
+        assert_eq!(queued.len(), 3);
+        while queued.pop().is_some() {}
+    }
+    #[test]
+    fn bounded_checkpoint_replies_preserve_a_pending_command_in_order() {
+        let (mut audio, mut callback) = callback();
+        for token in 1..=9 {
+            audio
+                .send(Control::Checkpoint {
+                    token,
+                    snapshot: Box::new(AudioSnapshot::empty(8000)),
+                    data: crate::project::data_from_config(&AppConfig::new(120, 0, 5)),
+                })
+                .unwrap();
+        }
+        assert_eq!(crate::test_alloc::count(|| callback.commands()), 0);
+        assert!(callback.pending_command.is_some());
+        let tokens: Vec<_> = audio
+            .responses()
+            .filter_map(|r| match r {
+                Response::Checkpoint { token, .. } => Some(token),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tokens, (1..=8).collect::<Vec<_>>());
+        assert_eq!(crate::test_alloc::count(|| callback.commands()), 0);
+        assert!(matches!(
+            audio.responses().next(),
+            Some(Response::Checkpoint { token: 9, .. })
+        ));
+        assert!(callback.pending_command.is_none());
+        assert_eq!(callback.core.clock.frame, 0);
+    }
+    #[test]
+    fn retired_driver_callback_is_silent_and_cannot_resume_an_old_recording() {
+        let (mut audio, mut callback) = callback();
+        callback.enabled = true;
+        let mut pages = super::super::loop_audio::OfflinePages;
+        callback.core.action(Action::Trigger(0), &mut pages);
+        let (_input_tx, input_rx) = HeapRb::<Frame>::new(256).split();
+        let (returned, receive) = mpsc::channel();
+        let (_pending_tx, pending) = HeapRb::new(1).split();
+        let mut pump = OutputPump {
+            state: Some(Box::new(OutputState {
+                callback,
+                input_rx,
+                drift: super::super::latency::InputAdapter::new(16),
+                converter: super::super::output_resampler::OutputResampler::new(8000, 8000),
+                fade_remaining: 0,
+                fade_total: 1,
+            })),
+            pending,
+            returned,
+        };
+        let mut output = [1.0; 256];
+        pump.render(&mut output, 2, 8000, &audio.diagnostics);
+        let before = pump.state.as_ref().unwrap().callback.core.clock.frame;
+        assert!(before > 0);
+        audio.retire();
+        output.fill(1.0);
+        assert_eq!(
+            crate::test_alloc::count(|| pump.render(&mut output, 2, 8000, &audio.diagnostics)),
+            0
+        );
+        assert!(output.iter().all(|v| *v == 0.0));
+        assert_eq!(
+            pump.state.as_ref().unwrap().callback.core.clock.frame,
+            before
+        );
+        drop(pump);
+        assert_eq!(receive.recv().unwrap().callback.core.clock.frame, before);
+    }
+    #[test]
+    fn offline_recovery_preserves_its_original_sample_rate() {
+        let mut audio = AudioIO::offline_at(44_100, "recovery".into());
+        assert_eq!(audio.config.sample_rate.0, 44_100);
+        audio.poll();
+        assert_eq!(audio.offline.as_ref().unwrap().core.sample_rate, 44_100);
+    }
+    #[test]
+    fn checkpoint_captures_exact_audio_frame_without_callback_allocation() {
+        let (mut audio, mut callback) = callback();
+        let mut pages = super::super::loop_audio::OfflinePages;
+        callback.core.action(Action::Trigger(0), &mut pages);
+        for _ in 0..123 {
+            callback.core.process([0.25, -0.25], &mut pages);
+        }
+        let expected_frame = callback.core.clock.frame;
+        let data = crate::project::data_from_config(&AppConfig::new(120, 0, 5));
+        audio
+            .send(Control::Checkpoint {
+                token: 77,
+                snapshot: Box::new(AudioSnapshot::empty(8000)),
+                data,
+            })
+            .unwrap();
+        assert_eq!(crate::test_alloc::count(|| callback.commands()), 0);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(Response::Checkpoint {
+                token, snapshot, ..
+            }) = audio.responses().next()
+            {
+                assert_eq!(token, 77);
+                assert_eq!(snapshot.at, expected_frame);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Checkpoint worker response did not arrive"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
     #[test]
     fn replay_writer_cleanup_worker_shutdown_discards_only_uncommitted_takes() {
         for finish in [false, true] {
@@ -1059,7 +1154,10 @@ mod output_tests {
             let (_tx, empty) = mpsc::channel();
             drop(std::mem::replace(&mut audio.responses, empty));
             drop(cb);
+            // AudioIO Drop intentionally never joins on the GUI thread.
+            let worker = audio.worker_join.take().unwrap();
             drop(audio);
+            worker.join().unwrap();
             assert_eq!(root.exists(), finish);
             if finish {
                 assert_eq!(replay::info(&root).unwrap().frames, 0);
@@ -1603,13 +1701,25 @@ mod output_tests {
             .find(|d| d.name().is_ok_and(|n| n != original))
             .expect("Second output for handoff test");
         std::thread::sleep(Duration::from_millis(100));
-        audio.retarget_output(&alternative, 128).unwrap();
+        let wait_device = |audio: &mut AudioIO| {
+            let started = Instant::now();
+            while audio.device_busy() {
+                audio.poll();
+                assert!(started.elapsed() < Duration::from_secs(6));
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(audio.device_error.is_none(), "{:?}", audio.device_error);
+        };
+        audio
+            .request_output(Some(alternative.name().unwrap()), 128)
+            .unwrap();
+        wait_device(&mut audio);
         assert_eq!(audio.curr_output_name(), alternative.name().unwrap());
         audio.park_output();
+        wait_device(&mut audio);
         assert!(!audio.online);
-        assert!(audio.parked_output.is_some());
-        let default = host.default_output_device().unwrap();
-        audio.retarget_output(&default, 128).unwrap();
+        audio.request_output(None, 128).unwrap();
+        wait_device(&mut audio);
         std::thread::sleep(Duration::from_millis(150));
         assert!(audio.online);
         assert_eq!(audio.curr_output_name(), original);

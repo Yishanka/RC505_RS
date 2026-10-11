@@ -4,6 +4,20 @@ use crate::{
     state::{AppState, ProjectNameMode},
 };
 use eframe::egui::{self, Key, Modifiers};
+fn painted_text(shape: &egui::Shape, output: &mut Vec<(String, egui::Rect)>) {
+    match shape {
+        egui::Shape::Text(text) => output.push((
+            text.galley.job.text.clone(),
+            egui::Rect::from_min_size(text.pos, text.galley.size()),
+        )),
+        egui::Shape::Vec(shapes) => {
+            for shape in shapes {
+                painted_text(shape, output);
+            }
+        }
+        _ => (),
+    }
+}
 fn frame(ctx: &egui::Context, app: &mut MyApp, time: &mut f64, events: Vec<egui::Event>) {
     *time += 1.0 / 60.0;
     let modifiers = events
@@ -29,6 +43,11 @@ fn frame(ctx: &egui::Context, app: &mut MyApp, time: &mut f64, events: Vec<egui:
     };
     <MyApp as eframe::App>::raw_input_hook(app, ctx, &mut raw);
     let output = ctx.run(raw, |ctx| app.render_frame(ctx));
+    let mut text = Vec::new();
+    for shape in &output.shapes {
+        painted_text(&shape.shape, &mut text);
+    }
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new("regression-painted-text"), text));
     assert!(
         !output.viewport_output.values().any(|v| v
             .commands
@@ -43,6 +62,41 @@ fn frame(ctx: &egui::Context, app: &mut MyApp, time: &mut f64, events: Vec<egui:
             "Focus absent from accessibility tree: {:?}, frame {}",
             tree.focus,
             time
+        );
+    }
+}
+fn click_text(ctx: &egui::Context, app: &mut MyApp, time: &mut f64, label: &str) {
+    // Resolve the actual painted control after its window has settled. The last
+    // matching text is the modal's label, rather than a disabled background row.
+    for _ in 0..3 {
+        frame(ctx, app, time, vec![]);
+    }
+    let texts = ctx
+        .data(|data| {
+            data.get_temp::<Vec<(String, egui::Rect)>>(egui::Id::new("regression-painted-text"))
+        })
+        .unwrap();
+    let rect = texts
+        .iter()
+        .rev()
+        .find(|(text, _)| text == label)
+        .unwrap_or_else(|| panic!("Visible control {label:?} was not found: {texts:?}"))
+        .1;
+    let pos = rect.center();
+    for pressed in [true, false] {
+        frame(
+            ctx,
+            app,
+            time,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Modifiers::NONE,
+                },
+            ],
         );
     }
 }
@@ -85,6 +139,31 @@ fn replay_import_regression(ctx: &egui::Context, app: &mut MyApp, time: &mut f64
         engine::core::{Action, AudioSnapshot},
         project, replay,
     };
+    let language = app.language;
+    app.language = crate::app_support::language::Language::English;
+    let previous = project::ProjectEntry {
+        name: "Previous recovery source".into(),
+        file: format!("old-import-source-{}.json", crate::session::id()),
+    };
+    let mut old_audio = AudioSnapshot::empty(48000);
+    for n in 0..32 {
+        old_audio.tracks[0].write(n, [0.8, -0.6], &mut crate::engine::loop_audio::OfflinePages);
+    }
+    crate::session::save_snapshot(
+        &previous,
+        &old_audio,
+        project::data_from_config(&AppConfig::new(120, 0, 5)),
+    )
+    .unwrap();
+    let previous_bytes = formal_project_bytes(&previous);
+    let previous_index = app.projects.len();
+    app.projects.push(previous.clone());
+    app.open_project(previous_index);
+    finish_jobs(ctx, app, time);
+    let (_, identity, len, first) = app.regression_recovery_state();
+    assert_eq!(identity.as_deref(), Some(previous.file.as_str()));
+    assert_eq!(len, 32);
+    assert_eq!(first, [0.8, -0.6]);
     let entry = project::ProjectEntry {
         name: "Replay import regression".into(),
         file: format!("replay-import-{}.json", crate::session::id()),
@@ -160,6 +239,26 @@ fn replay_import_regression(ctx: &egui::Context, app: &mut MyApp, time: &mut f64
     assert_eq!(app.active_project_idx, Some(target));
     assert_eq!(app.config.track_levels[0], 0.23);
     assert_eq!(app.view.tracks[0].frames, 4);
+    let (_, identity, len, first) = app.regression_recovery_state();
+    assert_eq!(
+        identity.as_deref(),
+        Some(entry.file.as_str()),
+        "Import must switch the recovery owner"
+    );
+    assert_eq!(len, 4);
+    assert_eq!(first, [0.25; 2]);
+    app.save_snapshot();
+    app.regression_stall_checkpoint();
+    finish_jobs(ctx, app, time);
+    let (_, identity, len, first) = app.regression_recovery_state();
+    assert_eq!(identity.as_deref(), Some(entry.file.as_str()));
+    assert_eq!(len, 4);
+    assert_eq!(first, [0.25; 2]);
+    assert_eq!(
+        app.view.tracks[0].frames, 4,
+        "Fault recovery must restore the imported target, not the previous project's 32 frames"
+    );
+    assert_eq!(formal_project_bytes(&previous), previous_bytes);
     assert_eq!(
         crate::session::checksum(&path).unwrap(),
         saved,
@@ -169,6 +268,10 @@ fn replay_import_regression(ctx: &egui::Context, app: &mut MyApp, time: &mut f64
     // leaving with Discard: no implicit snapshot/import write occurred.
     app.open_project(target);
     finish_jobs(ctx, app, time);
+    if app.safety.decision.is_some() {
+        click_text(ctx, app, time, "Discard recovery and use saved project");
+        finish_jobs(ctx, app, time);
+    }
     assert_eq!(app.config.track_levels[0], 1.0);
     assert_eq!(app.view.tracks[0].frames, 0);
     app.import_replay_position(source, 4, Some(target), String::new());
@@ -204,7 +307,18 @@ fn replay_import_regression(ctx: &egui::Context, app: &mut MyApp, time: &mut f64
     std::fs::remove_file(path).unwrap();
     app.projects.pop();
     app.active_project_idx = None;
+    app.safety.finish_departure();
+    let old_assets = crate::session::project_assets(&previous).unwrap();
+    crate::storage::remove_tree(&crate::app_support::paths::projects_dir(), &old_assets).unwrap();
+    crate::storage::remove_file(
+        &crate::app_support::paths::projects_dir(),
+        &crate::app_support::paths::projects_dir().join(&previous.file),
+    )
+    .unwrap();
+    assert_eq!(app.projects[previous_index].file, previous.file);
+    app.projects.remove(previous_index);
     project::save_index(&app.projects).unwrap();
+    app.language = language;
 }
 fn tap_start_regression(ctx: &egui::Context, app: &mut MyApp, time: &mut f64) {
     // Use the same production event clock for mouse and keyboard taps. The
@@ -1530,6 +1644,340 @@ fn library_delete_regression(ctx: &egui::Context, app: &mut MyApp, time: &mut f6
     }
 }
 
+fn formal_project_bytes(
+    entry: &crate::project::ProjectEntry,
+) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    use std::{collections::BTreeMap, fs, path::Path};
+    fn collect(root: &Path, out: &mut BTreeMap<std::path::PathBuf, Vec<u8>>) {
+        if !root.exists() {
+            return;
+        }
+        for entry in fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect(&path, out);
+            } else {
+                out.insert(path.clone(), fs::read(path).unwrap());
+            }
+        }
+    }
+    let mut files = BTreeMap::new();
+    let path = crate::app_support::paths::projects_dir().join(&entry.file);
+    files.insert(path.clone(), fs::read(&path).unwrap());
+    let backup = path.with_extension("json.bak");
+    if backup.exists() {
+        files.insert(backup.clone(), fs::read(backup).unwrap());
+    }
+    collect(
+        &crate::session::project_assets(entry)
+            .unwrap()
+            .join("snapshots"),
+        &mut files,
+    );
+    files
+}
+fn recovery_exit_ui_regression(ctx: &egui::Context, app: &mut MyApp, time: &mut f64) {
+    use crate::{
+        config::AppConfig,
+        engine::{core::AudioSnapshot, loop_audio::OfflinePages},
+        project,
+        recovery::Store,
+    };
+    assert!(
+        app.safety.scan.is_none() && !app.safety.open_pending(),
+        "Offline startup must not create driver requests"
+    );
+    app.refresh_devices();
+    frame(ctx, app, time, vec![]);
+    assert!(
+        app.safety.scan.is_none() && !app.safety.open_pending(),
+        "Offline refresh must stay driver-free"
+    );
+    let previous_language = app.language;
+    app.language = crate::app_support::language::Language::English;
+    let entry = project::ProjectEntry {
+        name: "Recovery and discard UI".into(),
+        file: format!("recovery-ui-{}.json", crate::session::id()),
+    };
+    let mut formal = AppConfig::new(120, 0, 5);
+    formal.track_levels[0] = 0.5;
+    let mut snapshot = AudioSnapshot::empty(48000);
+    for n in 0..128 {
+        snapshot.tracks[0].write(n, [0.125, -0.25], &mut OfflinePages);
+    }
+    crate::session::save_snapshot(&entry, &snapshot, project::data_from_config(&formal)).unwrap();
+    let before = formal_project_bytes(&entry);
+    let index = app.projects.len();
+    app.projects.push(entry.clone());
+    app.sel_project_idx = index;
+    let seed = || {
+        let store = Store::new(entry.clone()).unwrap();
+        store.begin().unwrap();
+        let mut changed = AppConfig::new(147, 0, 5);
+        changed.track_levels[0] = 0.27;
+        let mut audio = AudioSnapshot::empty(48000);
+        for n in 0..384 {
+            audio.tracks[0].write(n, [0.75, -0.5], &mut OfflinePages);
+        }
+        store
+            .save(
+                &store.ticket(),
+                &audio,
+                &project::data_from_config(&changed),
+            )
+            .unwrap();
+        store
+    };
+    let store = seed();
+    click_text(ctx, app, time, "Open project");
+    finish_jobs(ctx, app, time);
+    assert!(app.safety.decision.is_some());
+    click_text(ctx, app, time, "Cancel");
+    finish_jobs(ctx, app, time);
+    assert!(app.app_state == AppState::Init && app.safety.decision.is_none());
+    assert!(
+        store.inspect().unwrap().is_some(),
+        "Cancel must retain the recovery point"
+    );
+    assert_eq!(formal_project_bytes(&entry), before);
+    app.sel_project_idx = index;
+    click_text(ctx, app, time, "Open project");
+    finish_jobs(ctx, app, time);
+    assert!(app.safety.decision.is_some());
+    click_text(ctx, app, time, "Discard recovery and use saved project");
+    finish_jobs(ctx, app, time);
+    assert!(app.safety.decision.is_none());
+    assert_eq!(app.config.beat_config.current_bpm(), 120);
+    assert_eq!(app.view.tracks[0].frames, 128);
+    assert!(store.inspect().unwrap().is_none());
+    assert_eq!(formal_project_bytes(&entry), before);
+    app.config.track_levels[0] = 0.11;
+    app.clear_track(0);
+    frame(ctx, app, time, vec![]);
+    assert_eq!(app.view.tracks[0].frames, 0);
+    click_text(ctx, app, time, "Projects");
+    click_text(ctx, app, time, "Cancel");
+    assert!(app.app_state == AppState::MainLoop);
+    assert_eq!(app.config.track_levels[0], 0.11);
+    assert_eq!(formal_project_bytes(&entry), before);
+    click_text(ctx, app, time, "Projects");
+    click_text(ctx, app, time, "Discard session changes");
+    finish_jobs(ctx, app, time);
+    assert!(app.app_state == AppState::Init && !app.busy());
+    assert_eq!(formal_project_bytes(&entry), before);
+    let store = seed();
+    app.sel_project_idx = index;
+    click_text(ctx, app, time, "Open project");
+    finish_jobs(ctx, app, time);
+    click_text(ctx, app, time, "Recover checkpoint");
+    finish_jobs(ctx, app, time);
+    assert_eq!(app.config.beat_config.current_bpm(), 147);
+    assert_eq!(app.view.tracks[0].frames, 384);
+    assert_eq!(
+        formal_project_bytes(&entry),
+        before,
+        "Recovery may replace RAM, never the formal saved project"
+    );
+    click_text(ctx, app, time, "Projects");
+    click_text(ctx, app, time, "Discard session changes");
+    finish_jobs(ctx, app, time);
+    assert!(app.app_state == AppState::Init && !app.busy());
+    assert!(store.inspect().unwrap().is_none());
+    assert_eq!(formal_project_bytes(&entry), before);
+    // Lose callback acknowledgement after the real Save button queues a request.
+    // The hook retires only this offline bridge and advances its deadline.
+    app.sel_project_idx = index;
+    click_text(ctx, app, time, "Open project");
+    finish_jobs(ctx, app, time);
+    app.config.track_levels[0] = 0.31;
+    frame(ctx, app, time, vec![]);
+    click_text(ctx, app, time, "Projects");
+    click_text(ctx, app, time, "Save configuration and audio snapshot");
+    assert!(app.busy());
+    app.regression_stall_checkpoint();
+    finish_jobs(ctx, app, time);
+    assert!(
+        !app.busy() && app.app_state == AppState::MainLoop,
+        "Lost callback must release the manual save wait: {}",
+        app.status
+    );
+    assert_eq!(
+        formal_project_bytes(&entry),
+        before,
+        "An unacknowledged save must not replace formal audio"
+    );
+    click_text(ctx, app, time, "Cancel");
+    app.config.track_levels[0] = 0.33;
+    frame(ctx, app, time, vec![]);
+    click_text(ctx, app, time, "Projects");
+    click_text(ctx, app, time, "Save configuration and audio snapshot");
+    finish_jobs(ctx, app, time);
+    assert!(
+        app.app_state == AppState::Init && !app.busy(),
+        "Saving the offline checkpoint must allow exit: {}",
+        app.status
+    );
+    let saved = project::load_project(&entry).unwrap().unwrap();
+    assert_eq!(saved.track_levels[0], 0.33);
+    let stored = crate::session::load_snapshot(&entry, saved.snapshot.as_deref().unwrap()).unwrap();
+    assert_eq!(stored.tracks[0].len, 128);
+    assert_eq!(stored.tracks[0].read(0), [0.125, -0.25]);
+    let saved_bytes = formal_project_bytes(&entry);
+    app.sel_project_idx = index;
+    click_text(ctx, app, time, "Open project");
+    finish_jobs(ctx, app, time);
+    app.config.track_levels[0] = 0.44;
+    frame(ctx, app, time, vec![]);
+    click_text(ctx, app, time, "Projects");
+    click_text(ctx, app, time, "Save configuration and audio snapshot");
+    app.regression_stall_checkpoint();
+    finish_jobs(ctx, app, time);
+    click_text(ctx, app, time, "Discard session changes");
+    finish_jobs(ctx, app, time);
+    assert!(app.app_state == AppState::Init && !app.busy());
+    assert_eq!(formal_project_bytes(&entry), saved_bytes);
+    assert!(
+        app.safety.scan.is_none() && !app.safety.open_pending(),
+        "Offline recovery must not initiate driver access"
+    );
+    app.language = previous_language;
+}
+
+fn recovery_save_boundaries_ui_regression(ctx: &egui::Context, app: &mut MyApp, time: &mut f64) {
+    use crate::{
+        config::AppConfig,
+        engine::{core::AudioSnapshot, loop_audio::OfflinePages},
+        project,
+        recovery::Store,
+    };
+    let language = app.language;
+    let left = app.left_page;
+    app.language = crate::app_support::language::Language::English;
+    let entry = project::ProjectEntry {
+        name: "Save boundaries UI".into(),
+        file: format!("save-boundary-ui-{}.json", crate::session::id()),
+    };
+    let formal = AppConfig::new(120, 0, 5);
+    let mut original = AudioSnapshot::empty(48000);
+    for n in 0..128 {
+        original.tracks[0].write(n, [0.125, -0.25], &mut OfflinePages);
+    }
+    crate::session::save_snapshot(&entry, &original, project::data_from_config(&formal)).unwrap();
+    let original_data = project::load_project(&entry).unwrap().unwrap();
+    let original_audio: std::collections::BTreeMap<_, _> = formal_project_bytes(&entry)
+        .into_iter()
+        .filter(|(p, _)| p.components().any(|c| c.as_os_str() == "snapshots"))
+        .collect();
+    let store = Store::new(entry.clone()).unwrap();
+    store.begin().unwrap();
+    let mut work = AppConfig::new(147, 0, 5);
+    work.track_levels[0] = 0.27;
+    let mut working_audio = AudioSnapshot::empty(48000);
+    for n in 0..384 {
+        working_audio.tracks[0].write(n, [0.75, -0.5], &mut OfflinePages);
+    }
+    store
+        .save(
+            &store.ticket(),
+            &working_audio,
+            &project::data_from_config(&work),
+        )
+        .unwrap();
+    let index = app.projects.len();
+    app.projects.push(entry.clone());
+    app.sel_project_idx = index;
+    click_text(ctx, app, time, "Open project");
+    finish_jobs(ctx, app, time);
+    click_text(ctx, app, time, "Recover checkpoint");
+    finish_jobs(ctx, app, time);
+    app.config.track_levels[0] = 0.31;
+    frame(ctx, app, time, vec![]);
+    press(ctx, app, time, Key::S, Modifiers::CTRL);
+    finish_jobs(ctx, app, time);
+    assert!(app.app_state == AppState::MainLoop);
+    let config_only = project::load_project(&entry).unwrap().unwrap();
+    assert_eq!(config_only.track_levels[0], 0.31);
+    assert_eq!(config_only.snapshot, original_data.snapshot);
+    let audio_after: std::collections::BTreeMap<_, _> = formal_project_bytes(&entry)
+        .into_iter()
+        .filter(|(p, _)| p.components().any(|c| c.as_os_str() == "snapshots"))
+        .collect();
+    assert_eq!(
+        audio_after, original_audio,
+        "Ctrl+S must retain the previous formal audio byte-for-byte"
+    );
+    let retained = store
+        .inspect()
+        .unwrap()
+        .expect("Config-only save must keep unsaved audio recovery");
+    assert_eq!(store.load(&retained).unwrap().0.tracks[0].len, 384);
+    assert_eq!(app.view.tracks[0].frames, 384);
+    assert!(app.regression_recovery_state().0);
+    app.left_page = crate::app::LeftPage::Session;
+    app.config.track_levels[0] = 0.41;
+    frame(ctx, app, time, vec![]);
+    click_text(ctx, app, time, "Save audio snapshot");
+    assert!(app.busy());
+    // The click has queued a checkpoint with 0.41. This newer edit must not be
+    // folded into that save or forgotten when its disk worker reports success.
+    press(ctx, app, time, Key::X, Modifiers::NONE);
+    let after_save_edit = app.config.track_levels[0];
+    assert!(
+        after_save_edit > 0.41,
+        "Performance keys must remain usable while saving"
+    );
+    finish_jobs(ctx, app, time);
+    assert!(app.app_state == AppState::MainLoop);
+    let saved = project::load_project(&entry).unwrap().unwrap();
+    assert_eq!(saved.track_levels[0], 0.41);
+    assert_eq!(app.config.track_levels[0], after_save_edit);
+    assert!(
+        app.regression_recovery_state().0,
+        "Post-save edits still need recovery"
+    );
+    assert_eq!(
+        crate::session::load_snapshot(&entry, saved.snapshot.as_deref().unwrap())
+            .unwrap()
+            .tracks[0]
+            .len,
+        384
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    app.regression_recovery_due();
+    loop {
+        frame(ctx, app, time, vec![]);
+        if let Some(info) = store.inspect().unwrap() {
+            if let Ok((audio, data)) = store.load(&info) {
+                if data.track_levels[0] == after_save_edit {
+                    assert_eq!(audio.tracks[0].len, 384);
+                    assert_eq!(audio.tracks[0].read(0), [0.75, -0.5]);
+                    break;
+                }
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Latest unsaved edits never reached recovery"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert_eq!(
+        project::load_project(&entry).unwrap().unwrap().track_levels[0],
+        0.41,
+        "Automatic recovery must not advance the formal save"
+    );
+    click_text(ctx, app, time, "Projects");
+    click_text(ctx, app, time, "Discard session changes");
+    finish_jobs(ctx, app, time);
+    assert!(app.app_state == AppState::Init && !app.busy());
+    assert_eq!(
+        project::load_project(&entry).unwrap().unwrap().track_levels[0],
+        0.41
+    );
+    app.language = language;
+    app.left_page = left;
+}
+
 pub fn run() {
     assert!(
         std::env::args().any(|a| a == "--offline")
@@ -1541,6 +1989,8 @@ pub fn run() {
     super::theme::apply(&ctx);
     let mut app = MyApp::new();
     let mut time = 0.0;
+    recovery_exit_ui_regression(&ctx, &mut app, &mut time);
+    recovery_save_boundaries_ui_regression(&ctx, &mut app, &mut time);
     for mode in ["performance", "vocoder", "roll", "reverb"] {
         super::preview::configure(&mut app, mode);
         for focus in [

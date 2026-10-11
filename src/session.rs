@@ -93,8 +93,20 @@ pub fn wav_spec(sr: u32) -> hound::WavSpec {
     }
 }
 pub fn write_audio(path: &Path, sr: u32, audio: &LoopAudio) -> Result<AudioFile> {
+    write_audio_cancellable(path, sr, audio, &|| false)
+}
+fn write_audio_cancellable(
+    path: &Path,
+    sr: u32,
+    audio: &LoopAudio,
+    cancelled: &impl Fn() -> bool,
+) -> Result<AudioFile> {
+    ensure!(!cancelled(), "Snapshot writing cancelled");
     let mut wav = hound::WavWriter::create(path, wav_spec(sr))?;
     for i in 0..audio.len {
+        if i % 4096 == 0 {
+            ensure!(!cancelled(), "Snapshot writing cancelled");
+        }
         for sample in audio.read(i) {
             wav.write_sample(sample)?;
         }
@@ -146,7 +158,18 @@ fn read_audio(root: &Path, item: &AudioFile, sr: u32) -> Result<LoopAudio> {
 }
 
 pub fn write_bundle(root: &Path, snapshot: &AudioSnapshot, config: ProjectData) -> Result<()> {
-    fs::create_dir_all(root)?;
+    write_bundle_cancellable(root, snapshot, config, &|| false)
+}
+/// Filesystem worker only. Cancellation leaves an incomplete bundle for its
+/// caller to remove; no published project or recovery pointer is changed.
+pub fn write_bundle_cancellable(
+    root: &Path,
+    snapshot: &AudioSnapshot,
+    config: ProjectData,
+    cancelled: &impl Fn() -> bool,
+) -> Result<()> {
+    ensure!(!cancelled(), "Snapshot writing cancelled");
+    crate::storage::ensure_directory(root)?;
     let mut manifest = Manifest {
         histories: Vec::new(),
         version: FORMAT_VERSION,
@@ -176,7 +199,8 @@ pub fn write_bundle(root: &Path, snapshot: &AudioSnapshot, config: ProjectData) 
         {
             return Ok(Some(file.clone()));
         }
-        let file = write_audio(&root.join(name), snapshot.sample_rate, audio)?;
+        let file =
+            write_audio_cancellable(&root.join(name), snapshot.sample_rate, audio, cancelled)?;
         written.push((audio.len, pages, file.clone()));
         Ok(Some(file))
     };
@@ -213,6 +237,7 @@ pub fn write_bundle(root: &Path, snapshot: &AudioSnapshot, config: ProjectData) 
         }
         manifest.histories.push(files);
     }
+    ensure!(!cancelled(), "Snapshot writing cancelled");
     project::atomic_write(
         &root.join("manifest.json"),
         &serde_json::to_vec_pretty(&manifest)?,

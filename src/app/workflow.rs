@@ -37,75 +37,39 @@ impl MyApp {
             || self.reconnecting
             || self.engine_transition
             || !self.audio.has_live_input()
+            || self.audio.device_busy()
+            || self.safety.open_pending()
+            || std::time::Instant::now() < self.next_output_retry
         {
-            return;
-        }
-        if std::time::Instant::now() < self.next_output_retry {
             return;
         }
         match result {
             Ok(target) => {
                 let errors = self.audio.diagnostics.output_errors.load(Ordering::Relaxed);
                 if self.audio.online
-                    && target.id == self.output_endpoint_id
-                    && target.name == self.audio.curr_output_name()
+                    && target.id == self.audio.output_endpoint_id
                     && errors == self.output_error_seen
                 {
                     return;
                 }
-                match self
-                    .audio
-                    .retarget_output(&target.device, self.buffer_frames)
-                {
-                    Ok(()) => {
-                        self.output_endpoint_id = target.id;
-                        self.output_error_seen = errors;
-                        self.config.system_config.output_device.value = target.name.clone();
-                        if !self
-                            .config
-                            .system_config
-                            .output_device
-                            .options
-                            .contains(&target.name)
-                        {
-                            self.config
-                                .system_config
-                                .output_device
-                                .options
-                                .push(target.name.clone());
-                        }
-                        self.loopback_connected = false;
-                        self.config.calibration = None;
-                        self.measurement = None;
-                        self.status = format!(
-                            "{}: {}",
-                            self.language
-                                .choose("Following system output", "已跟随系统输出"),
-                            target.name
-                        );
-                    }
-                    Err(error) => {
-                        self.audio.park_output();
-                        self.status = format!(
-                            "{}: {error}",
-                            self.language
-                                .choose("Cannot switch output; retrying", "输出切换失败，正在重试")
-                        );
-                        self.next_output_retry = std::time::Instant::now() + Duration::from_secs(2);
-                    }
+                self.output_error_seen = errors;
+                if let Err(error) = self.audio.request_output(None, self.buffer_frames) {
+                    self.status = error.to_string();
                 }
+                self.next_output_retry = std::time::Instant::now() + Duration::from_secs(2);
+                self.loopback_connected = false;
+                self.config.calibration = None;
+                self.measurement = None;
             }
             Err(error) => {
-                self.audio.park_output();
+                if self.audio.online {
+                    self.audio.park_output();
+                }
+                self.status = format!("Waiting for system output: {error}");
                 self.output_endpoint_id.clear();
                 self.loopback_connected = false;
                 self.config.calibration = None;
                 self.measurement = None;
-                self.status = format!(
-                    "{}: {error}",
-                    self.language
-                        .choose("Waiting for system output", "等待系统输出设备")
-                );
             }
         }
     }
@@ -152,80 +116,12 @@ impl MyApp {
     }
     pub fn reconnect(&mut self) {
         if self.calibration_held() {
-            self.status = self
-                .language
-                .text("Disconnect the loopback cable and restore monitoring first")
-                .into();
-            return;
-        }
-        self.stop_audition();
-        if self.busy() || !self.stopped() || self.taking() {
             return;
         }
         if self.player_open {
             self.close_player();
         }
-        self.reconnecting = self.send(Control::Capture(Box::new(AudioSnapshot::empty(
-            self.audio.config.sample_rate.0,
-        ))));
-    }
-    pub(super) fn finish_reconnect(&mut self, mut snapshot: AudioSnapshot) {
-        self.reconnecting = false;
-        self.audio.suspend();
-        let result = if self.config.system_config.follow_system_output {
-            AudioIO::with_system_output(
-                &self.config.system_config.input_device.value,
-                self.buffer_frames,
-            )
-        } else {
-            AudioIO::with_buffer(
-                &self.config.system_config.input_device.value,
-                &self.config.system_config.output_device.value,
-                self.buffer_frames,
-            )
-        };
-        let audio = match result {
-            Ok(value) => value,
-            Err(error) => {
-                self.audio.resume();
-                self.status = format!("Reconnect failed; previous audio retained: {error}");
-                return;
-            }
-        };
-        self.audio = audio;
-        self.audition_requests = Default::default();
-        self.previewing = false;
-        self.candidate_audition = false;
-        self.note_audition = false;
-        self.audition_target = None;
-        self.send(Control::Spectrum(self.visualizer_enabled));
-        if self.audio.online {
-            self.config.system_config.output_device.value =
-                self.audio.curr_output_name().to_owned();
-        }
-        self.loopback_connected = false;
-        self.config.calibration = None;
-        self.measurement = None;
-        self.engine_transition = true;
-        let sr = self.audio.config.sample_rate.0;
-        let index = self.active_project_idx.unwrap_or(0);
-        let data = project::data_from_config(&self.config);
-        let (tx, rx) = mpsc::channel();
-        self.job = Some(rx);
-        std::thread::spawn(move || {
-            let result = (|| -> anyhow::Result<JobResult> {
-                crate::session::resample(&mut snapshot, sr)?;
-                let mut config = AppConfig::new(120, 85, 5);
-                project::apply_data_to_config(&mut config, data.clone());
-                let mut core = Box::new(RenderCore::new(sr));
-                core.configure(&mut Parameters::from_config(&config, sr));
-                core.restore(&mut snapshot);
-                Ok(JobResult::Loaded { index, data, core })
-            })();
-            let _ = tx.send(
-                result.unwrap_or_else(|e| JobResult::Error(format!("Audio restore failed: {e}"))),
-            );
-        });
+        self.request_reconnect_checkpoint();
     }
     pub fn open_project(&mut self, index: usize) {
         if self.busy() || index >= self.projects.len() {
@@ -234,6 +130,7 @@ impl MyApp {
         self.engine_transition = true;
         self.sel_project_idx = index;
         let entry = self.projects[index].clone();
+        let writable = !self.read_only;
         let sr = self.audio.config.sample_rate.0;
         let (tx, rx) = mpsc::channel();
         self.job = Some(rx);
@@ -251,7 +148,14 @@ impl MyApp {
                     crate::session::resample(&mut snapshot, sr)?;
                     core.restore(&mut snapshot);
                 }
-                Ok(JobResult::Loaded { index, data, core })
+                let recovery =
+                    runtime_safety::OpenedRecovery::prepare(entry, &core, &data, writable);
+                Ok(JobResult::Loaded {
+                    index,
+                    data,
+                    core,
+                    recovery: Some(recovery),
+                })
             })();
             let _ = tx.send(
                 result.unwrap_or_else(|e| JobResult::Error(format!("Cannot open project: {e}"))),
@@ -270,6 +174,7 @@ impl MyApp {
             return;
         };
         let mut data = project::data_from_config(&self.config);
+        self.safety.config_save_started();
         let (tx, rx) = mpsc::channel();
         self.job = Some(rx);
         self.saving = true;
@@ -288,27 +193,7 @@ impl MyApp {
         });
     }
     pub fn save_snapshot(&mut self) {
-        if self.busy() || self.read_only {
-            return;
-        }
-        let Some(entry) = self
-            .active_project_idx
-            .and_then(|i| self.projects.get(i))
-            .cloned()
-        else {
-            return;
-        };
-        if !self.sync_config() {
-            return;
-        }
-        self.saving = self.send(Control::Snapshot {
-            snapshot: Box::new(AudioSnapshot::empty(self.audio.config.sample_rate.0)),
-            entry,
-            data: project::data_from_config(&self.config),
-        });
-        if self.saving {
-            self.status = "Saving an immutable audio snapshot in the background...".into();
-        }
+        self.save_audio_checkpoint();
     }
     pub fn start_take(&mut self) {
         if let Some(reason) = self.take_block_reason() {

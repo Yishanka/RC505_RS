@@ -240,6 +240,21 @@ pub struct AudioSnapshot {
     pub undone: [bool; TRACKS],
 }
 impl AudioSnapshot {
+    /// Off-callback copy of the page tables; PCM remains shared and immutable.
+    pub fn shared_clone(&self) -> Self {
+        let mut copy = Self::empty(self.sample_rate);
+        let mut pool = super::loop_audio::OfflinePages;
+        copy.at = self.at;
+        copy.has_histories = self.has_histories;
+        copy.undo_valid = self.undo_valid;
+        copy.undone = self.undone;
+        for i in 0..TRACKS {
+            self.tracks[i].share_into(&mut copy.tracks[i], &mut pool);
+            self.undo[i].share_into(&mut copy.undo[i], &mut pool);
+            self.histories[i].copy_into(&mut copy.histories[i], &mut pool);
+        }
+        copy
+    }
     pub fn empty(sr: u32) -> Self {
         Self {
             histories: std::array::from_fn(|_| super::history::AudioHistory::new(sr)),

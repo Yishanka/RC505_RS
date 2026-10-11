@@ -739,8 +739,16 @@ fn left(ui: &mut egui::Ui, app: &mut MyApp) {
             ui.add_enabled_ui(!follow && !app.calibration_held(), |ui| {
                 parameters::choice(ui, &mut app.config.system_config.output_device)
             });
-            if nav::button(ui, lang.choose("Refresh devices", "刷新设备列表")).clicked() {
-                app.config.system_config.refresh();
+            if nav::register(ui.add_enabled(
+                !app.safety.scan.as_ref().is_some_and(|s| s.pending()),
+                egui::Button::new(lang.choose("Refresh devices", "刷新设备列表")),
+            ))
+            .clicked()
+            {
+                app.refresh_devices();
+            }
+            if !app.safety.scan_status.is_empty() {
+                theme::caption(ui, &app.safety.scan_status);
             }
             theme::control_row(ui, |ui| {
                 ui.label(lang.text("Buffer"));

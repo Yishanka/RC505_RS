@@ -86,6 +86,8 @@ impl MyApp {
             index
         };
         let sr = self.audio.config.sample_rate.0;
+        let entry = self.projects[index].clone();
+        let writable = !self.read_only;
         let (tx, rx) = mpsc::channel();
         self.job = Some(rx);
         self.engine_transition = true;
@@ -101,7 +103,14 @@ impl MyApp {
                 let (data, core) = crate::replay::streaming::prepare_import(source, frame, sr)?;
                 // Loop audio, partial recordings and history are preserved;
                 // import deliberately opens stopped to avoid unexpected sound.
-                Ok(JobResult::ReplayImported { index, data, core })
+                let recovery =
+                    runtime_safety::OpenedRecovery::prepare(entry, &core, &data, writable);
+                Ok(JobResult::ReplayImported {
+                    index,
+                    data,
+                    core,
+                    recovery,
+                })
             })();
             let _ = tx.send(result.unwrap_or_else(|error| {
                 JobResult::Error(format!("Replay import failed: {error}"))

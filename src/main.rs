@@ -8,6 +8,7 @@ mod maintenance;
 mod phrases;
 mod presets;
 mod project;
+mod recovery;
 mod replay;
 mod session;
 mod state;

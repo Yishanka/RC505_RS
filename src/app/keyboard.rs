@@ -57,7 +57,10 @@ impl MyApp {
         }
         // Physical performance polling intentionally removes auto-repeat from
         // buttons. Panel traversal keeps the original navigation key events.
-        if self.editor.library_delete.is_some() || self.storage_ui.modal_open() {
+        if self.editor.library_delete.is_some()
+            || self.storage_ui.modal_open()
+            || self.safety.decision.is_some()
+        {
             self.performance_keys.suspend();
             for index in 0..8 {
                 self.release_momentary(index);
@@ -70,7 +73,9 @@ impl MyApp {
                 && !self.storage_ui.busy()
                 && self.editor.library_delete_job.is_none()
             {
-                if self.editor.library_delete.is_some() {
+                if self.safety.decision.is_some() {
+                    self.cancel_recovery_offer();
+                } else if self.editor.library_delete.is_some() {
                     self.editor.library_delete = None;
                 } else {
                     self.storage_ui.close();
